@@ -99,8 +99,9 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         type_fa = TYPE_NAMES.get(stype, stype)
         await query.edit_message_text(
             f"📅 <b>افزودن {type_fa}</b>\n\n"
-            "فرمت: <code>درس, استاد, تاریخ(YYYY-MM-DD), ساعت, مکان, توضیح(اختیاری)</code>\n\n"
-            "مثال:\n<code>آناتومی, دکتر محمدی, 2024-03-20, 09:00, کلاس A2</code>",
+            "فرمت: <code>درس, استاد, تاریخ(شمسی YYYY/MM/DD), ساعت, مکان, گروه(اختیاری), توضیح(اختیاری)</code>\n\n"
+            "مثال:\n<code>آناتومی, دکتر محمدی, 1404/01/15, 09:00, کلاس A2, هر دو</code>\n"
+            "<i>گروه: ۱ یا ۲ یا هر دو (پیش‌فرض: هر دو)</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ لغو", callback_data='admin:main')
@@ -224,8 +225,56 @@ async def show_schedule_main(message: Message, uid: int, user: dict):
 #  پارسر افزودن برنامه (از message_router)
 # ══════════════════════════════════════════════════
 
+def _jalali_to_gregorian(jy: int, jm: int, jd: int) -> tuple:
+    """تبدیل شمسی به میلادی برای ذخیره در دیتابیس"""
+    jy -= 979
+    jm -= 1
+    jd -= 1
+    j_day_no = 365 * jy + (jy // 33) * 8 + (jy % 33 + 3) // 4
+    for i in range(jm):
+        j_day_no += [31,31,31,31,31,31,30,30,30,30,30,29][i]
+    j_day_no += jd
+    g_day_no = j_day_no + 79
+    gy = 1600 + 400 * (g_day_no // 146097)
+    g_day_no %= 146097
+    leap = True
+    if g_day_no >= 36525:
+        g_day_no -= 1
+        gy += 100 * (g_day_no // 36524)
+        g_day_no %= 36524
+        leap = g_day_no >= 365
+        if leap: g_day_no += 1
+    gy += 4 * (g_day_no // 1461)
+    g_day_no %= 1461
+    if g_day_no >= 366:
+        leap = False
+        g_day_no -= 1
+        gy += g_day_no // 365
+        g_day_no %= 365
+    g_l = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    gm = 0
+    for i, days in enumerate(g_l):
+        if g_day_no < days:
+            gm = i + 1
+            break
+        g_day_no -= days
+    return gy, gm, g_day_no + 1
+
+
+def _parse_jalali_date(date_str: str) -> str:
+    """تبدیل 1404/01/15 یا 1404-01-15 به YYYY-MM-DD میلادی"""
+    date_str = date_str.strip().replace('/', '-')
+    parts = date_str.split('-')
+    if len(parts) == 3:
+        jy, jm, jd = int(parts[0]), int(parts[1]), int(parts[2])
+        if jy > 1400:  # تاریخ شمسی
+            gy, gm, gd = _jalali_to_gregorian(jy, jm, jd)
+            return f"{gy:04d}-{gm:02d}-{gd:02d}"
+    return date_str  # اگه میلادی بود برگردون
+
+
 async def handle_add_schedule_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پارس متن افزودن برنامه توسط ادمین"""
+    """پارس متن افزودن برنامه توسط ادمین — با تاریخ شمسی"""
     from utils import broadcast_message
     stype = context.user_data.pop('schedule_type', 'class')
     text  = update.message.text.strip()
@@ -234,30 +283,38 @@ async def handle_add_schedule_text(update: Update, context: ContextTypes.DEFAULT
         parts = [p.strip() for p in text.split(',')]
         if len(parts) < 5:
             raise ValueError("حداقل ۵ فیلد لازم است")
-        lesson, teacher, date, time_str, location = parts[:5]
-        notes = parts[5] if len(parts) > 5 else ''
-        datetime.strptime(date, '%Y-%m-%d')  # اعتبارسنجی تاریخ
+        lesson, teacher, raw_date, time_str, location = parts[:5]
+        group = parts[5].strip() if len(parts) > 5 else 'هر دو'
+        notes = parts[6].strip() if len(parts) > 6 else ''
 
-        await db.add_schedule(stype, lesson, teacher, date, time_str, location, notes)
+        # تبدیل تاریخ شمسی به میلادی
+        date = _parse_jalali_date(raw_date)
+        from datetime import datetime as dt
+        dt.strptime(date, '%Y-%m-%d')  # اعتبارسنجی
 
-        # اطلاع‌رسانی به کاربران
+        # نرمال‌سازی گروه
+        if group not in ('1', '2', 'هر دو', ''):
+            group = 'هر دو'
+
+        await db.add_schedule(stype, lesson, teacher, date, time_str, location, notes, group)
+
         ntype   = 'exam' if stype == 'exam' else 'schedule'
         users   = await db.notif_users(ntype)
         type_fa = TYPE_NAMES.get(stype, stype)
-        msg     = (
+        g_label = f" | گروه {group}" if group not in ('هر دو', '') else ''
+        msg = (
             f"📅 <b>{type_fa} جدید:</b> {lesson}\n"
             f"👨‍🏫 {teacher}  |  {fmt_jalali(date)} ساعت {time_str}\n"
-            f"📍 {location}"
+            f"📍 {location}{g_label}"
         )
         sent, _ = await broadcast_message(context.bot, users, msg)
 
-        context.user_data.pop('awaiting_search', None)
-        context.user_data.pop('search_mode', None)
-        context.user_data.pop('mode', None)
+        for k in ('awaiting_search', 'search_mode', 'mode'):
+            context.user_data.pop(k, None)
 
         await update.message.reply_text(
             f"✅ <b>{type_fa} اضافه شد!</b>\n"
-            f"📌 {lesson}  |  {date} {time_str}\n"
+            f"📌 {lesson}  |  {fmt_jalali(date)} {time_str}{g_label}\n"
             f"🔔 {sent} نفر مطلع شدند.",
             parse_mode='HTML'
         )
@@ -265,6 +322,7 @@ async def handle_add_schedule_text(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(
             f"❌ خطا: {e}\n\n"
             "فرمت صحیح:\n"
-            "<code>درس, استاد, YYYY-MM-DD, HH:MM, مکان, توضیح</code>",
+            "<code>درس, استاد, 1404/01/15, HH:MM, مکان, گروه, توضیح</code>\n"
+            "<i>گروه: ۱ یا ۲ یا هر دو</i>",
             parse_mode='HTML'
         )
