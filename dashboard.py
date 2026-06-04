@@ -1,215 +1,153 @@
 """
-🚀 Start — ثبت‌نام و ورود کاربر
+🩺 داشبورد — با فراخوانی موازی دیتابیس برای سرعت
 """
 import os
+import asyncio
 import logging
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
+from telegram.ext import ContextTypes
 from database import db
-from utils import main_keyboard, admin_keyboard, content_admin_keyboard, get_keyboard_for_user
+from utils import progress_bar, get_rank, exam_countdown
 
-logger = logging.getLogger(__name__)
-
-ADMIN_ID  = int(os.getenv('ADMIN_ID', '0'))
-REGISTER  = 0
-STEP_NAME = 10
-STEP_GROUP = 12
+logger  = logging.getLogger(__name__)
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
 
-# ══════════════════════════════════════════════════
-#  /start
-# ══════════════════════════════════════════════════
+async def build_dashboard_text(uid: int) -> tuple:
+    """ساخت متن داشبورد — همه کوئری‌ها موازی"""
+    user, stats, exams, new_res = await asyncio.gather(
+        db.get_user(uid),
+        db.user_stats(uid),
+        db.upcoming_exams(7),
+        db.new_resources_count(7),
+    )
 
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid        = update.effective_user.id
-    first_name = update.effective_user.first_name or ''
-    user       = await db.get_user(uid)
-
-    # ── کاربر جدید ──
     if not user:
-        context.user_data.clear()
-        await update.message.reply_text(
-            f"🩺 <b>به ربات آموزشی پزشکی خوش آمدید!</b>\n\n"
-            f"سلام <b>{first_name}</b> عزیز 👋\n\n"
-            "این ربات به شما کمک می‌کند:\n"
-            "📚 منابع و جزوات درسی\n"
-            "🧪 بانک سوال و تمرین هوشمند\n"
-            "📅 برنامه کلاس‌ها و امتحانات\n"
-            "🎫 پشتیبانی و پاسخ سریع\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "برای شروع، ابتدا ثبت‌نام کنید.\n"
-            "فقط <b>۲ مرحله</b> ساده! 🚀",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ شروع ثبت‌نام", callback_data='register:start')
-            ]])
-        )
-        return REGISTER
+        return "❌ کاربر پیدا نشد.", None
 
-    # ── در انتظار تأیید ──
-    if not user.get('approved') and uid != ADMIN_ID:
-        await update.message.reply_text(
-            "⏳ <b>در انتظار تأیید</b>\n\n"
-            f"سلام <b>{user.get('name', '')}</b> عزیز،\n"
-            "ثبت‌نام شما انجام شده و منتظر تأیید ادمین است.\n\n"
-            "به زودی دسترسی شما فعال می‌شود. 🙏",
-            parse_mode='HTML'
-        )
-        return ConversationHandler.END
+    # تیکت‌های باز
+    open_tickets = 0
+    try:
+        tickets = await db.ticket_get_user(uid)
+        open_tickets = sum(1 for t in tickets if t.get('status') == 'open')
+    except Exception:
+        pass
 
-    # ── کاربر تأییدشده ──
-    kb = get_keyboard_for_user(user, uid)
-    await update.message.reply_text(
-        f"🩺 <b>خوش برگشتید {user.get('name', '')} عزیز!</b>",
-        parse_mode='HTML',
-        reply_markup=kb
-    )
-    await _show_dashboard(update, context)
-    return ConversationHandler.END
-
-
-# ══════════════════════════════════════════════════
-#  ثبت‌نام — Callbacks
-# ══════════════════════════════════════════════════
-
-async def register_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data  = query.data
-
-    if data == 'register:start':
-        context.user_data['reg_step'] = 'name'
-        await query.edit_message_text(
-            "📝 <b>مرحله ۱ از ۲ — نام و نام خانوادگی</b>\n\n"
-            "👤 لطفاً نام کامل خود را بنویسید:\n\n"
-            "<i>مثال: علی احمدی</i>",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ انصراف", callback_data='register:cancel')
-            ]])
-        )
-        return STEP_NAME
-
-    elif data == 'register:cancel':
-        await query.edit_message_text(
-            "❌ ثبت‌نام لغو شد.\n\nبرای شروع مجدد /start بزنید."
-        )
-        return ConversationHandler.END
-
-    elif data == 'register:group1':
-        return await _save_group(update, context, '1')
-
-    elif data == 'register:group2':
-        return await _save_group(update, context, '2')
-
-    return REGISTER
-
-
-async def step_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    if len(name) < 3:
-        await update.message.reply_text("⚠️ نام باید حداقل ۳ حرف باشد. مجدد وارد کنید:")
-        return STEP_NAME
-    if len(name) > 50:
-        await update.message.reply_text("⚠️ نام نباید بیشتر از ۵۰ حرف باشد:")
-        return STEP_NAME
-
-    context.user_data['reg_name'] = name
-
-    await update.message.reply_text(
-        f"✅ <b>نام ثبت شد:</b> {name}\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        "📝 <b>مرحله ۲ از ۲ — انتخاب گروه درسی</b>\n\n"
-        "👥 گروه خود را انتخاب کنید:",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("1️⃣ گروه ۱", callback_data='register:group1'),
-                InlineKeyboardButton("2️⃣ گروه ۲", callback_data='register:group2'),
-            ],
-            [InlineKeyboardButton("❌ انصراف", callback_data='register:cancel')],
-        ])
-    )
-    return STEP_GROUP
-
-
-async def _save_group(update, context, group: str):
-    query    = update.callback_query
-    uid      = update.effective_user.id
-    username = update.effective_user.username
-    name     = context.user_data.get('reg_name', '')
-
-    if not name:
-        await query.edit_message_text("❌ خطا. لطفاً /start بزنید.")
-        return ConversationHandler.END
-
-    await db.create_user(uid, name, '', group, username)
-
-    if uid == ADMIN_ID:
-        await db.update_user(uid, {'approved': True})
-        await query.edit_message_text(
-            f"🎉 <b>ثبت‌نام کامل شد!</b>\n\n"
-            f"👤 نام: <b>{name}</b>  |  👥 گروه: <b>{group}</b>\n"
-            f"🔑 نقش: <b>ادمین</b>  |  ✅ دسترسی فعال",
-            parse_mode='HTML'
-        )
-        await context.bot.send_message(
-            uid, "به پنل ادمین خوش آمدید! 👨‍⚕️",
-            reply_markup=admin_keyboard()
-        )
-        await _send_dashboard_by_id(context, uid)
-    else:
-        # اطلاع‌رسانی به ادمین
+    # امتحانات نزدیک
+    exam_lines = []
+    for e in exams[:2]:
         try:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"🔔 <b>درخواست ثبت‌نام جدید</b>\n\n"
-                f"👤 نام: <b>{name}</b>\n"
-                f"👥 گروه: <b>{group}</b>\n"
-                f"📱 یوزرنیم: @{username or 'ندارد'}\n"
-                f"🆔 آیدی: <code>{uid}</code>",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{uid}'),
-                    InlineKeyboardButton("❌ رد",    callback_data=f'admin:reject:{uid}'),
-                ]])
-            )
-        except Exception as e:
-            logger.warning(f"Cannot notify admin: {e}")
+            d = datetime.strptime(e['date'], '%Y-%m-%d')
+            days = max(0, (
+                d.replace(hour=0, minute=0, second=0, microsecond=0)
+                - datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            ).days)
+            exam_lines.append(f"  📝 {e['lesson']} — {exam_countdown(days)}")
+        except Exception:
+            exam_lines.append(f"  📝 {e.get('lesson', '')}")
+    exam_text = '\n'.join(exam_lines) if exam_lines else "  ✅ امتحانی نزدیک نیست"
 
-        await query.edit_message_text(
-            f"🎉 <b>ثبت‌نام با موفقیت انجام شد!</b>\n\n"
-            f"👤 نام: <b>{name}</b>  |  👥 گروه: <b>{group}</b>\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "⏳ <b>در انتظار تأیید ادمین...</b>\n\n"
-            "پس از تأیید، پیام دریافت خواهید کرد. 🙏",
-            parse_mode='HTML'
+    # نقاط ضعف
+    weak     = stats['weak_topics'][:3]
+    weak_str = '، '.join(weak) if weak else 'ندارید 🎉'
+
+    pct  = stats['percentage']
+    bar  = progress_bar(pct)
+    rank = get_rank(stats['correct_answers'])
+    act  = stats['week_activity']
+    act_stars = '🔥' * min(act // 3, 5) if act > 0 else '💤'
+
+    notif_s      = user.get('notification_settings', {})
+    active_notifs = sum(1 for v in notif_s.values() if v)
+
+    group_icon = "1️⃣" if str(user.get('group', '')) == '1' else "2️⃣"
+    role       = user.get('role', 'student')
+    role_badge = (
+        " | 👑 ادمین" if uid == ADMIN_ID
+        else " | 🎓 ادمین محتوا" if role == 'content_admin'
+        else ""
+    )
+
+    sid_line = (
+        f"🎓 {user.get('student_id', '')}\n"
+        if user.get('student_id')
+        else ""
+    )
+
+    text = (
+        f"🩺 <b>داشبورد — {user['name']}</b>{role_badge}\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 گروه {group_icon}  {sid_line}\n"
+        f"📊 <b>آمادگی تستی</b>\n"
+        f"  {bar} <b>{pct}%</b>  {rank}\n\n"
+        f"📈 <b>آمار من</b>\n"
+        f"  🧪 سوال: <b>{stats['total_answers']}</b>  "
+        f"✅ صحیح: <b>{stats['correct_answers']}</b>  "
+        f"📥 دانلود: <b>{stats['downloads']}</b>\n"
+        f"  {act_stars} فعالیت این هفته: <b>{act}</b> بار\n\n"
+        f"⏳ <b>امتحانات پیش رو</b>\n{exam_text}\n\n"
+        f"⚡ <b>نقاط ضعف:</b> {weak_str}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📚 منابع جدید این هفته: <b>{new_res}</b>  "
+        f"🔔 اعلان‌های فعال: <b>{active_notifs}/4</b>"
+    )
+    if open_tickets:
+        text += f"\n🎫 تیکت‌های باز: <b>{open_tickets}</b>"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔄 بروزرسانی",    callback_data='dashboard:refresh'),
+            InlineKeyboardButton("📊 آمار کامل",     callback_data='stats:main'),
+        ],
+        [
+            InlineKeyboardButton("🧪 تمرین هوشمند", callback_data='questions:weak'),
+            InlineKeyboardButton("🏆 جدول برترین",  callback_data='dashboard:leaderboard'),
+        ],
+        [
+            InlineKeyboardButton("🔔 اعلان‌ها",     callback_data='notif:main'),
+            InlineKeyboardButton("🎫 پشتیبانی",     callback_data='ticket:main'),
+        ],
+    ]
+    if uid == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("👨‍⚕️ پنل ادمین", callback_data='admin:main')])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def _build_leaderboard_text(uid: int) -> tuple:
+    leaders = await db.get_leaderboard(10)
+    lines   = ["🏆 <b>جدول برترین‌ها</b>\n━━━━━━━━━━━━━━━━\n"]
+    medals  = ['🥇', '🥈', '🥉'] + ['🎖'] * 7
+    for i, u in enumerate(leaders):
+        name    = u.get('name', 'کاربر')
+        correct = u.get('correct_answers', 0)
+        total   = u.get('total_answers', 0)
+        pct     = round(correct / total * 100, 1) if total > 0 else 0
+        marker  = " ← شما" if u.get('user_id') == uid else ""
+        lines.append(
+            f"{medals[i]} <b>{name}</b> — گروه {u.get('group', '')}\n"
+            f"   ✅ {correct} صحیح از {total}  |  📈 {pct}%{marker}"
         )
+    text = '\n'.join(lines)
+    kb   = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔙 بازگشت", callback_data='dashboard:refresh')
+    ]])
+    return text, kb
 
-    # پاک‌سازی user_data
-    context.user_data.pop('reg_name', None)
-    context.user_data.pop('reg_step', None)
-    return ConversationHandler.END
 
+async def dashboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    await query.answer()
+    uid    = update.effective_user.id
+    action = query.data.split(':')[1] if ':' in query.data else 'refresh'
 
-# ══════════════════════════════════════════════════
-#  توابع کمکی داشبورد
-# ══════════════════════════════════════════════════
-
-async def _show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from dashboard import build_dashboard_text
-    uid = update.effective_user.id
-    try:
+    if action == 'leaderboard':
+        text, kb = await _build_leaderboard_text(uid)
+    else:
         text, kb = await build_dashboard_text(uid)
+
+    try:
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
+    except Exception:
         await update.effective_message.reply_text(text, parse_mode='HTML', reply_markup=kb)
-    except Exception as e:
-        logger.error(f"Dashboard error: {e}")
-
-
-async def _send_dashboard_by_id(context: ContextTypes.DEFAULT_TYPE, uid: int):
-    from dashboard import build_dashboard_text
-    try:
-        text, kb = await build_dashboard_text(uid)
-        await context.bot.send_message(uid, text, parse_mode='HTML', reply_markup=kb)
-    except Exception as e:
-        logger.error(f"Dashboard error: {e}")
