@@ -25,14 +25,10 @@ class DB:
 
         self.client = motor.motor_asyncio.AsyncIOMotorClient(
             uri,
-            serverSelectionTimeoutMS=30000,   # ←  5s بود، Railway نیاز به بیشتر دارد
-            connectTimeoutMS=20000,            # ←  5s بود
-            socketTimeoutMS=45000,             # ←  جدید: برای کوئری‌های طولانی
-            maxPoolSize=10,                    # ←  50 بود، Railway free tier محدود است
-            minPoolSize=1,                     # ←  5 بود
-            retryWrites=True,
-            retryReads=True,
-            waitQueueTimeoutMS=10000,          # ←  جدید: اگر pool پر بود صبر کن
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            maxPoolSize=50,
+            minPoolSize=5,
         )
         _db = self.client['medicalbot']
 
@@ -1029,4 +1025,87 @@ class DB:
 
 
 # instance جهانی
+    # ══════════════════════════════════════════════════
+    #  منابع درسی (resources.py)
+    #  FIX: این متدها قبلاً وجود نداشتند — باعث کرش می‌شدند
+    # ══════════════════════════════════════════════════
+
+    async def add_resource(self, term: str, lesson: str, topic: str,
+                           rtype: str, file_id: str, metadata: dict):
+        """اضافه کردن منبع درسی جدید"""
+        r = await self.bs_content.insert_one({
+            'term':        term,
+            'lesson':      lesson,
+            'topic':       topic,
+            'type':        rtype,
+            'file_id':     file_id,
+            'metadata':    metadata,
+            'upload_date': datetime.now().isoformat(),
+        })
+        return r.inserted_id
+
+    async def get_resources(self, term: str = None, lesson: str = None,
+                             topic: str = None, rtype: str = None):
+        """دریافت منابع با فیلتر"""
+        q = {}
+        if term   and term   != 'همه': q['term']   = term
+        if lesson and lesson != 'همه': q['lesson'] = lesson
+        if topic  and topic  != 'همه': q['topic']  = topic
+        if rtype  and rtype  != 'همه': q['type']   = rtype
+        return await self.bs_content.find(q).sort('upload_date', -1).to_list(50)
+
+    async def get_resource(self, rid: str):
+        """دریافت یک منبع با ID"""
+        try:
+            return await self.bs_content.find_one({'_id': ObjectId(rid)})
+        except Exception:
+            return None
+
+    async def inc_download(self, rid: str, uid: int):
+        """افزایش شمارنده دانلود منبع"""
+        try:
+            await self.bs_content.update_one(
+                {'_id': ObjectId(rid)},
+                {'$inc': {'metadata.downloads': 1}}
+            )
+        except Exception:
+            pass
+        await self.log(uid, 'resource_download', {'resource_id': rid})
+
+    # ══════════════════════════════════════════════════
+    #  ویدیوهای کلاس (archive.py)
+    #  FIX: این متدها قبلاً وجود نداشتند
+    # ══════════════════════════════════════════════════
+
+    async def add_video(self, lesson: str, topic: str, teacher: str,
+                        date: str, file_id: str, description: str = ''):
+        """اضافه کردن ویدیوی کلاس"""
+        r = await self.bs_content.insert_one({
+            'lesson':      lesson,
+            'topic':       topic,
+            'teacher':     teacher,
+            'date':        date,
+            'file_id':     file_id,
+            'description': description,
+            'type':        'video',
+            'upload_date': datetime.now().isoformat(),
+            'downloads':   0,
+        })
+        return r.inserted_id
+
+    async def get_videos(self, lesson: str = None, topic: str = None):
+        """دریافت لیست ویدیوها"""
+        q = {'type': 'video'}
+        if lesson: q['lesson'] = lesson
+        if topic:  q['topic']  = topic
+        return await self.bs_content.find(q).sort('date', -1).to_list(100)
+
+    async def get_video(self, vid: str):
+        """دریافت یک ویدیو با ID"""
+        try:
+            return await self.bs_content.find_one({'_id': ObjectId(vid)})
+        except Exception:
+            return None
+
+
 db = DB()
