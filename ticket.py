@@ -3,6 +3,7 @@ import os, logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db
+from utils import fmt_jalali
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -163,7 +164,7 @@ async def _show_ticket_detail(query, ticket, is_admin: bool):
             f"🆔 <b>آیدی:</b> <code>{ticket['user_id']}</code>\n"
             f"📋 <b>موضوع:</b> {ticket.get('subject','')}\n"
             f"🔘 <b>وضعیت:</b> {status_icon}\n"
-            f"📅 <b>تاریخ ثبت:</b> {ticket['created_at'][:16].replace('T',' ')}\n"
+            f"📅 <b>تاریخ ثبت:</b> {fmt_jalali(ticket['created_at'][:10])}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"💬 <b>پیام دانشجو:</b>\n{ticket['message']}\n"
         )
@@ -172,7 +173,7 @@ async def _show_ticket_detail(query, ticket, is_admin: bool):
             f"🎫 <b>تیکت #{tid}</b>\n"
             f"📋 {ticket.get('subject','')}\n"
             f"🔘 وضعیت: {status_icon}\n"
-            f"📅 {ticket['created_at'][:10]}\n"
+            f"📅 {fmt_jalali(ticket['created_at'][:10])}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"💬 <b>پیام شما:</b>\n{ticket['message']}\n"
         )
@@ -180,7 +181,7 @@ async def _show_ticket_detail(query, ticket, is_admin: bool):
     if replies:
         text += f"\n━━━━━━━━━━━━━━━━\n📨 <b>پاسخ‌های پشتیبانی ({len(replies)}):</b>\n"
         for i, r in enumerate(replies, 1):
-            at_str = r.get('at', '')[:16].replace('T', ' ') if r.get('at') else ''
+            at_str = fmt_jalali(r.get('at', '')[:10]) if r.get('at') else ''
             text += f"\n<b>پاسخ {i}</b>  <i>{at_str}</i>\n{r.get('text','')}\n"
 
     keyboard = []
@@ -355,3 +356,27 @@ async def ticket_message_handler(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("🔒 بستن تیکت", callback_data=f'ticket:admin_close:{tid}')
             ]])
         )
+
+
+async def show_ticket_main(message, uid: int):
+    """فراخوانی از message_router — دکمه 🎫 پشتیبانی"""
+    tickets    = await db.ticket_get_user(uid)
+    open_count = sum(1 for t in tickets if t['status'] == 'open')
+    done_count = sum(1 for t in tickets if t['status'] == 'closed')
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = [
+        [InlineKeyboardButton("🎫 ارسال تیکت جدید",              callback_data='ticket:new')],
+        [InlineKeyboardButton(f"📋 تیکت‌های من ({len(tickets)})", callback_data='ticket:list')],
+    ]
+    if uid == ADMIN_ID:
+        open_t = await db.ticket_get_all('open')
+        all_t  = await db.ticket_get_all()
+        keyboard.append([InlineKeyboardButton(f"🟡 تیکت‌های باز ({len(open_t)})", callback_data='ticket:admin_list')])
+        keyboard.append([InlineKeyboardButton(f"📂 همه تیکت‌ها ({len(all_t)})",   callback_data='ticket:admin_all')])
+    await message.reply_text(
+        f"🎫 <b>پشتیبانی</b>\n\n"
+        f"🟡 تیکت‌های باز: {open_count}  |  🟢 بسته‌شده: {done_count}\n\n"
+        "برای ارسال مشکل یا سوال، تیکت جدید بزنید:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
