@@ -448,6 +448,19 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 #  توابع نمایش
 # ══════════════════════════════════════════════════════════
 
+async def show_ca_main(message, uid):
+    """فراخوانی از message_router — برای دکمه ReplyKeyboard"""
+    kb = [
+        [InlineKeyboardButton("📊 نمای کلی و آمار",   callback_data='ca:overview')],
+        [InlineKeyboardButton("📘 مدیریت علوم پایه",  callback_data='ca:terms')],
+        [InlineKeyboardButton("📚 مدیریت رفرنس‌ها",   callback_data='ca:refs')],
+        [InlineKeyboardButton("✏️ طراحی سوال",         callback_data='ca:create_q')],
+        [InlineKeyboardButton("❓ مدیریت FAQ",          callback_data='ca:faq')],
+    ]
+    await message.reply_text("🎓 <b>پنل ادمین محتوا</b>",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+
+
 async def _show_main(query):
     kb = [
         [InlineKeyboardButton("📊 نمای کلی و آمار",   callback_data='ca:overview')],
