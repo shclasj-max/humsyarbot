@@ -368,12 +368,47 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── ارسال همگانی ──
     elif action == 'broadcast':
         context.user_data['mode'] = 'broadcast'
+        context.user_data.pop('broadcast_preview', None)
         await query.edit_message_text(
             "📢 <b>ارسال همگانی</b>\n\n"
-            "پیام خود را بنویسید (متن، عکس، فیلم):",
+            "پیام خود را بنویسید (متن، عکس، فیلم):\n\n"
+            "<i>💡 قبل از ارسال، preview نمایش داده می‌شود.</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data='admin:main')
+                InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
+            ]])
+        )
+        return BROADCAST
+
+    # FIX: لغو broadcast — state رو پاک و به پنل برمی‌گرده
+    elif action == 'broadcast_cancel':
+        context.user_data['mode'] = ''
+        context.user_data.pop('broadcast_preview', None)
+        await query.answer("✅ ارسال همگانی لغو شد.")
+        await _admin_menu(query)
+        return ConversationHandler.END
+
+    # تأیید ارسال بعد از preview
+    elif action == 'broadcast_confirm':
+        preview = context.user_data.get('broadcast_preview')
+        if not preview:
+            await query.answer("❌ خطا: پیام پیدا نشد.", show_alert=True)
+            context.user_data['mode'] = ''
+            await _admin_menu(query)
+            return ConversationHandler.END
+        await query.edit_message_text("⏳ <b>در حال ارسال...</b>", parse_mode='HTML')
+        await _do_broadcast(query, context, preview)
+        return ConversationHandler.END
+
+    # ویرایش پیام قبل از ارسال
+    elif action == 'broadcast_edit':
+        context.user_data['mode'] = 'broadcast'
+        context.user_data.pop('broadcast_preview', None)
+        await query.edit_message_text(
+            "📢 <b>ویرایش پیام</b>\n\nپیام جدید خود را بنویسید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو کامل", callback_data='admin:broadcast_cancel')
             ]])
         )
         return BROADCAST
@@ -719,48 +754,127 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    هندلر broadcast — با preview قبل از ارسال
+    FIX: بررسی mode در ابتدا — اگر mode نبود، پیام رو نادیده بگیر
+    """
     uid = update.effective_user.id
     if uid != ADMIN_ID:
-        return
+        return ConversationHandler.END
+
+    # FIX: اگر mode دقیقاً 'broadcast' نبود، این هندلر نباید اجرا بشه
     if context.user_data.get('mode') != 'broadcast':
-        return
+        return ConversationHandler.END
 
-    users  = await db.all_users(approved_only=True)
-    msg    = update.message
-    sent   = 0
-    failed = 0
+    msg = update.message
 
-    # FIX: ارسال با تأخیر برای جلوگیری از rate limit تلگرام
+    # ساختن preview text
+    if msg.text:
+        preview_text = msg.text
+        preview_type = 'text'
+    elif msg.photo:
+        preview_text = msg.caption or ''
+        preview_type = 'photo'
+    elif msg.video:
+        preview_text = msg.caption or ''
+        preview_type = 'video'
+    elif msg.document:
+        preview_text = msg.caption or ''
+        preview_type = 'document'
+    else:
+        await msg.reply_text(
+            "❌ نوع پیام پشتیبانی نمی‌شود.\n"
+            "متن، عکس، ویدیو یا فایل بفرستید.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
+            ]])
+        )
+        return BROADCAST
+
+    # ذخیره اطلاعات پیام برای ارسال بعدی
+    context.user_data['broadcast_preview'] = {
+        'type':     preview_type,
+        'text':     preview_text,
+        'file_id':  (
+            msg.photo[-1].file_id if msg.photo else
+            msg.video.file_id     if msg.video else
+            msg.document.file_id  if msg.document else None
+        ),
+    }
+
+    # شمارش گیرندگان
+    all_users  = await db.all_users(approved_only=True)
+    user_count = len(all_users)
+
+    type_icons = {
+        'text':     '📝 متن',
+        'photo':    '🖼 عکس',
+        'video':    '🎥 ویدیو',
+        'document': '📄 فایل',
+    }
+    type_label = type_icons.get(preview_type, '📝')
+
+    # نمایش preview
+    preview_display = preview_text[:200] + ('...' if len(preview_text) > 200 else '')
+
+    await msg.reply_text(
+        f"👁 <b>پیش‌نمایش پیام همگانی</b>\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"📌 نوع: {type_label}\n"
+        f"👥 گیرنده: <b>{user_count}</b> کاربر\n\n"
+        f"💬 <b>متن پیام:</b>\n"
+        f"<code>{preview_display}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"آیا مطمئنید؟",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ بله، ارسال کن",   callback_data='admin:broadcast_confirm'),
+                InlineKeyboardButton("✏️ ویرایش",           callback_data='admin:broadcast_edit'),
+            ],
+            [InlineKeyboardButton("❌ لغو",                 callback_data='admin:broadcast_cancel')],
+        ])
+    )
+    # mode رو نگه میداریم تا تأیید بشه
+    return BROADCAST
+
+
+async def _do_broadcast(query, context: ContextTypes.DEFAULT_TYPE, preview: dict):
+    """
+    اجرای واقعی ارسال همگانی — بعد از تأیید
+    FIX: mode رو در ابتدا پاک می‌کنه تا هیچ پیام تصادفی ارسال نشه
+    """
+    # FIX: فوری mode رو پاک کن — قبل از هر کاری
+    context.user_data['mode'] = ''
+    context.user_data.pop('broadcast_preview', None)
+
+    users     = await db.all_users(approved_only=True)
+    ptype     = preview.get('type', 'text')
+    text      = preview.get('text', '')
+    file_id   = preview.get('file_id')
+    sent, failed = 0, 0
+
     for i, u in enumerate(users):
+        uid = u['user_id']
         try:
-            if msg.text:
-                await context.bot.send_message(u['user_id'], msg.text, parse_mode='HTML')
-            elif msg.photo:
-                await context.bot.send_photo(
-                    u['user_id'], msg.photo[-1].file_id,
-                    caption=msg.caption or '', parse_mode='HTML'
-                )
-            elif msg.video:
-                await context.bot.send_video(
-                    u['user_id'], msg.video.file_id,
-                    caption=msg.caption or '', parse_mode='HTML'
-                )
-            elif msg.document:
-                await context.bot.send_document(
-                    u['user_id'], msg.document.file_id,
-                    caption=msg.caption or '', parse_mode='HTML'
-                )
+            if ptype == 'text':
+                await context.bot.send_message(uid, text, parse_mode='HTML')
+            elif ptype == 'photo':
+                await context.bot.send_photo(uid, file_id, caption=text, parse_mode='HTML')
+            elif ptype == 'video':
+                await context.bot.send_video(uid, file_id, caption=text, parse_mode='HTML')
+            elif ptype == 'document':
+                await context.bot.send_document(uid, file_id, caption=text, parse_mode='HTML')
             sent += 1
         except Exception:
             failed += 1
-        # تأخیر 50ms بین هر پیام — جلوگیری از flood
+
         if i % 25 == 24:
-            await asyncio.sleep(1)   # هر ۲۵ پیام یک ثانیه استراحت
+            await asyncio.sleep(1)
         else:
             await asyncio.sleep(0.05)
 
-    context.user_data['mode'] = ''
-    await update.message.reply_text(
+    await query.message.reply_text(
         f"✅ <b>ارسال همگانی تمام شد</b>\n"
         f"✅ موفق: <b>{sent}</b>\n"
         f"❌ ناموفق: <b>{failed}</b>\n"
@@ -770,7 +884,6 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
             InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')
         ]])
     )
-    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════
