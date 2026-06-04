@@ -46,6 +46,7 @@ class DB:
         self.ref_files    = _db['ref_files']
         self.faq          = _db['faq']
         self.tickets      = _db['tickets']
+        self.intakes      = _db['intakes']   # ورودی‌های دانشجویی
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها — فراخوانی یک‌بار در startup
@@ -96,13 +97,14 @@ class DB:
         return await self.users.find_one({'user_id': uid})
 
     async def create_user(self, uid: int, name: str, student_id: str,
-                          group: str, username: str = None):
+                          group: str, username: str = None, intake: str = ''):
         doc = {
             'user_id':    uid,
             'name':       name,
             'student_id': student_id,
             'group':      group,
             'username':   username,
+            'intake':     intake or '',
             'registered_at': datetime.now().isoformat(),
             'approved':   False,
             'role':       'student',
@@ -1023,87 +1025,70 @@ class DB:
         )
         return bs + refs
 
-    # ══════════════════════════════════════════════════
-    #  منابع درسی (resources.py)
-    # ══════════════════════════════════════════════════
-
-    async def add_resource(self, term: str, lesson: str, topic: str,
-                           rtype: str, file_id: str, metadata: dict):
-        """اضافه کردن منبع درسی جدید"""
-        r = await self.bs_content.insert_one({
-            'term':        term,
-            'lesson':      lesson,
-            'topic':       topic,
-            'type':        rtype,
-            'file_id':     file_id,
-            'metadata':    metadata,
-            'upload_date': datetime.now().isoformat(),
-        })
-        return r.inserted_id
-
-    async def get_resources(self, term: str = None, lesson: str = None,
-                             topic: str = None, rtype: str = None):
-        """دریافت منابع با فیلتر"""
-        q = {}
-        if term   and term   != 'همه': q['term']   = term
-        if lesson and lesson != 'همه': q['lesson'] = lesson
-        if topic  and topic  != 'همه': q['topic']  = topic
-        if rtype  and rtype  != 'همه': q['type']   = rtype
-        return await self.bs_content.find(q).sort('upload_date', -1).to_list(50)
-
-    async def get_resource(self, rid: str):
-        """دریافت یک منبع با ID"""
-        try:
-            return await self.bs_content.find_one({'_id': ObjectId(rid)})
-        except Exception:
-            return None
-
-    async def inc_download(self, rid: str, uid: int):
-        """افزایش شمارنده دانلود منبع"""
-        try:
-            await self.bs_content.update_one(
-                {'_id': ObjectId(rid)},
-                {'$inc': {'metadata.downloads': 1}}
-            )
-        except Exception:
-            pass
-        await self.log(uid, 'resource_download', {'resource_id': rid})
-
-    # ══════════════════════════════════════════════════
-    #  ویدیوهای کلاس (archive.py)
-    #  FIX: این متدها قبلاً وجود نداشتند
-    # ══════════════════════════════════════════════════
-
-    async def add_video(self, lesson: str, topic: str, teacher: str,
-                        date: str, file_id: str, description: str = ''):
-        """اضافه کردن ویدیوی کلاس"""
-        r = await self.bs_content.insert_one({
-            'lesson':      lesson,
-            'topic':       topic,
-            'teacher':     teacher,
-            'date':        date,
-            'file_id':     file_id,
-            'description': description,
-            'type':        'video',
-            'upload_date': datetime.now().isoformat(),
-            'downloads':   0,
-        })
-        return r.inserted_id
-
-    async def get_videos(self, lesson: str = None, topic: str = None):
-        """دریافت لیست ویدیوها"""
-        q = {'type': 'video'}
-        if lesson: q['lesson'] = lesson
-        if topic:  q['topic']  = topic
-        return await self.bs_content.find(q).sort('date', -1).to_list(100)
-
-    async def get_video(self, vid: str):
-        """دریافت یک ویدیو با ID"""
-        try:
-            return await self.bs_content.find_one({'_id': ObjectId(vid)})
-        except Exception:
-            return None
-
 
 # instance جهانی
+    # ══════════════════════════════════════════════════
+    #  مدیریت ورودی‌های دانشجویی (intakes)
+    # ══════════════════════════════════════════════════
+
+    async def get_active_intakes(self) -> list:
+        """دریافت ورودی‌های فعال برای نمایش در ثبت‌نام"""
+        return await self.intakes.find(
+            {'active': True}
+        ).sort('created_at', -1).to_list(50)
+
+    async def get_all_intakes(self) -> list:
+        """دریافت همه ورودی‌ها برای پنل ادمین"""
+        return await self.intakes.find({}).sort('created_at', -1).to_list(100)
+
+    async def add_intake(self, code: str, label: str) -> bool:
+        """اضافه کردن ورودی جدید — code: مثلاً 'bahman_1404'، label: 'بهمن ۱۴۰۴'"""
+        exists = await self.intakes.find_one({'code': code})
+        if exists:
+            return False
+        await self.intakes.insert_one({
+            'code':       code,
+            'label':      label,
+            'active':     True,
+            'created_at': datetime.now().isoformat(),
+        })
+        return True
+
+    async def toggle_intake(self, code: str) -> bool:
+        """فعال/غیرفعال کردن ورودی"""
+        doc = await self.intakes.find_one({'code': code})
+        if not doc:
+            return False
+        new_state = not doc.get('active', True)
+        await self.intakes.update_one({'code': code}, {'$set': {'active': new_state}})
+        return new_state
+
+    async def delete_intake(self, code: str):
+        await self.intakes.delete_one({'code': code})
+
+    async def get_users_by_intake(self, intake_code: str) -> list:
+        """دریافت کاربران یک ورودی"""
+        return await self.users.find(
+            {'intake': intake_code, 'approved': True}
+        ).to_list(500)
+
+    async def intake_stats(self, intake_code: str) -> dict:
+        """آمار کاربران یک ورودی"""
+        users  = await self.get_users_by_intake(intake_code)
+        total  = len(users)
+        groups = {}
+        for u in users:
+            g = u.get('group', 'نامشخص')
+            groups[g] = groups.get(g, 0) + 1
+        return {'total': total, 'groups': groups, 'users': users}
+
+    async def notif_users_by_intake(self, intake_code: str, ntype: str) -> list:
+        """دریافت کاربران یک ورودی که نوتیف مورد نظر را روشن دارند"""
+        users = await self.get_users_by_intake(intake_code)
+        return [
+            u for u in users
+            if u.get('notification_settings', {}).get(ntype, True)
+        ]
+
+
 db = DB()
