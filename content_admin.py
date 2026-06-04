@@ -53,6 +53,20 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not await db.is_content_admin(uid):
         await query.answer("❌ دسترسی ندارید!", show_alert=True); return
 
+    # ── AUTO-CLEAR: اگه کاربر از یه state نیمه‌کاره رفت به منو ──
+    NAVIGATION_ACTIONS = {
+        'main', 'terms', 'refs', 'refs_admin', 'overview', 'faq',
+        'term', 'lesson', 'session', 'ref_subjects', 'ref_books_list',
+    }
+    INTERRUPTIBLE_MODES = (
+        'add_lesson', 'add_session', 'edit_lesson', 'edit_session',
+        'add_ref_subject', 'add_ref_book', 'edit_ref_subject', 'edit_ref_book',
+        'add_faq',
+    )
+    current_mode = context.user_data.get('ca_mode', '')
+    if action in NAVIGATION_ACTIONS and current_mode in INTERRUPTIBLE_MODES:
+        _clear(context)
+
     KEEP_MODE = ('sel_ctype','upload_ref','add_lesson_prompt','add_session_prompt',
                  'add_ref_subject_prompt','add_ref_book_prompt','add_faq_prompt',
                  'upload_ref_volume_prompt','upload_content',
@@ -447,19 +461,6 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ══════════════════════════════════════════════════════════
 #  توابع نمایش
 # ══════════════════════════════════════════════════════════
-
-async def show_ca_main(message, uid):
-    """فراخوانی از message_router — برای دکمه ReplyKeyboard"""
-    kb = [
-        [InlineKeyboardButton("📊 نمای کلی و آمار",   callback_data='ca:overview')],
-        [InlineKeyboardButton("📘 مدیریت علوم پایه",  callback_data='ca:terms')],
-        [InlineKeyboardButton("📚 مدیریت رفرنس‌ها",   callback_data='ca:refs')],
-        [InlineKeyboardButton("✏️ طراحی سوال",         callback_data='ca:create_q')],
-        [InlineKeyboardButton("❓ مدیریت FAQ",          callback_data='ca:faq')],
-    ]
-    await message.reply_text("🎓 <b>پنل ادمین محتوا</b>",
-        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-
 
 async def _show_main(query):
     kb = [
