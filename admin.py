@@ -6,7 +6,6 @@
   ✅ دکمه بازگشت در همه منوها
 """
 import os
-import asyncio
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,6 +33,7 @@ async def _admin_menu(query_or_msg, edit: bool = True):
             InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0'),
             InlineKeyboardButton("⏳ تأیید کاربران",   callback_data='admin:pending'),
         ],
+        [InlineKeyboardButton("📅 مدیریت ورودی‌ها",  callback_data='admin:intakes')],
         [InlineKeyboardButton("🔍 جستجوی کاربر",      callback_data='admin:search_user')],
         [InlineKeyboardButton("🎓 ادمین‌های محتوا",    callback_data='admin:content_admins')],
         [
@@ -217,6 +217,55 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # ── ادمین محتوا ──
+    elif action == 'intakes':
+        await _show_intakes(query)
+
+    elif action == 'intake_add':
+        context.user_data['mode'] = 'add_intake'
+        await query.edit_message_text(
+            "📅 <b>افزودن ورودی جدید</b>\n\n"
+            "فرمت: <code>کد, برچسب</code>\n"
+            "مثال: <code>bahman_1404, بهمن ۱۴۰۴</code>\n\n"
+            "کد باید انگلیسی و بدون فاصله باشد.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='admin:intakes')
+            ]])
+        )
+
+    elif action == 'intake_toggle':
+        code = parts[2]
+        new_state = await db.toggle_intake(code)
+        state_txt = "✅ فعال" if new_state else "❌ غیرفعال"
+        await query.answer(f"ورودی {state_txt} شد", show_alert=True)
+        await _show_intakes(query)
+
+    elif action == 'intake_del':
+        code = parts[2]
+        await db.delete_intake(code)
+        await query.answer("🗑 ورودی حذف شد!", show_alert=True)
+        await _show_intakes(query)
+
+    elif action == 'intake_view':
+        code   = parts[2]
+        stats  = await db.intake_stats(code)
+        intakes = await db.get_all_intakes()
+        intake  = next((i for i in intakes if i['code'] == code), {})
+        label   = intake.get('label', code)
+        groups  = stats.get('groups', {})
+        g_text  = '\n'.join(f"  گروه {g}: {c} نفر" for g, c in groups.items()) or "  داده‌ای نیست"
+        await query.edit_message_text(
+            f"📅 <b>ورودی: {label}</b>\n"
+            f"🔑 کد: <code>{code}</code>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"👥 مجموع دانشجو: <b>{stats['total']}</b>\n\n"
+            f"<b>تفکیک گروه:</b>\n{g_text}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت به ورودی‌ها", callback_data='admin:intakes')]
+            ])
+        )
+
     elif action == 'content_admins':
         admins   = await db.get_content_admins()
         keyboard = []
@@ -366,51 +415,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _pending_questions(query)
 
     # ── ارسال همگانی ──
-    # FIX: فقط mode رو ست می‌کنیم و UI رو نشون میدیم
-    # پیام ادمین توسط unified_text/file_handler در bot.py خوانده میشه
     elif action == 'broadcast':
         context.user_data['mode'] = 'broadcast'
-        context.user_data.pop('broadcast_preview', None)
         await query.edit_message_text(
             "📢 <b>ارسال همگانی</b>\n\n"
-            "پیام خود را بنویسید (متن، عکس، فیلم):\n\n"
-            "<i>💡 قبل از ارسال، preview نمایش داده می‌شود.</i>",
+            "پیام خود را بنویسید (متن، عکس، فیلم):",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
+                InlineKeyboardButton("❌ لغو", callback_data='admin:main')
             ]])
         )
-        # بدون return BROADCAST — این callback خارج از ConversationHandler است
-
-    # لغو broadcast
-    elif action == 'broadcast_cancel':
-        context.user_data['mode'] = ''
-        context.user_data.pop('broadcast_preview', None)
-        await query.answer("✅ ارسال همگانی لغو شد.")
-        await _admin_menu(query)
-
-    # تأیید ارسال بعد از preview
-    elif action == 'broadcast_confirm':
-        preview = context.user_data.get('broadcast_preview')
-        if not preview:
-            await query.answer("❌ خطا: پیام پیدا نشد.", show_alert=True)
-            context.user_data['mode'] = ''
-            await _admin_menu(query)
-            return
-        await query.edit_message_text("⏳ <b>در حال ارسال...</b>", parse_mode='HTML')
-        await _do_broadcast(query, context, preview)
-
-    # ویرایش پیام قبل از ارسال
-    elif action == 'broadcast_edit':
-        context.user_data['mode'] = 'broadcast'
-        context.user_data.pop('broadcast_preview', None)
-        await query.edit_message_text(
-            "📢 <b>ویرایش پیام</b>\n\nپیام جدید خود را بنویسید:",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو کامل", callback_data='admin:broadcast_cancel')
-            ]])
-        )
+        return BROADCAST
 
 
 # ══════════════════════════════════════════════════
@@ -561,50 +576,19 @@ async def _pending_questions(query):
             ]])
         )
         return
-
-    LETTERS = ['🅐', '🅑', '🅒', '🅓']
-    # FIX: نمایش پیش‌نمایش کامل سوال اول + دکمه‌های ناوبری
-    q       = questions[0]
-    qid     = str(q['_id'])
-    opts    = q.get('options', [])
-    opts_text = '\n'.join(
-        f"{'✅' if i == q.get('correct_answer', 0) else f'{LETTERS[i]}'} {o}"
-        for i, o in enumerate(opts)
-    )
-    expl    = q.get('explanation', '')
-    diff    = q.get('difficulty', '')
-    creator_id = q.get('creator_id')
-    creator_name = ''
-    if creator_id:
-        cuser = await db.get_user(creator_id)
-        creator_name = cuser.get('name', '') if cuser else ''
-
-    text = (
-        f"⏳ <b>سوالات در انتظار تأیید</b> — {len(questions)} سوال\n"
-        f"━━━━━━━━━━━━━━━━\n\n"
-        f"📚 {q.get('lesson', '')} — {q.get('topic', '')} | {diff}\n"
-        f"✏️ طراح: {creator_name or 'نامشخص'}\n\n"
-        f"❓ <b>{q.get('question', '')}</b>\n\n"
-        f"{opts_text}"
-    )
-    if expl:
-        text += f"\n\n💡 توضیح: {expl}"
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ تأیید",     callback_data=f'admin:approve_q:{qid}'),
-            InlineKeyboardButton("🗑 رد و حذف",  callback_data=f'admin:reject_q:{qid}'),
-        ],
-    ]
-    if len(questions) > 1:
-        keyboard.append([InlineKeyboardButton(
-            f"⏭ بعدی ({len(questions)-1} باقی‌مانده)",
-            callback_data='admin:pending_q'
-        )])
+    keyboard = []
+    for q in questions[:10]:
+        qid   = str(q['_id'])
+        label = q.get('question', '')[:40]
+        keyboard.append([InlineKeyboardButton(f"❓ {label}", callback_data='admin:pending_q')])
+        keyboard.append([
+            InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve_q:{qid}'),
+            InlineKeyboardButton("🗑 رد",    callback_data=f'admin:reject_q:{qid}'),
+        ])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
-
     await query.edit_message_text(
-        text, parse_mode='HTML',
+        f"⏳ <b>سوالات در انتظار</b> — {len(questions)} سوال",
+        parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -688,27 +672,35 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return True
 
-    # ── FIX: ذخیره توضیح فایل بانک سوال (قبلاً هرگز ذخیره نمی‌شد) ──
-    elif mode == 'qbank_awaiting_desc':
-        desc      = '' if text == '-' else text
-        file_id   = context.user_data.get('qbank_file_id', '')
-        file_type = context.user_data.get('qbank_file_type', 'document')
-        lesson    = context.user_data.get('qbank_lesson', '')
-        topic     = context.user_data.get('qbank_topic', '')
-        if file_id:
-            await db.add_qbank_file(lesson, topic, file_id, desc, file_type)
-            for k in ['qbank_file_id', 'qbank_file_type', 'qbank_lesson',
-                      'qbank_topic', 'mode']:
-                context.user_data.pop(k, None)
+
+    elif mode == 'add_intake':
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            pts = [p.strip() for p in text.split(',', 1)]
+            if len(pts) < 2:
+                raise ValueError("فرمت اشتباه")
+            code, label = pts[0], pts[1]
+            ok = await db.add_intake(code, label)
+            context.user_data.pop('mode', None)
+            if ok:
+                await update.message.reply_text(
+                    f"✅ ورودی <b>{label}</b> اضافه شد!",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📅 مدیریت ورودی‌ها", callback_data='admin:intakes')
+                    ]])
+                )
+            else:
+                await update.message.reply_text(
+                    f"⚠️ ورودی با کد <code>{code}</code> قبلاً وجود دارد.", parse_mode='HTML'
+                )
+            return True
+        except ValueError:
             await update.message.reply_text(
-                f"✅ فایل بانک سوال ذخیره شد!\n📚 {lesson} — {topic or 'همه'}"
-                + (f"\n📝 {desc}" if desc else ''),
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 مدیریت بانک سوال", callback_data='admin:qbank_manage')
-                ]])
+                "❌ فرمت اشتباه!\nمثال: <code>bahman_1404, بهمن ۱۴۰۴</code>",
+                parse_mode='HTML'
             )
             return True
-        return False
 
     return False
 
@@ -752,135 +744,78 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def _show_intakes(query):
+    """نمایش لیست ورودی‌ها در پنل ادمین"""
+    intakes = await db.get_all_intakes()
+    keyboard = []
+    for i in intakes:
+        code   = i['code']
+        label  = i['label']
+        active = i.get('active', True)
+        icon   = "✅" if active else "❌"
+        keyboard.append([
+            InlineKeyboardButton(f"{icon} {label}", callback_data=f'admin:intake_view:{code}'),
+            InlineKeyboardButton("🔄", callback_data=f'admin:intake_toggle:{code}'),
+            InlineKeyboardButton("🗑", callback_data=f'admin:intake_del:{code}'),
+        ])
+    keyboard.append([InlineKeyboardButton("➕ افزودن ورودی جدید", callback_data='admin:intake_add')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل",    callback_data='admin:main')])
+    await query.edit_message_text(
+        "📅 <b>مدیریت ورودی‌های دانشجویی</b>\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "✅ = فعال (نمایش در ثبت‌نام)  |  ❌ = غیرفعال\n"
+        "🔄 = تغییر وضعیت  |  🗑 = حذف",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    هندلر broadcast — با preview قبل از ارسال
-    مستقیم از unified_text_handler و unified_file_handler در bot.py صدا میشه
-    """
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         return
-
     if context.user_data.get('mode') != 'broadcast':
         return
 
-    msg = update.message
+    users  = await db.all_users(approved_only=True)
+    sent   = 0
+    failed = 0
 
-    # ساختن preview text
-    if msg.text:
-        preview_text = msg.text
-        preview_type = 'text'
-    elif msg.photo:
-        preview_text = msg.caption or ''
-        preview_type = 'photo'
-    elif msg.video:
-        preview_text = msg.caption or ''
-        preview_type = 'video'
-    elif msg.document:
-        preview_text = msg.caption or ''
-        preview_type = 'document'
-    else:
-        await msg.reply_text(
-            "❌ نوع پیام پشتیبانی نمی‌شود.\n"
-            "متن، عکس، ویدیو یا فایل بفرستید.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
-            ]])
-        )
-        return
-
-    # ذخیره اطلاعات پیام برای ارسال بعدی
-    context.user_data['broadcast_preview'] = {
-        'type':     preview_type,
-        'text':     preview_text,
-        'file_id':  (
-            msg.photo[-1].file_id if msg.photo else
-            msg.video.file_id     if msg.video else
-            msg.document.file_id  if msg.document else None
-        ),
-    }
-
-    # شمارش گیرندگان
-    all_users  = await db.all_users(approved_only=True)
-    user_count = len(all_users)
-
-    type_icons = {
-        'text':     '📝 متن',
-        'photo':    '🖼 عکس',
-        'video':    '🎥 ویدیو',
-        'document': '📄 فایل',
-    }
-    type_label = type_icons.get(preview_type, '📝')
-
-    # نمایش preview
-    preview_display = preview_text[:200] + ('...' if len(preview_text) > 200 else '')
-
-    await msg.reply_text(
-        f"👁 <b>پیش‌نمایش پیام همگانی</b>\n"
-        f"━━━━━━━━━━━━━━━━\n\n"
-        f"📌 نوع: {type_label}\n"
-        f"👥 گیرنده: <b>{user_count}</b> کاربر\n\n"
-        f"💬 <b>متن پیام:</b>\n"
-        f"<code>{preview_display}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"آیا مطمئنید؟",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ بله، ارسال کن",   callback_data='admin:broadcast_confirm'),
-                InlineKeyboardButton("✏️ ویرایش",           callback_data='admin:broadcast_edit'),
-            ],
-            [InlineKeyboardButton("❌ لغو",                 callback_data='admin:broadcast_cancel')],
-        ])
-    )
-    # mode رو نگه میداریم تا تأیید بشه (پیام بعدی دوباره این handler رو صدا میزنه)
-
-
-async def _do_broadcast(query, context: ContextTypes.DEFAULT_TYPE, preview: dict):
-    """
-    اجرای واقعی ارسال همگانی — بعد از تأیید
-    FIX: mode رو در ابتدا پاک می‌کنه تا هیچ پیام تصادفی ارسال نشه
-    """
-    # FIX: فوری mode رو پاک کن — قبل از هر کاری
-    context.user_data['mode'] = ''
-    context.user_data.pop('broadcast_preview', None)
-
-    users     = await db.all_users(approved_only=True)
-    ptype     = preview.get('type', 'text')
-    text      = preview.get('text', '')
-    file_id   = preview.get('file_id')
-    sent, failed = 0, 0
-
-    for i, u in enumerate(users):
-        uid = u['user_id']
+    for u in users:
         try:
-            if ptype == 'text':
-                await context.bot.send_message(uid, text, parse_mode='HTML')
-            elif ptype == 'photo':
-                await context.bot.send_photo(uid, file_id, caption=text, parse_mode='HTML')
-            elif ptype == 'video':
-                await context.bot.send_video(uid, file_id, caption=text, parse_mode='HTML')
-            elif ptype == 'document':
-                await context.bot.send_document(uid, file_id, caption=text, parse_mode='HTML')
+            if update.message.text:
+                await context.bot.send_message(
+                    u['user_id'], update.message.text, parse_mode='HTML'
+                )
+            elif update.message.photo:
+                await context.bot.send_photo(
+                    u['user_id'], update.message.photo[-1].file_id,
+                    caption=update.message.caption or ''
+                )
+            elif update.message.video:
+                await context.bot.send_video(
+                    u['user_id'], update.message.video.file_id,
+                    caption=update.message.caption or ''
+                )
+            elif update.message.document:
+                await context.bot.send_document(
+                    u['user_id'], update.message.document.file_id,
+                    caption=update.message.caption or ''
+                )
             sent += 1
         except Exception:
             failed += 1
 
-        if i % 25 == 24:
-            await asyncio.sleep(1)
-        else:
-            await asyncio.sleep(0.05)
-
-    await query.message.reply_text(
-        f"✅ <b>ارسال همگانی تمام شد</b>\n"
-        f"✅ موفق: <b>{sent}</b>\n"
-        f"❌ ناموفق: <b>{failed}</b>\n"
-        f"👥 مجموع: {len(users)}",
-        parse_mode='HTML',
+    context.user_data['mode'] = ''
+    await update.message.reply_text(
+        f"✅ ارسال همگانی:\n"
+        f"✅ موفق: {sent}\n"
+        f"❌ ناموفق: {failed}",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')
         ]])
     )
+    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════
