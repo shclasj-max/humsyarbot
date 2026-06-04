@@ -115,7 +115,29 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── لیست کاربران با pagination ──
     elif action == 'users':
         page = int(parts[2]) if len(parts) > 2 else 0
-        await _show_users_list(query, page)
+        f_group  = context.user_data.get('filter_group')
+        f_intake = context.user_data.get('filter_intake')
+        await _show_users_list(query, page, group=f_group, intake=f_intake)
+
+    elif action == 'users_filter':
+        await _show_users_filter(query, context)
+
+    elif action == 'uf_group':
+        g = parts[2] if len(parts) > 2 and parts[2] != 'all' else None
+        context.user_data['filter_group'] = g
+        f_intake = context.user_data.get('filter_intake')
+        await _show_users_list(query, 0, group=g, intake=f_intake)
+
+    elif action == 'uf_intake':
+        icode = parts[2] if len(parts) > 2 and parts[2] != 'all' else None
+        context.user_data['filter_intake'] = icode
+        f_group = context.user_data.get('filter_group')
+        await _show_users_list(query, 0, group=f_group, intake=icode)
+
+    elif action == 'uf_clear':
+        context.user_data.pop('filter_group', None)
+        context.user_data.pop('filter_intake', None)
+        await _show_users_list(query, 0)
 
     # ── جزئیات کاربر ──
     elif action == 'user_detail':
@@ -432,26 +454,39 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  توابع نمایش
 # ══════════════════════════════════════════════════
 
-async def _show_users_list(query, page: int = 0):
-    all_users  = await db.all_users(approved_only=False)
-    per_page   = 8
-    total      = len(all_users)
-    approved   = sum(1 for u in all_users if u.get('approved'))
-    start      = page * per_page
-    chunk      = all_users[start:start + per_page]
+async def _show_users_list(query, page: int = 0, group: str = None, intake: str = None):
+    all_users = await db.all_users(approved_only=False)
+
+    # اعمال فیلترها
+    if group:
+        all_users = [u for u in all_users if u.get('group') == group]
+    if intake:
+        all_users = [u for u in all_users if u.get('intake') == intake]
+
+    per_page = 8
+    total    = len(all_users)
+    approved = sum(1 for u in all_users if u.get('approved'))
+    start    = page * per_page
+    chunk    = all_users[start:start + per_page]
+
+    # نمایش فیلترهای فعال
+    filter_parts = []
+    if group:  filter_parts.append(f"گروه {group}")
+    if intake: filter_parts.append(f"ورودی {intake}")
+    filter_label = f" | 🔽 {' + '.join(filter_parts)}" if filter_parts else ""
 
     text = (
-        f"👥 <b>کاربران</b>\n"
+        f"👥 <b>کاربران{filter_label}</b>\n"
         f"✅ تأیید: {approved} | ⏳ منتظر: {total - approved} | مجموع: {total}\n\n"
     )
     keyboard = []
     for u in chunk:
-        icon  = "✅" if u.get('approved') else "⏳"
-        role  = "🎓" if u.get('role') == 'content_admin' else ""
-        label = (
-            f"{icon}{role} {u.get('name', '')[:12]} | "
-            f"{u.get('student_id', '') or u.get('username', '') or str(u['user_id'])[:6]} | "
-            f"گروه {u.get('group', '')}"
+        icon    = "✅" if u.get('approved') else "⏳"
+        role    = "🎓" if u.get('role') == 'content_admin' else ""
+        intake_ = f" | {u.get('intake','')}" if u.get('intake') else ""
+        label   = (
+            f"{icon}{role} {u.get('name', '')[:10]} | "
+            f"گروه {u.get('group', '')}{intake_}"
         )
         keyboard.append([InlineKeyboardButton(
             label, callback_data=f'admin:user_detail:{u["user_id"]}'
@@ -459,16 +494,57 @@ async def _show_users_list(query, page: int = 0):
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f'admin:users:{page - 1}'))
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f'admin:users:{page-1}'))
     if start + per_page < total:
-        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f'admin:users:{page + 1}'))
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f'admin:users:{page+1}'))
     if nav:
         keyboard.append(nav)
 
-    keyboard.append([InlineKeyboardButton("🔍 جستجو",      callback_data='admin:search_user')])
+    keyboard.append([
+        InlineKeyboardButton("🔽 فیلتر",  callback_data='admin:users_filter'),
+        InlineKeyboardButton("🔍 جستجو", callback_data='admin:search_user'),
+    ])
+    if group or intake:
+        keyboard.append([InlineKeyboardButton("❌ حذف فیلتر", callback_data='admin:uf_clear')])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
     await query.edit_message_text(
         text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _show_users_filter(query, context):
+    """صفحه انتخاب فیلتر"""
+    intakes = await db.get_all_intakes()
+    f_group  = context.user_data.get('filter_group', 'همه')
+    f_intake = context.user_data.get('filter_intake', 'همه')
+
+    keyboard = [
+        [InlineKeyboardButton("━━ فیلتر گروه ━━", callback_data='admin:main')],
+        [
+            InlineKeyboardButton(f"{'✅' if not context.user_data.get('filter_group') else '⬜'} همه گروه‌ها", callback_data='admin:uf_group:all'),
+            InlineKeyboardButton(f"{'✅' if context.user_data.get('filter_group')=='1' else '⬜'} گروه ۱",     callback_data='admin:uf_group:1'),
+            InlineKeyboardButton(f"{'✅' if context.user_data.get('filter_group')=='2' else '⬜'} گروه ۲",     callback_data='admin:uf_group:2'),
+        ],
+        [InlineKeyboardButton("━━ فیلتر ورودی ━━", callback_data='admin:main')],
+        [InlineKeyboardButton("همه ورودی‌ها", callback_data='admin:uf_intake:all')],
+    ]
+    for i in intakes:
+        active = context.user_data.get('filter_intake') == i['code']
+        keyboard.append([InlineKeyboardButton(
+            f"{'✅' if active else '⬜'} {i['label']}",
+            callback_data=f'admin:uf_intake:{i["code"]}'
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:users:0')])
+
+    active_filters = []
+    if context.user_data.get('filter_group'):  active_filters.append(f"گروه {context.user_data['filter_group']}")
+    if context.user_data.get('filter_intake'): active_filters.append(context.user_data['filter_intake'])
+    current = f"فعال: {' + '.join(active_filters)}" if active_filters else "بدون فیلتر"
+
+    await query.edit_message_text(
+        f"🔽 <b>فیلتر کاربران</b>\n{current}",
+        parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -494,6 +570,7 @@ async def _show_user_detail(query, context, target_uid: int):
         f"📱 یوزرنیم: {uname}\n"
         f"🆔 آیدی: <code>{target_uid}</code>\n"
         f"🔘 وضعیت: {status}  |  نقش: {role_t}\n"
+        f"📅 ورودی: <b>{user.get('intake', '') or 'ثبت نشده'}</b>\n"
         f"📅 ثبت‌نام: {user.get('registered_at', '')[:10]}\n\n"
         f"📊 <b>آمار:</b>\n"
         f"  📥 دانلود: {stats['downloads']}  "
