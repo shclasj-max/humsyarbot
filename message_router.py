@@ -33,9 +33,15 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from admin import handle_admin_text
             await handle_admin_text(update, context)
             return
+        # FIX: broadcast دیگه اینجا handle نمیشه — ConversationHandler مستقیم
+        # admin_broadcast_handler رو صدا میزنه. این خط رو حذف کردیم چون
+        # اگه اینجا هم صدا بشه، double-execution میشه و باگ ایجاد میکنه.
+        # اگه mode == 'broadcast' باشه ولی ConversationHandler نگرفته باشه،
+        # یعنی state گم شده — mode رو پاک میکنیم:
         if mode == 'broadcast':
-            from admin import admin_broadcast_handler
-            return await admin_broadcast_handler(update, context)
+            context.user_data['mode'] = ''
+            context.user_data.pop('broadcast_preview', None)
+            return  # نادیده بگیر
 
     # ── حالت ساخت سوال ──
     if context.user_data.get('mode') == 'creating_question':
