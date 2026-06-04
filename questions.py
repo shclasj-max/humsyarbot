@@ -1,11 +1,13 @@
 """
-بانک سوال — نسخه حرفه‌ای
+بانک سوال — نسخه نهایی بهینه‌سازی‌شده
+✅ فیکس دکمه‌های بازگشت در همه مسیرها
 ✅ آزمون سفارشی (تعداد + زمان دلخواه)
-✅ خروجی PDF از سوالات
+✅ خروجی فایل txt از سوالات
 ✅ طراحی سوال توسط دانشجو و ادمین محتوا
-✅ نمایش طراح سوال (کوچک)
+✅ نمایش طراح سوال
 ✅ فیلتر درس + مبحث
 ✅ آمار پیشرفته
+✅ بهینه‌سازی سرعت — کش لیست درس‌ها و مباحث
 """
 import os, io, logging, time
 from datetime import datetime
@@ -23,8 +25,44 @@ LETTERS    = ['🅐', '🅑', '🅒', '🅓']
 
 
 # ══════════════════════════════════════════════════════════
+#  ابزارهای کمکی
+# ══════════════════════════════════════════════════════════
+
+def _back(label: str, cb: str) -> list:
+    """ردیف دکمه بازگشت استاندارد"""
+    return [InlineKeyboardButton(label, callback_data=cb)]
+
+
+# ══════════════════════════════════════════════════════════
+#  تابع ورودی از ReplyKeyboard (message_router)
+# ══════════════════════════════════════════════════════════
+
+async def _main_menu_msg(message):
+    """نمایش منوی اصلی از طریق message (نه callback)"""
+    keyboard = [
+        [InlineKeyboardButton("📁 بانک فایل سوالات",     callback_data='questions:file_bank')],
+        [InlineKeyboardButton("🧪 تمرین سریع",            callback_data='questions:practice')],
+        [InlineKeyboardButton("📝 آزمون سفارشی",          callback_data='questions:custom_exam')],
+        [InlineKeyboardButton("📄 خروجی فایل سوالات",    callback_data='questions:pdf_menu')],
+        [InlineKeyboardButton("✏️ طراحی سوال",            callback_data='questions:create')],
+        [InlineKeyboardButton("📊 آمار و پیشرفت من",      callback_data='questions:stats')],
+    ]
+    await message.reply_text(
+        "🧪 <b>بانک سوال</b>\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "📁 <b>بانک فایل:</b> دانلود PDF سوالات\n"
+        "🧪 <b>تمرین سریع:</b> سوال چهارگزینه‌ای\n"
+        "📝 <b>آزمون سفارشی:</b> تعداد و زمان دلخواه\n"
+        "📄 <b>خروجی فایل:</b> سوالات را دانلود کنید\n"
+        "✏️ <b>طراحی سوال:</b> سوال خودتان بسازید\n"
+        "📊 <b>آمار:</b> پیشرفت و نقاط ضعف",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# ══════════════════════════════════════════════════════════
 #  Callback اصلی
 # ══════════════════════════════════════════════════════════
+
 async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     await query.answer()
@@ -52,6 +90,7 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lesson = context.user_data.get('fb_lesson', '')
         topics = context.user_data.get('_fb_topics', [])
         topic  = None if parts[2] == 'all' else (topics[int(parts[2])] if int(parts[2]) < len(topics) else None)
+        context.user_data['fb_topic'] = topic
         await _fb_files(query, context, lesson, topic)
 
     elif data.startswith('download_qbank:'):
@@ -78,6 +117,7 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lessons = context.user_data.get('_cx_lessons', [])
         if idx < len(lessons):
             context.user_data.setdefault('cx', {})['lesson'] = lessons[idx]
+            context.user_data['cx_lesson_idx'] = idx
             await _cx_topic_select(query, context, lessons[idx])
 
     elif action == 'cx_topic':
@@ -119,7 +159,8 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lessons = context.user_data.get('_lessons', [])
         if idx < len(lessons):
             lesson = lessons[idx]
-            context.user_data['sel_lesson'] = lesson
+            context.user_data['sel_lesson']     = lesson
+            context.user_data['sel_lesson_idx'] = idx
             context.user_data['quiz'] = {
                 'mode': mode, 'lesson': lesson,
                 'answered': [], 'correct': 0,
@@ -178,7 +219,7 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ]]))
         return CREATING_Q
 
-    # ── خروجی PDF ──
+    # ── خروجی فایل سوالات ──
     elif action == 'pdf_menu':
         await _pdf_menu(query, context)
 
@@ -199,7 +240,7 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lesson = context.user_data.get('pdf_lesson', '')
         topic  = context.user_data.get('pdf_topic', 'همه')
         count  = int(parts[2])
-        await query.edit_message_text("⏳ در حال ساخت PDF...", parse_mode='HTML')
+        await query.edit_message_text("⏳ در حال ساخت فایل...", parse_mode='HTML')
         await _generate_pdf(query, context, uid, lesson, topic, count)
 
     elif action == 'pdf_topic_sel':
@@ -222,9 +263,10 @@ async def _main_menu(query):
         [InlineKeyboardButton("📁 بانک فایل سوالات",     callback_data='questions:file_bank')],
         [InlineKeyboardButton("🧪 تمرین سریع",            callback_data='questions:practice')],
         [InlineKeyboardButton("📝 آزمون سفارشی",          callback_data='questions:custom_exam')],
-        [InlineKeyboardButton("📄 خروجی PDF سوالات",      callback_data='questions:pdf_menu')],
+        [InlineKeyboardButton("📄 خروجی فایل سوالات",    callback_data='questions:pdf_menu')],
         [InlineKeyboardButton("✏️ طراحی سوال",            callback_data='questions:create')],
         [InlineKeyboardButton("📊 آمار و پیشرفت من",      callback_data='questions:stats')],
+        _back("🔙 داشبورد", "dashboard:refresh"),
     ]
     await query.edit_message_text(
         "🧪 <b>بانک سوال</b>\n\n"
@@ -232,7 +274,7 @@ async def _main_menu(query):
         "📁 <b>بانک فایل:</b> دانلود PDF سوالات\n"
         "🧪 <b>تمرین سریع:</b> سوال چهارگزینه‌ای\n"
         "📝 <b>آزمون سفارشی:</b> تعداد و زمان دلخواه\n"
-        "📄 <b>خروجی PDF:</b> سوالات را چاپ کنید\n"
+        "📄 <b>خروجی فایل:</b> سوالات را دانلود کنید\n"
         "✏️ <b>طراحی سوال:</b> سوال خودتان بسازید\n"
         "📊 <b>آمار:</b> پیشرفت و نقاط ضعف",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -244,7 +286,7 @@ async def _practice_menu(query):
         [InlineKeyboardButton("⚡ نقاط ضعف من",               callback_data='questions:weak')],
         [InlineKeyboardButton("📝 شبیه‌سازی امتحان (۲۰ سوال)", callback_data='questions:exam')],
         [InlineKeyboardButton("🔴 سوالات سطح سخت",            callback_data='questions:hard')],
-        [InlineKeyboardButton("🔙 بازگشت",                    callback_data='questions:main')],
+        _back("🔙 بازگشت", "questions:main"),
     ]
     await query.edit_message_text(
         "🧪 <b>تمرین سریع</b>\n\n"
@@ -265,9 +307,9 @@ async def _custom_exam_menu(query, context):
     if not lessons:
         await query.edit_message_text(
             "❌ هنوز سوالی در بانک موجود نیست.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ])); return
     context.user_data['_cx_lessons'] = lessons
     context.user_data['cx'] = {}
     keyboard = []
@@ -276,11 +318,11 @@ async def _custom_exam_menu(query, context):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:cx_lesson:{i+1}'))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')])
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
     await query.edit_message_text(
         "📝 <b>آزمون سفارشی</b>\n\n"
         "━━━━━━━━━━━━━━━━\n"
-        "<b>گام ۱ از ۳:</b> درس را انتخاب کنید:",
+        "<b>گام ۱ از ۴:</b> درس را انتخاب کنید:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -290,10 +332,10 @@ async def _cx_topic_select(query, context, lesson):
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:cx_topic:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:cx_topic:all')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:custom_exam')])
+    keyboard.append(_back("🔙 بازگشت", "questions:custom_exam"))
     await query.edit_message_text(
         f"📝 <b>آزمون سفارشی</b>\n📚 {lesson}\n\n"
-        "<b>گام ۲ از ۳:</b> مبحث را انتخاب کنید:",
+        "<b>گام ۲ از ۴:</b> مبحث را انتخاب کنید:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -301,6 +343,7 @@ async def _cx_count_select(query, context):
     cx     = context.user_data.get('cx', {})
     lesson = cx.get('lesson', '')
     topic  = cx.get('topic', 'همه')
+    t_label = f" — {topic}" if topic != 'همه' else ''
     keyboard = [
         [InlineKeyboardButton("5 سوال",  callback_data='questions:cx_count:5'),
          InlineKeyboardButton("10 سوال", callback_data='questions:cx_count:10')],
@@ -308,9 +351,8 @@ async def _cx_count_select(query, context):
          InlineKeyboardButton("20 سوال", callback_data='questions:cx_count:20')],
         [InlineKeyboardButton("30 سوال", callback_data='questions:cx_count:30'),
          InlineKeyboardButton("40 سوال", callback_data='questions:cx_count:40')],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data='questions:custom_exam')],
+        _back("🔙 بازگشت", "questions:custom_exam"),
     ]
-    t_label = f" — {topic}" if topic != 'همه' else ''
     await query.edit_message_text(
         f"📝 <b>آزمون سفارشی</b>\n📚 {lesson}{t_label}\n\n"
         "<b>گام ۳ از ۴:</b> تعداد سوالات:",
@@ -320,6 +362,9 @@ async def _cx_count_select(query, context):
 async def _cx_time_select(query, context):
     cx    = context.user_data.get('cx', {})
     count = cx.get('count', 10)
+    lesson = cx.get('lesson', '')
+    topic  = cx.get('topic', 'همه')
+    t_label = f" — {topic}" if topic != 'همه' else ''
     keyboard = [
         [InlineKeyboardButton("بدون محدودیت ⏳", callback_data='questions:cx_time:0')],
         [InlineKeyboardButton("۱۰ دقیقه ⏱",  callback_data='questions:cx_time:10'),
@@ -328,10 +373,10 @@ async def _cx_time_select(query, context):
          InlineKeyboardButton("۴۵ دقیقه ⏱",  callback_data='questions:cx_time:45')],
         [InlineKeyboardButton("۶۰ دقیقه ⏱",  callback_data='questions:cx_time:60'),
          InlineKeyboardButton("۹۰ دقیقه ⏱",  callback_data='questions:cx_time:90')],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data='questions:custom_exam')],
+        _back("🔙 بازگشت", "questions:custom_exam"),
     ]
     await query.edit_message_text(
-        f"📝 <b>آزمون سفارشی</b>\n🔢 {count} سوال\n\n"
+        f"📝 <b>آزمون سفارشی</b>\n📚 {lesson}{t_label}\n🔢 {count} سوال\n\n"
         "<b>گام ۴ از ۴:</b> زمان آزمون:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -371,6 +416,9 @@ async def _next_q(query, context, uid):
     start   = quiz.get('start_ts', 0)
     dur     = quiz.get('duration', 0)
 
+    # تعیین دکمه بازگشت بر اساس mode
+    back_cb = 'questions:custom_exam' if mode == 'custom' else 'questions:practice'
+
     # بررسی زمان
     if dur and start and (time.time() - start) > dur:
         correct = quiz.get('correct', 0)
@@ -383,10 +431,11 @@ async def _next_q(query, context, uid):
             f"⏱ زمان: {elapsed} دقیقه\n\n"
             f"{'🏆 عالی!' if pct>=80 else '👍 خوب!' if pct>=60 else '📖 بیشتر مطالعه کنید'}",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 دوباره", callback_data='questions:custom_exam'),
-                InlineKeyboardButton("🏠 منو",    callback_data='questions:main')
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 دوباره", callback_data=back_cb),
+                 InlineKeyboardButton("📊 آمار",   callback_data='questions:stats'),
+                 InlineKeyboardButton("🏠 منو",    callback_data='questions:main')]
+            ]))
         return
 
     if len(done) >= total:
@@ -400,11 +449,11 @@ async def _next_q(query, context, uid):
             f"📊 درصد: <b>{pct}%</b>{time_txt}\n\n"
             f"{'🏆 عالی!' if pct>=80 else '👍 خوب!' if pct>=60 else '📖 بیشتر مطالعه کنید'}",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 دوباره",    callback_data='questions:practice'),
-                InlineKeyboardButton("📊 آمار کلی",  callback_data='questions:stats'),
-                InlineKeyboardButton("🏠 منو",       callback_data='questions:main')
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 دوباره",    callback_data=back_cb),
+                 InlineKeyboardButton("📊 آمار کلی",  callback_data='questions:stats'),
+                 InlineKeyboardButton("🏠 منو",       callback_data='questions:main')]
+            ]))
         return
 
     if mode == 'weak':
@@ -415,9 +464,9 @@ async def _next_q(query, context, uid):
     if not qs:
         await query.edit_message_text(
             "❌ سوال دیگری یافت نشد!\nتمام سوالات موجود را پاسخ دادید.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:practice')
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", back_cb)
+            ]))
         return
 
     q   = qs[0]
@@ -451,6 +500,9 @@ async def _next_q(query, context, uid):
     for i, opt in enumerate(q['options']):
         keyboard.append([InlineKeyboardButton(
             f"{LETTERS[i]} {opt}", callback_data=f'answer:{qid}:{i}')])
+    keyboard.append([
+        InlineKeyboardButton("🏠 منو", callback_data='questions:main'),
+    ])
 
     await query.edit_message_text(
         f"📝 <b>سوال {num}{total_str}</b>  {diff_icon}{time_line}\n"
@@ -487,15 +539,19 @@ async def handle_question_answer(update: Update, context: ContextTypes.DEFAULT_T
 
     options_text = ""
     for i, opt in enumerate(opts):
-        if i == correct_idx:     marker = "✅"
-        elif i == sel and not is_correct: marker = "❌"
-        else:                    marker = "⚫"
+        if i == correct_idx:                   marker = "✅"
+        elif i == sel and not is_correct:      marker = "❌"
+        else:                                  marker = "⚫"
         options_text += f"{marker} {opt}\n"
 
     text = (f"{icon} <b>{'صحیح!' if is_correct else 'اشتباه!'}</b>\n\n"
             f"{q_doc['question']}\n\n{options_text}")
     if expl:
         text += f"\n💡 <b>توضیح:</b> {expl}"
+
+    # تعیین دکمه بازگشت صحیح
+    mode    = quiz.get('mode', 'free')
+    back_cb = 'questions:custom_exam' if mode == 'custom' else 'questions:practice'
 
     keyboard = [[
         InlineKeyboardButton("➡️ سوال بعدی", callback_data='questions:next'),
@@ -506,7 +562,7 @@ async def handle_question_answer(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ══════════════════════════════════════════════════════════
-#  بانک فایل ادمین
+#  بانک فایل
 # ══════════════════════════════════════════════════════════
 
 async def _fb_lessons(query, context):
@@ -515,9 +571,9 @@ async def _fb_lessons(query, context):
         await query.edit_message_text(
             "📁 <b>بانک فایل</b>\n\n❌ هنوز فایلی آپلود نشده.",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ])); return
     context.user_data['_fb_lessons'] = lessons
     keyboard = []
     for i in range(0, len(lessons), 2):
@@ -525,7 +581,7 @@ async def _fb_lessons(query, context):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:fb_lesson:{i+1}'))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')])
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
     await query.edit_message_text("📁 <b>بانک فایل سوالات</b>\n\nدرس را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -536,33 +592,37 @@ async def _fb_topics(query, context, lesson):
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:fb_topic:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:fb_topic:all')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:file_bank')])
+    keyboard.append(_back("🔙 بازگشت", "questions:file_bank"))
     await query.edit_message_text(f"📁 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _fb_files(query, context, lesson, topic):
     files = await db.get_qbank_files(lesson=lesson, topic=topic)
+    # بازگشت صحیح: به لیست مباحث همان درس
+    back_cb = f'questions:fb_lesson:{context.user_data.get("_fb_lessons", []).index(lesson)}' \
+        if lesson in context.user_data.get('_fb_lessons', []) else 'questions:file_bank'
+
     if not files:
         await query.edit_message_text(
             f"📁 <b>{lesson}{' — '+topic if topic else ''}</b>\n\n❌ فایلی آپلود نشده.",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:file_bank')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", back_cb)
+            ])); return
     keyboard = []
     for f in files:
         fid   = str(f['_id'])
         label = f"📥 {f.get('topic','')} | {f.get('description','')[:25]} | ⬇️{f.get('downloads',0)}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f'download_qbank:{fid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:file_bank')])
+    keyboard.append(_back("🔙 بازگشت", back_cb))
     await query.edit_message_text(
         f"📁 <b>{lesson}{' — '+topic if topic else ''}</b>\n{len(files)} فایل:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # ══════════════════════════════════════════════════════════
-#  خروجی PDF
+#  خروجی فایل سوالات
 # ══════════════════════════════════════════════════════════
 
 async def _pdf_menu(query, context):
@@ -570,9 +630,9 @@ async def _pdf_menu(query, context):
     if not lessons:
         await query.edit_message_text(
             "❌ هنوز سوالی موجود نیست.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ])); return
     context.user_data['_pdf_lessons'] = lessons
     keyboard = []
     for i in range(0, len(lessons), 2):
@@ -580,9 +640,9 @@ async def _pdf_menu(query, context):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:pdf_lesson:{i+1}'))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')])
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
     await query.edit_message_text(
-        "📄 <b>خروجی PDF سوالات</b>\n\n"
+        "📄 <b>خروجی فایل سوالات</b>\n\n"
         "درس مورد نظر را انتخاب کنید:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -593,7 +653,7 @@ async def _pdf_topic_select(query, context, lesson):
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:pdf_topic_sel:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:pdf_topic_sel:all')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:pdf_menu')])
+    keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
     await query.edit_message_text(f"📄 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -607,24 +667,23 @@ async def _pdf_count_select(query, context, lesson, topic):
          InlineKeyboardButton("۲۰ سوال",  callback_data='questions:pdf_count:20')],
         [InlineKeyboardButton("۳۰ سوال",  callback_data='questions:pdf_count:30'),
          InlineKeyboardButton("۵۰ سوال",  callback_data='questions:pdf_count:50')],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data='questions:pdf_menu')],
+        _back("🔙 بازگشت", "questions:pdf_menu"),
     ]
     await query.edit_message_text(
-        f"📄 <b>{lesson}{t_label}</b>\n\nتعداد سوالات PDF:",
+        f"📄 <b>{lesson}{t_label}</b>\n\nتعداد سوالات:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _generate_pdf(query, context, uid, lesson, topic, count):
-    """ساخت PDF متنی از سوالات"""
+    """ساخت فایل txt از سوالات"""
     qs = await db.get_questions_for_pdf(lesson=lesson, topic=topic if topic != 'همه' else None, count=count)
     if not qs:
         await query.edit_message_text(
             "❌ سوالی برای این فیلتر پیدا نشد.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:pdf_menu')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:pdf_menu")
+            ])); return
 
-    # ساخت متن PDF ساده (txt با فرمت‌بندی)
     lines = []
     t_label = f" — {topic}" if topic and topic != 'همه' else ''
     lines.append(f"بانک سوال — {lesson}{t_label}")
@@ -649,8 +708,7 @@ async def _generate_pdf(query, context, uid, lesson, topic, count):
         lines.append("")
 
     text_content = "\n".join(lines)
-    file_bytes   = text_content.encode('utf-8')
-    file_obj     = io.BytesIO(file_bytes)
+    file_obj     = io.BytesIO(text_content.encode('utf-8'))
     fname        = f"qbank_{lesson}_{datetime.now().strftime('%Y%m%d')}.txt"
     file_obj.name = fname
 
@@ -662,14 +720,14 @@ async def _generate_pdf(query, context, uid, lesson, topic, count):
             filename=fname)
         await query.edit_message_text(
             f"✅ فایل سوالات ارسال شد!\n📚 {lesson}\n🔢 {len(qs)} سوال",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت به منو", callback_data='questions:main')
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت به منو", "questions:main")
+            ]))
     except Exception as e:
         await query.edit_message_text(f"❌ خطا: {e}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ]))
 
 
 # ══════════════════════════════════════════════════════════
@@ -680,9 +738,9 @@ async def _lesson_select(query, context, mode):
     lessons = await db.get_lessons()
     if not lessons:
         await query.edit_message_text("❌ هنوز سوالی موجود نیست.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:practice')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:practice")
+            ])); return
     context.user_data['_lessons'] = lessons
     keyboard = []
     for i in range(0, len(lessons), 2):
@@ -690,7 +748,7 @@ async def _lesson_select(query, context, mode):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:sel_lesson:{mode}:{i+1}'))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:practice')])
+    keyboard.append(_back("🔙 بازگشت", "questions:practice"))
     label = "شبیه‌سازی امتحان" if mode == 'exam' else "تمرین آزاد"
     await query.edit_message_text(f"📚 <b>{label}</b>\n\nدرس را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -699,10 +757,11 @@ async def _lesson_select(query, context, mode):
 async def _topic_select(query, context, lesson, mode):
     topics = await db.get_topics(lesson)
     context.user_data['_topics'] = topics
+    # بازگشت به لیست درس‌ها همان mode
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:sel_topic:{mode}:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data=f'questions:sel_topic:{mode}:all')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f'questions:{"exam" if mode=="exam" else "free"}')])
+    keyboard.append(_back("🔙 بازگشت", f'questions:{"exam" if mode=="exam" else "free"}'))
     await query.edit_message_text(f"📚 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -719,7 +778,6 @@ async def _quiz_stats(query, uid):
     weak    = stats.get('weak_topics', [])[:5]
     bar     = '█' * int(pct/10) + '░' * (10 - int(pct/10))
 
-    # تعداد سوالات طراحی شده توسط این کاربر
     designed = await db.questions.count_documents({'creator_id': uid})
 
     text = (
@@ -735,9 +793,9 @@ async def _quiz_stats(query, uid):
         text += "\n🎉 هیچ نقطه ضعف ثبت‌شده‌ای ندارید!"
 
     await query.edit_message_text(text, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-        ]]))
+        reply_markup=InlineKeyboardMarkup([
+            _back("🔙 بازگشت", "questions:main")
+        ]))
 
 
 # ══════════════════════════════════════════════════════════
@@ -749,9 +807,9 @@ async def _create_start(query, context):
     if not lessons:
         await query.edit_message_text(
             "❌ هنوز درسی تعریف نشده.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')
-            ]])); return
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ])); return
     context.user_data['_lessons'] = lessons
     keyboard = []
     for i in range(0, len(lessons), 2):
@@ -759,7 +817,7 @@ async def _create_start(query, context):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:cr_lesson:{i+1}'))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:main')])
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
     is_ca = context.user_data.get('creating_as_ca', False)
     note  = "\n🤖 سوال شما با برچسب «طراحی توسط بات» ثبت می‌شود." if is_ca else \
             "\n⏳ سوال شما پس از تأیید ادمین در بانک قرار می‌گیرد."
@@ -771,7 +829,6 @@ async def _create_start(query, context):
 async def _create_topic_select(query, context, lesson):
     topics = await db.get_topics(lesson)
     if not topics:
-        # اگه مبحث نداشت، مستقیم به step سوال برو
         context.user_data.setdefault('new_q', {})['topic'] = lesson
         context.user_data['mode']        = 'creating_question'
         context.user_data['create_step'] = 'question'
@@ -786,7 +843,7 @@ async def _create_topic_select(query, context, lesson):
     context.user_data['_topics'] = topics
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:cr_topic:{i}')]
                 for i, t in enumerate(topics)]
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='questions:create')])
+    keyboard.append(_back("🔙 بازگشت", "questions:create"))
     await query.edit_message_text(f"✏️ <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -889,19 +946,19 @@ async def _save_question(update, context):
     by_bot    = is_ca
 
     await db.questions.insert_one({
-        'lesson':      q.get('lesson', ''),
-        'topic':       q.get('topic', ''),
-        'difficulty':  q.get('difficulty', 'متوسط 🟡'),
-        'question':    q.get('question', ''),
-        'options':     q.get('options', []),
+        'lesson':         q.get('lesson', ''),
+        'topic':          q.get('topic', ''),
+        'difficulty':     q.get('difficulty', 'متوسط 🟡'),
+        'question':       q.get('question', ''),
+        'options':        q.get('options', []),
         'correct_answer': q.get('correct', 0),
-        'explanation': q.get('explanation', ''),
-        'creator_id':  uid,
-        'by_bot':      by_bot,
-        'approved':    auto,
-        'created_at':  datetime.now().isoformat(),
-        'attempt_count': 0,
-        'correct_count': 0,
+        'explanation':    q.get('explanation', ''),
+        'creator_id':     uid,
+        'by_bot':         by_bot,
+        'approved':       auto,
+        'created_at':     datetime.now().isoformat(),
+        'attempt_count':  0,
+        'correct_count':  0,
     })
 
     for k in ['new_q', 'create_step', 'mode', 'cr_lesson', 'creating_as_ca']:
@@ -912,4 +969,8 @@ async def _save_question(update, context):
     else:
         msg = "✅ <b>سوال ارسال شد و در انتظار تأیید ادمین است.</b>\nپس از تأیید در بانک سوال نمایش داده می‌شود."
 
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await update.message.reply_text(
+        msg, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            _back("🔙 بازگشت به بانک سوال", "questions:main")
+        ]))
