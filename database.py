@@ -25,10 +25,14 @@ class DB:
 
         self.client = motor.motor_asyncio.AsyncIOMotorClient(
             uri,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            maxPoolSize=50,
-            minPoolSize=5,
+            serverSelectionTimeoutMS=30000,   # ←  5s بود، Railway نیاز به بیشتر دارد
+            connectTimeoutMS=20000,            # ←  5s بود
+            socketTimeoutMS=45000,             # ←  جدید: برای کوئری‌های طولانی
+            maxPoolSize=10,                    # ←  50 بود، Railway free tier محدود است
+            minPoolSize=1,                     # ←  5 بود
+            retryWrites=True,
+            retryReads=True,
+            waitQueueTimeoutMS=10000,          # ←  جدید: اگر pool پر بود صبر کن
         )
         _db = self.client['medicalbot']
 
