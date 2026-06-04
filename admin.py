@@ -6,6 +6,7 @@
   ✅ دکمه بازگشت در همه منوها
 """
 import os
+import asyncio
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -526,19 +527,50 @@ async def _pending_questions(query):
             ]])
         )
         return
-    keyboard = []
-    for q in questions[:10]:
-        qid   = str(q['_id'])
-        label = q.get('question', '')[:40]
-        keyboard.append([InlineKeyboardButton(f"❓ {label}", callback_data='admin:pending_q')])
-        keyboard.append([
-            InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve_q:{qid}'),
-            InlineKeyboardButton("🗑 رد",    callback_data=f'admin:reject_q:{qid}'),
-        ])
+
+    LETTERS = ['🅐', '🅑', '🅒', '🅓']
+    # FIX: نمایش پیش‌نمایش کامل سوال اول + دکمه‌های ناوبری
+    q       = questions[0]
+    qid     = str(q['_id'])
+    opts    = q.get('options', [])
+    opts_text = '\n'.join(
+        f"{'✅' if i == q.get('correct_answer', 0) else f'{LETTERS[i]}'} {o}"
+        for i, o in enumerate(opts)
+    )
+    expl    = q.get('explanation', '')
+    diff    = q.get('difficulty', '')
+    creator_id = q.get('creator_id')
+    creator_name = ''
+    if creator_id:
+        cuser = await db.get_user(creator_id)
+        creator_name = cuser.get('name', '') if cuser else ''
+
+    text = (
+        f"⏳ <b>سوالات در انتظار تأیید</b> — {len(questions)} سوال\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"📚 {q.get('lesson', '')} — {q.get('topic', '')} | {diff}\n"
+        f"✏️ طراح: {creator_name or 'نامشخص'}\n\n"
+        f"❓ <b>{q.get('question', '')}</b>\n\n"
+        f"{opts_text}"
+    )
+    if expl:
+        text += f"\n\n💡 توضیح: {expl}"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ تأیید",     callback_data=f'admin:approve_q:{qid}'),
+            InlineKeyboardButton("🗑 رد و حذف",  callback_data=f'admin:reject_q:{qid}'),
+        ],
+    ]
+    if len(questions) > 1:
+        keyboard.append([InlineKeyboardButton(
+            f"⏭ بعدی ({len(questions)-1} باقی‌مانده)",
+            callback_data='admin:pending_q'
+        )])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+
     await query.edit_message_text(
-        f"⏳ <b>سوالات در انتظار</b> — {len(questions)} سوال",
-        parse_mode='HTML',
+        text, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -622,6 +654,28 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return True
 
+    # ── FIX: ذخیره توضیح فایل بانک سوال (قبلاً هرگز ذخیره نمی‌شد) ──
+    elif mode == 'qbank_awaiting_desc':
+        desc      = '' if text == '-' else text
+        file_id   = context.user_data.get('qbank_file_id', '')
+        file_type = context.user_data.get('qbank_file_type', 'document')
+        lesson    = context.user_data.get('qbank_lesson', '')
+        topic     = context.user_data.get('qbank_topic', '')
+        if file_id:
+            await db.add_qbank_file(lesson, topic, file_id, desc, file_type)
+            for k in ['qbank_file_id', 'qbank_file_type', 'qbank_lesson',
+                      'qbank_topic', 'mode']:
+                context.user_data.pop(k, None)
+            await update.message.reply_text(
+                f"✅ فایل بانک سوال ذخیره شد!\n📚 {lesson} — {topic or 'همه'}"
+                + (f"\n📝 {desc}" if desc else ''),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 مدیریت بانک سوال", callback_data='admin:qbank_manage')
+                ]])
+            )
+            return True
+        return False
+
     return False
 
 
@@ -672,39 +726,46 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     users  = await db.all_users(approved_only=True)
+    msg    = update.message
     sent   = 0
     failed = 0
 
-    for u in users:
+    # FIX: ارسال با تأخیر برای جلوگیری از rate limit تلگرام
+    for i, u in enumerate(users):
         try:
-            if update.message.text:
-                await context.bot.send_message(
-                    u['user_id'], update.message.text, parse_mode='HTML'
-                )
-            elif update.message.photo:
+            if msg.text:
+                await context.bot.send_message(u['user_id'], msg.text, parse_mode='HTML')
+            elif msg.photo:
                 await context.bot.send_photo(
-                    u['user_id'], update.message.photo[-1].file_id,
-                    caption=update.message.caption or ''
+                    u['user_id'], msg.photo[-1].file_id,
+                    caption=msg.caption or '', parse_mode='HTML'
                 )
-            elif update.message.video:
+            elif msg.video:
                 await context.bot.send_video(
-                    u['user_id'], update.message.video.file_id,
-                    caption=update.message.caption or ''
+                    u['user_id'], msg.video.file_id,
+                    caption=msg.caption or '', parse_mode='HTML'
                 )
-            elif update.message.document:
+            elif msg.document:
                 await context.bot.send_document(
-                    u['user_id'], update.message.document.file_id,
-                    caption=update.message.caption or ''
+                    u['user_id'], msg.document.file_id,
+                    caption=msg.caption or '', parse_mode='HTML'
                 )
             sent += 1
         except Exception:
             failed += 1
+        # تأخیر 50ms بین هر پیام — جلوگیری از flood
+        if i % 25 == 24:
+            await asyncio.sleep(1)   # هر ۲۵ پیام یک ثانیه استراحت
+        else:
+            await asyncio.sleep(0.05)
 
     context.user_data['mode'] = ''
     await update.message.reply_text(
-        f"✅ ارسال همگانی:\n"
-        f"✅ موفق: {sent}\n"
-        f"❌ ناموفق: {failed}",
+        f"✅ <b>ارسال همگانی تمام شد</b>\n"
+        f"✅ موفق: <b>{sent}</b>\n"
+        f"❌ ناموفق: <b>{failed}</b>\n"
+        f"👥 مجموع: {len(users)}",
+        parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')
         ]])
