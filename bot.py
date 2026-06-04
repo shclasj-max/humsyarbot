@@ -40,7 +40,7 @@ from stats import stats_callback
 from notifications import notifications_callback
 from admin import (
     admin_callback, admin_broadcast_handler, upload_file_handler,
-    handle_admin_text, BROADCAST
+    handle_admin_text
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
 from utils import cancel_handler, ADMIN_ID
@@ -206,17 +206,28 @@ async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ۱. بکاپ restore
     if uid == ADMIN_ID and context.user_data.get('backup_mode') == 'waiting_restore':
         return await backup_file_handler(update, context)
-    # ۲. آپلود محتوا
+    # ۲. FIX: broadcast — عکس/ویدیو/فایل در broadcast mode
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
+        return await admin_broadcast_handler(update, context)
+    # ۳. FIX: qbank file upload
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'qbank_awaiting_file':
+        return await upload_file_handler(update, context)
+    # ۴. آپلود محتوا (content_admin)
     ca_mode = context.user_data.get('ca_mode', '')
     if ca_mode in ('waiting_file', 'waiting_ref_file') and await db.is_content_admin(uid):
         return await ca_file_handler(update, context)
-    # ۳. آپلود فایل ادمین
+    # ۵. آپلود فایل ادمین (mode عمومی)
     if uid == ADMIN_ID and context.user_data.get('mode') == 'upload_file':
         return await upload_file_handler(update, context)
 
 
 async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # ── FIX: broadcast — باید قبل از همه چک بشه
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
+        return await admin_broadcast_handler(update, context)
+
     ca_mode = context.user_data.get('ca_mode', '')
     # محتوا ادمین — توضیحات رفرنس
     if ca_mode == 'waiting_ref_description' and await db.is_content_admin(uid):
@@ -284,18 +295,7 @@ def build_application() -> Application:
             ANSWERING: [
                 CallbackQueryHandler(handle_question_answer, pattern=r'^answer:')
             ],
-            BROADCAST: [
-                # FIX: اضافه کردن handler برای دکمه لغو — بدون این، لغو کار نمی‌کرد
-                CallbackQueryHandler(admin_callback, pattern=r'^admin:'),
-                CommandHandler('cancel', cancel_handler),
-                # پیام‌های متنی که شامل دستورات ناوبری نیستن
-                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_handler),
-                # فایل، عکس، ویدیو
-                MessageHandler(
-                    filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-                    admin_broadcast_handler
-                ),
-            ],
+            # BROADCAST state حذف شد — broadcast مستقیم در unified handlers مدیریت میشه
             CREATING_Q: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_create_question_steps),
                 CallbackQueryHandler(handle_difficulty_choice, pattern=r'^qd:'),
