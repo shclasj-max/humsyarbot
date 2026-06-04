@@ -1,5 +1,19 @@
-from telegram import ReplyKeyboardMarkup, KeyboardButton
+"""
+🛠️ Utilities — ثابت‌ها، کیبوردها، و توابع کمکی مشترک
+"""
+import os
+import logging
+from typing import Optional, List
+from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ConversationHandler
 
+logger = logging.getLogger(__name__)
+
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+
+# ══════════════════════════════════════════════════
+#  ثابت‌های مشترک
+# ══════════════════════════════════════════════════
 TERMS = ['ترم ۱', 'ترم ۲', 'ترم ۳', 'ترم ۴', 'ترم ۵']
 
 CONTENT_TYPES = [
@@ -11,6 +25,8 @@ CONTENT_TYPES = [
     ('voice', '🎙 ویس استاد'),
 ]
 
+CONTENT_ICONS = {k: v for k, v in CONTENT_TYPES}
+
 NOTIF_LABELS = {
     'new_resources':  '📚 منابع جدید',
     'schedule':       '📅 تغییر برنامه',
@@ -18,43 +34,230 @@ NOTIF_LABELS = {
     'daily_question': '🧪 سوال روزانه',
 }
 
+DIFF_LABELS = {
+    'easy':   'آسان 🟢',
+    'medium': 'متوسط 🟡',
+    'hard':   'سخت 🔴',
+}
 
-def main_keyboard():
+JALALI_MONTHS = [
+    'فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور',
+    'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'
+]
+JALALI_DAYS = ['دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنج‌شنبه', 'جمعه', 'شنبه', 'یکشنبه']
+
+# ══════════════════════════════════════════════════
+#  کیبوردهای ReplyKeyboard
+# ══════════════════════════════════════════════════
+
+def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
-        [KeyboardButton("🩺 داشبورد"),       KeyboardButton("📚 منابع")],
-        [KeyboardButton("🧪 بانک سوال"),     KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),         KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("🔔 اعلان‌ها"),       KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
+        [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
+        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
+        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
     ], resize_keyboard=True)
 
 
-def content_admin_keyboard():
+def content_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
-        [KeyboardButton("🩺 داشبورد"),       KeyboardButton("📚 منابع")],
-        [KeyboardButton("🧪 بانک سوال"),     KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),         KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("🔔 اعلان‌ها"),       KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
+        [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
+        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
+        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
         [KeyboardButton("🎓 پنل محتوا")],
     ], resize_keyboard=True)
 
 
-def admin_keyboard():
+def admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
-        [KeyboardButton("🩺 داشبورد"),       KeyboardButton("📚 منابع")],
-        [KeyboardButton("🧪 بانک سوال"),     KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),         KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("🔔 اعلان‌ها"),       KeyboardButton("🎫 پشتیبانی")],
-        [KeyboardButton("👨‍⚕️ پنل ادمین"),   KeyboardButton("🎓 پنل محتوا")],
+        [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
+        [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
+        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
+        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("👨‍⚕️ پنل ادمین"), KeyboardButton("🎓 پنل محتوا")],
     ], resize_keyboard=True)
 
+
+def get_keyboard_for_user(user: dict, uid: int) -> ReplyKeyboardMarkup:
+    """کیبورد مناسب بر اساس نقش کاربر"""
+    if uid == ADMIN_ID:
+        return admin_keyboard()
+    role = user.get('role', 'student') if user else 'student'
+    if role == 'content_admin':
+        return content_admin_keyboard()
+    return main_keyboard()
+
+
+# ══════════════════════════════════════════════════
+#  دکمه‌های InlineKeyboard کمکی
+# ══════════════════════════════════════════════════
+
+def back_btn(label: str = "🔙 بازگشت", cb: str = 'dashboard:refresh') -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=cb)]])
+
+
+def confirm_keyboard(yes_cb: str, no_cb: str,
+                     yes_label: str = "✅ بله",
+                     no_label: str = "❌ خیر") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(yes_label, callback_data=yes_cb),
+        InlineKeyboardButton(no_label, callback_data=no_cb),
+    ]])
+
+
+def paginate(items: list, page: int, per_page: int = 8,
+             cb_prefix: str = 'page') -> tuple:
+    """برگرداندن صفحه جاری و دکمه‌های ناوبری"""
+    total_pages = max(1, (len(items) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    chunk = items[start:start + per_page]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f'{cb_prefix}:{page - 1}'))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f'{cb_prefix}:{page + 1}'))
+
+    return chunk, nav, page, total_pages
+
+
+# ══════════════════════════════════════════════════
+#  توابع فرمت‌بندی
+# ══════════════════════════════════════════════════
+
+def progress_bar(pct: float, length: int = 10,
+                 fill: str = '█', empty: str = '░') -> str:
+    filled = int(min(pct, 100) / 100 * length)
+    return fill * filled + empty * (length - filled)
+
+
+def get_rank(correct_answers: int) -> str:
+    if correct_answers >= 200: return "🏆 نخبه"
+    if correct_answers >= 100: return "🥇 حرفه‌ای"
+    if correct_answers >= 50:  return "🥈 پیشرفته"
+    if correct_answers >= 20:  return "🥉 در حال رشد"
+    return "🌱 تازه‌کار"
+
+
+def get_level(pct: float) -> str:
+    if pct >= 90: return "🏆 خبره"
+    if pct >= 75: return "⭐ پیشرفته"
+    if pct >= 60: return "📈 متوسط"
+    if pct >= 40: return "📚 مبتدی"
+    return "🌱 تازه‌کار"
+
+
+def exam_countdown(days: int) -> str:
+    if days < 0:  return f"({abs(days)} روز پیش)"
+    if days == 0: return "🔴 امروز!"
+    if days == 1: return "🔴 فردا!"
+    if days <= 3: return f"🟠 {days} روز دیگر"
+    if days <= 7: return f"🟡 {days} روز دیگر"
+    return f"🟢 {days} روز دیگر"
+
+
+# ══════════════════════════════════════════════════
+#  تبدیل تاریخ میلادی به شمسی
+# ══════════════════════════════════════════════════
+
+def _to_jalali(gy: int, gm: int, gd: int) -> tuple:
+    g_l = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2, gm2, gd2 = gy - 1600, gm - 1, gd - 1
+    g_day_no = (365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100
+                + (gy2 + 399) // 400 + g_l[gm2]
+                + (1 if gm2 > 1 and ((gy2 % 4 == 0 and gy2 % 100 != 0) or gy2 % 400 == 0) else 0)
+                + gd2)
+    j_day_no = g_day_no - 79
+    j_np = j_day_no // 12053
+    j_day_no %= 12053
+    jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
+    j_day_no %= 1461
+    if j_day_no >= 366:
+        jy += (j_day_no - 1) // 365
+        j_day_no = (j_day_no - 1) % 365
+    j_mi = [31, 31, 31, 31, 31, 31, 30, 30, 30, 30, 30, 29]
+    jm = 11
+    for i in range(11):
+        if j_day_no < j_mi[i]:
+            jm = i
+            break
+        j_day_no -= j_mi[i]
+    return jy, jm + 1, j_day_no + 1
+
+
+def fmt_jalali(date_str: str) -> str:
+    """تبدیل YYYY-MM-DD به مثلاً: ۱۵ فروردین ۱۴۰۴ (شنبه)"""
+    try:
+        from datetime import datetime
+        y, m, d = map(int, date_str.split('-'))
+        jy, jm, jd = _to_jalali(y, m, d)
+        day_of_week = JALALI_DAYS[datetime(y, m, d).weekday()]
+        return f"{jd} {JALALI_MONTHS[jm - 1]} {jy} ({day_of_week})"
+    except Exception:
+        return date_str
+
+
+def days_until(date_str: str) -> int:
+    try:
+        from datetime import datetime
+        d = datetime.strptime(date_str, '%Y-%m-%d')
+        return (d.replace(hour=0, minute=0, second=0, microsecond=0) -
+                datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)).days
+    except Exception:
+        return 0
+
+
+# ══════════════════════════════════════════════════
+#  هندلر لغو
+# ══════════════════════════════════════════════════
+
 async def cancel_handler(update, context):
-    """لغو هر عملیات در حال انجام با /cancel"""
-    from telegram.ext import ConversationHandler
-    # پاک‌سازی تمام حالت‌های فعال
-    for key in ['ca_mode', 'ca_pending_file', 'ca_content_type',
-                'ca_edit_target', 'ca_edit_field',
-                'ticket_mode', 'mode', 'creating_question']:
+    """لغو هر عملیات در جریان با /cancel"""
+    keys_to_clear = [
+        'ca_mode', 'ca_pending_file', 'ca_content_type',
+        'ca_edit_target', 'ca_edit_field', 'ca_ref_lang', 'ca_ref_volume',
+        'ticket_mode', 'mode', 'creating_question',
+        'profile_edit', 'awaiting_search', 'search_mode',
+        'edit_user', 'backup_mode',
+    ]
+    for key in keys_to_clear:
         context.user_data.pop(key, None)
+
     await update.message.reply_text(
-        "✅ عملیات لغو شد.\n\nبرای ادامه از دکمه‌های ربات استفاده کنید.")
+        "✅ عملیات لغو شد.\n\nاز دکمه‌های منو استفاده کنید.",
+        reply_markup=main_keyboard()
+    )
     return ConversationHandler.END
+
+
+# ══════════════════════════════════════════════════
+#  ارسال امن پیام (بدون کرش روی Forbidden)
+# ══════════════════════════════════════════════════
+
+async def safe_send(bot, uid: int, text: str, **kwargs) -> bool:
+    """ارسال پیام با مدیریت خطا — برای broadcast"""
+    try:
+        await bot.send_message(uid, text, **kwargs)
+        return True
+    except Exception as e:
+        logger.debug(f"safe_send failed for {uid}: {e}")
+        return False
+
+
+async def broadcast_message(bot, users: List[dict], text: str,
+                            parse_mode: str = 'HTML') -> tuple:
+    """ارسال همگانی — برمی‌گردونه (sent, failed)"""
+    import asyncio
+    sent, failed = 0, 0
+    # ارسال دسته‌ای با تاخیر کم برای جلوگیری از flood
+    for i, u in enumerate(users):
+        ok = await safe_send(bot, u['user_id'], text, parse_mode=parse_mode)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+        if i % 30 == 29:
+            await asyncio.sleep(1)  # تنفس بین دسته‌ها
+    return sent, failed
