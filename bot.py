@@ -145,11 +145,37 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Exception: {context.error}", exc_info=context.error)
-    # گزارش خطا به ادمین
+    err = context.error
+    err_str = str(err)
+
+    # ── خطاهای بی‌خطر که نیاز به گزارش ندارند ──
+    SILENT_ERRORS = (
+        'Query is too old',
+        'query id is invalid',
+        'Message is not modified',
+        'MESSAGE_ID_INVALID',
+        'connection pool paused',
+        'timed out',
+        'Bad Request: message to edit not found',
+    )
+    is_silent = any(e in err_str for e in SILENT_ERRORS)
+
+    if is_silent:
+        logger.warning(f"⚠️ Silent error (ignored): {err_str[:120]}")
+        # اگر stale callback query بود، سعی کن جواب بده تا spinner بماند
+        if update and hasattr(update, 'callback_query') and update.callback_query:
+            try:
+                await update.callback_query.answer("⚠️ لطفاً دوباره امتحان کنید.", show_alert=False)
+            except Exception:
+                pass
+        return
+
+    logger.error(f"Exception: {err}", exc_info=err)
+
+    # گزارش خطا به ادمین — فقط خطاهای واقعی
     if ADMIN_ID:
         try:
-            err_text = f"⚠️ <b>خطای ربات</b>\n<code>{str(context.error)[:300]}</code>"
+            err_text = f"⚠️ <b>خطای ربات</b>\n<code>{err_str[:400]}</code>"
             await context.bot.send_message(ADMIN_ID, err_text, parse_mode='HTML')
         except Exception:
             pass
@@ -212,7 +238,7 @@ def build_application() -> Application:
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .concurrent_updates(True)
+        .concurrent_updates(True)      # پردازش موازی آپدیت‌ها
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(15)
@@ -338,24 +364,23 @@ async def post_init(application: Application):
     await db.ensure_indexes()
     logger.info("✅ ایندکس‌های دیتابیس آماده شدند")
 
-    # ثبت jobهای زمان‌بندی — فقط اگر job_queue فعال باشد
-    if application.job_queue is not None:
-        reminder_time = dtime(hour=4, minute=30, tzinfo=timezone.utc)
-        application.job_queue.run_daily(
-            exam_reminder_job,
-            time=reminder_time,
-            name='exam_reminder'
-        )
-        daily_q_time = dtime(hour=5, minute=30, tzinfo=timezone.utc)
-        application.job_queue.run_daily(
-            daily_question_job,
-            time=daily_q_time,
-            name='daily_question'
-        )
-        logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
-    else:
-        logger.warning("⚠️ JobQueue فعال نیست — یادآوری‌های زمان‌بندی غیرفعال هستند")
-        logger.warning("   برای فعال‌سازی: pip install \"python-telegram-bot[job-queue]\"")
+    # ثبت job یادآوری امتحان — هر روز ۰۸:۰۰ UTC+3:30
+    reminder_time = dtime(hour=4, minute=30, tzinfo=timezone.utc)  # ۰۸:۰۰ تهران
+    application.job_queue.run_daily(
+        exam_reminder_job,
+        time=reminder_time,
+        name='exam_reminder'
+    )
+
+    # ثبت job سوال روزانه — ۰۹:۰۰ تهران
+    daily_q_time = dtime(hour=5, minute=30, tzinfo=timezone.utc)
+    application.job_queue.run_daily(
+        daily_question_job,
+        time=daily_q_time,
+        name='daily_question'
+    )
+
+    logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
 
 
 def main():
