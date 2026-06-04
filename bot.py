@@ -55,6 +55,7 @@ from content_admin import (
 )
 from faq import faq_callback
 from ticket import ticket_callback, ticket_message_handler, TICKET_WAITING, TICKET_REPLY_WAITING
+from archive import archive_callback
 from database import db
 
 logging.basicConfig(
@@ -146,11 +147,51 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Exception: {context.error}", exc_info=context.error)
-    # گزارش خطا به ادمین
+    err = context.error
+    err_str = str(err)
+
+    # ── خطای Conflict: یعنی دو نمونه ربات همزمان دارن کار می‌کنن ──
+    # این خطا نه به کاربران نه به ادمین ارسال نمیشه — فقط log میشه
+    if 'Conflict' in err_str and 'getUpdates' in err_str:
+        logger.critical(
+            "🚨 CONFLICT: دو نمونه از ربات همزمان دارن اجرا میشن!\n"
+            "راه‌حل: در Railway/سرور قبلی ربات رو متوقف کن."
+        )
+        return  # بدون ارسال پیام
+
+    # ── خطاهای معمول: فقط لاگ + اطلاع به ادمین ──
+    logger.error(f"Exception while handling update: {err}", exc_info=err)
+
+    # خطاهای بی‌اهمیت که نیازی به اطلاع ادمین ندارن
+    IGNORED = (
+        'Message is not modified',       # edit پیام یکسان
+        'Query is too old',              # callback قدیمی
+        'MESSAGE_ID_INVALID',            # پیام حذف شده
+        'Forbidden: bot was blocked',    # کاربر ربات رو بلاک کرده
+        'Chat not found',                # چت حذف شده
+        'User is deactivated',           # حساب غیرفعال
+        'have no rights to send',        # بدون دسترسی
+        'Timed out',                     # timeout موقت
+    )
+    if any(ig in err_str for ig in IGNORED):
+        logger.debug(f"Ignored error: {err_str[:100]}")
+        return
+
+    # ارسال خطا فقط به ادمین
     if ADMIN_ID:
         try:
-            err_text = f"⚠️ <b>خطای ربات</b>\n<code>{str(context.error)[:300]}</code>"
+            # اطلاعات بیشتر برای debug
+            update_info = ''
+            if update and hasattr(update, 'effective_user') and update.effective_user:
+                u = update.effective_user
+                update_info = f"\n👤 کاربر: {u.first_name} | آیدی: <code>{u.id}</code>"
+            if update and hasattr(update, 'callback_query') and update.callback_query:
+                update_info += f"\n🔘 Callback: <code>{update.callback_query.data[:50]}</code>"
+
+            err_text = (
+                f"⚠️ <b>خطای ربات</b>{update_info}\n"
+                f"<code>{err_str[:300]}</code>"
+            )
             await context.bot.send_message(ADMIN_ID, err_text, parse_mode='HTML')
         except Exception:
             pass
@@ -213,11 +254,12 @@ def build_application() -> Application:
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .concurrent_updates(True)      # پردازش موازی آپدیت‌ها
+        .concurrent_updates(True)
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(15)
         .pool_timeout(15)
+        .post_init(post_init)       # FIX: باید اینجا ست بشه نه بعد از build()
         .build()
     )
 
@@ -292,28 +334,43 @@ def build_application() -> Application:
 
     # ── Callback handlers — ترتیب مهم: specific قبل از general ──
     cbs = [
+        # ── پروفایل ──
         (profile_callback,          r'^profile:'),
-        # ── علوم پایه + دانلود محتوا (bs_dl:) ──
+
+        # ── علوم پایه + دانلود محتوا ──
+        # FIX: bs_dl: باید قبل از bs[_:] باشه — هر دو به basic_science_callback میرن
+        (basic_science_callback,    r'^bs_dl:'),
         (basic_science_callback,    r'^bs[_:]'),
-        (basic_science_callback,    r'^bs_dl:'),          # FIX: handler گمشده دانلود محتوای علوم پایه
         (basic_science_callback,    r'^resources:bs'),
+
         # ── رفرنس‌ها ──
         (references_callback,       r'^ref[_:]'),
         (references_callback,       r'^resources:ref'),
-        # ── منابع — specific قبل از general ──
-        (route_resources,           r'^resources:menu'),  # FIX: باید قبل از r'^resources' باشد
-        (resources_callback,        r'^download_resource:'),  # FIX: handler گمشده دانلود منابع
-        (route_resources,           r'^resources:'),
+
+        # ── آرشیو ویدیوها ──
+        (archive_callback,          r'^archive:'),
+        (archive_callback,          r'^download_video:'),
+
+        # ── منابع قدیمی — specific قبل از general ──
+        # FIX: download_resource: باید قبل از resources: باشه
+        (resources_callback,        r'^download_resource:'),
+        (route_resources,           r'^resources:menu$'),
+        (resources_callback,        r'^resources:'),
+
         # ── داشبورد ──
         (dashboard_callback,        r'^dashboard'),
-        # ── سوالات + جواب + دانلود بانک سوال ──
-        (questions_callback,        r'^(questions|answer:|download_qbank:)'),
+
+        # ── سوالات — FIX: download_qbank: در همین pattern هندل میشه ──
+        (questions_callback,        r'^questions:'),
+        (questions_callback,        r'^download_qbank:'),
+        (handle_question_answer,    r'^answer:'),
+
         # ── بقیه ──
         (schedule_callback,         r'^schedule'),
         (stats_callback,            r'^stats'),
         (notifications_callback,    r'^notif'),
         (admin_callback,            r'^admin'),
-        (backup_confirm_restore,    r'^backup:confirm_restore'),
+        (backup_confirm_restore,    r'^backup:confirm_restore$'),
         (backup_callback,           r'^backup:'),
         (faq_callback,              r'^faq:'),
         (content_admin_callback,    r'^ca:'),
@@ -368,8 +425,9 @@ async def post_init(application: Application):
 
 def main():
     app = build_application()
-    app.post_init = post_init
 
+    # FIX: در PTB 21.x باید از ApplicationBuilder.post_init استفاده کرد
+    # نه از app.post_init = ... بعد از build
     logger.info("🩺 ربات پزشکی شروع به کار کرد...")
     app.run_polling(
         drop_pending_updates=True,
