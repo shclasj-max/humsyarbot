@@ -30,6 +30,7 @@ def _profile_text(user: dict, stats: dict, open_tickets: int) -> str:
         "╚══════════════════╝\n\n"
         f"📛 <b>نام:</b>  {user.get('name', '')}\n"
         f"👥 <b>گروه:</b>  گروه {user.get('group', '')}\n"
+        f"📅 <b>ورودی:</b>  {user.get('intake', '') or 'ثبت نشده'}\n"
         f"📱 <b>یوزرنیم:</b>  {uname}\n"
         f"🎭 <b>نقش:</b>  {role_icon}\n"
         f"📅 <b>ثبت‌نام:</b>  {reg_date}\n\n"
@@ -53,6 +54,7 @@ def _profile_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✏️ ویرایش نام",  callback_data='profile:edit_name'),
             InlineKeyboardButton("👥 تغییر گروه",   callback_data='profile:edit_group'),
         ],
+        [InlineKeyboardButton("📅 تغییر ورودی",     callback_data='profile:edit_intake')],
         [InlineKeyboardButton("🔄 بروزرسانی",       callback_data='profile:refresh')],
         [InlineKeyboardButton("🔙 داشبورد",          callback_data='dashboard:refresh')],
     ])
@@ -118,6 +120,33 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_group = parts[2]
         await db.update_user(uid, {'group': new_group})
         await query.answer(f"✅ گروه به {new_group} تغییر یافت!", show_alert=True)
+        user, stats, open_t = await _get_profile_data(uid)
+        await query.edit_message_text(
+            _profile_text(user, stats, open_t),
+            parse_mode='HTML',
+            reply_markup=_profile_keyboard()
+        )
+
+    elif action == 'edit_intake':
+        intakes = await db.get_active_intakes()
+        if not intakes:
+            await query.answer("❌ هیچ ورودی‌ای تعریف نشده!", show_alert=True)
+            return
+        keyboard = [[InlineKeyboardButton(i['label'], callback_data=f'profile:set_intake:{i["code"]}')]
+                    for i in intakes]
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='profile:main')])
+        await query.edit_message_text(
+            "📅 <b>تغییر ورودی تحصیلی</b>\n\nورودی جدید خود را انتخاب کنید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif action == 'set_intake' and len(parts) > 2:
+        new_intake = parts[2]
+        intakes    = await db.get_all_intakes()
+        label      = next((i['label'] for i in intakes if i['code'] == new_intake), new_intake)
+        await db.update_user(uid, {'intake': new_intake})
+        await query.answer(f"✅ ورودی به {label} تغییر یافت!", show_alert=True)
         user, stats, open_t = await _get_profile_data(uid)
         await query.edit_message_text(
             _profile_text(user, stats, open_t),
