@@ -47,6 +47,7 @@ from utils import cancel_handler, ADMIN_ID
 from profile import profile_callback, profile_text_handler, PROFILE_EDIT_WAITING
 from message_router import route_message
 from basic_science import basic_science_callback
+from resources import resources_callback
 from references import references_callback
 from content_admin import (
     content_admin_callback, ca_file_handler, ca_text_handler,
@@ -145,37 +146,11 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    err_str = str(err)
-
-    # ── خطاهای بی‌خطر که نیاز به گزارش ندارند ──
-    SILENT_ERRORS = (
-        'Query is too old',
-        'query id is invalid',
-        'Message is not modified',
-        'MESSAGE_ID_INVALID',
-        'connection pool paused',
-        'timed out',
-        'Bad Request: message to edit not found',
-    )
-    is_silent = any(e in err_str for e in SILENT_ERRORS)
-
-    if is_silent:
-        logger.warning(f"⚠️ Silent error (ignored): {err_str[:120]}")
-        # اگر stale callback query بود، سعی کن جواب بده تا spinner بماند
-        if update and hasattr(update, 'callback_query') and update.callback_query:
-            try:
-                await update.callback_query.answer("⚠️ لطفاً دوباره امتحان کنید.", show_alert=False)
-            except Exception:
-                pass
-        return
-
-    logger.error(f"Exception: {err}", exc_info=err)
-
-    # گزارش خطا به ادمین — فقط خطاهای واقعی
+    logger.error(f"Exception: {context.error}", exc_info=context.error)
+    # گزارش خطا به ادمین
     if ADMIN_ID:
         try:
-            err_text = f"⚠️ <b>خطای ربات</b>\n<code>{err_str[:400]}</code>"
+            err_text = f"⚠️ <b>خطای ربات</b>\n<code>{str(context.error)[:300]}</code>"
             await context.bot.send_message(ADMIN_ID, err_text, parse_mode='HTML')
         except Exception:
             pass
@@ -315,17 +290,25 @@ def build_application() -> Application:
     )
     app.add_handler(conv)
 
-    # ── Callback handlers — ترتیب مهم است: specific قبل از general ──
+    # ── Callback handlers — ترتیب مهم: specific قبل از general ──
     cbs = [
         (profile_callback,          r'^profile:'),
+        # ── علوم پایه + دانلود محتوا (bs_dl:) ──
         (basic_science_callback,    r'^bs[_:]'),
+        (basic_science_callback,    r'^bs_dl:'),          # FIX: handler گمشده دانلود محتوای علوم پایه
         (basic_science_callback,    r'^resources:bs'),
+        # ── رفرنس‌ها ──
         (references_callback,       r'^ref[_:]'),
         (references_callback,       r'^resources:ref'),
-        (route_resources,           r'^resources:menu'),
-        (route_resources,           r'^resources'),
+        # ── منابع — specific قبل از general ──
+        (route_resources,           r'^resources:menu'),  # FIX: باید قبل از r'^resources' باشد
+        (resources_callback,        r'^download_resource:'),  # FIX: handler گمشده دانلود منابع
+        (route_resources,           r'^resources:'),
+        # ── داشبورد ──
         (dashboard_callback,        r'^dashboard'),
+        # ── سوالات + جواب + دانلود بانک سوال ──
         (questions_callback,        r'^(questions|answer:|download_qbank:)'),
+        # ── بقیه ──
         (schedule_callback,         r'^schedule'),
         (stats_callback,            r'^stats'),
         (notifications_callback,    r'^notif'),
