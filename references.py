@@ -1,4 +1,9 @@
-"""رفرنس‌ها — دانشجو — با پشتیبانی چند جلد"""
+"""
+رفرنس‌ها — دانشجو — فیکس کامل دکمه‌های بازگشت
+✅ بازگشت صحیح در همه مسیرها
+✅ پشتیبانی چند جلد
+✅ ذخیره مسیر ناوبری در context
+"""
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -17,40 +22,49 @@ async def references_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     came_from_admin = context.user_data.get('ref_from_admin', False)
 
     if action == 'main':
-        context.user_data['ref_from_admin'] = False
+        context.user_data['ref_from_admin']   = False
+        context.user_data.pop('ref_subject_id', None)
+        context.user_data.pop('ref_book_id', None)
         await _show_subjects(query, back_cb='resources:menu')
 
     elif action == 'main_admin':
-        context.user_data['ref_from_admin'] = True
+        context.user_data['ref_from_admin']   = True
+        context.user_data.pop('ref_subject_id', None)
+        context.user_data.pop('ref_book_id', None)
         await _show_subjects(query, back_cb='admin:main')
 
     elif action == 'subject':
         subject_id = parts[2]
         context.user_data['ref_subject_id'] = subject_id
+        # بازگشت صحیح: به لیست درس‌ها
         back = 'ref:main_admin' if came_from_admin else 'ref:main'
         await _show_books(query, context, subject_id, back_cb=back)
 
     elif action == 'book':
-        book_id = parts[2]
-        context.user_data['ref_book_id'] = book_id
+        book_id    = parts[2]
         subject_id = context.user_data.get('ref_subject_id', '')
-        await _show_lang_choice(query, context, book_id,
-                                back_cb=f'ref:subject:{subject_id}')
+        context.user_data['ref_book_id'] = book_id
+        # بازگشت صحیح: به لیست کتاب‌های همان درس
+        back_cb = f'ref:subject:{subject_id}' if subject_id else ('ref:main_admin' if came_from_admin else 'ref:main')
+        await _show_lang_choice(query, context, book_id, back_cb=back_cb)
 
     elif action == 'volumes':
         # نمایش جلدهای یک زبان خاص
-        book_id = parts[2]
-        lang    = parts[3]
-        context.user_data['ref_book_id'] = book_id
+        book_id    = parts[2]
+        lang       = parts[3]
         subject_id = context.user_data.get('ref_subject_id', '')
-        await _show_volumes(query, context, book_id, lang,
-                            back_cb=f'ref:book:{book_id}')
+        context.user_data['ref_book_id'] = book_id
+        # بازگشت صحیح: به صفحه انتخاب زبان همان کتاب
+        back_cb = f'ref:book:{book_id}'
+        await _show_volumes(query, context, book_id, lang, back_cb=back_cb)
 
     elif action == 'dl':
         file_id_db = parts[2]
         await _download_ref(query, file_id_db, update.effective_user.id)
 
 
+# ══════════════════════════════════════════════════════════
+#  نمایش لیست درس‌ها
 # ══════════════════════════════════════════════════════════
 
 async def _show_subjects(query, back_cb='resources:menu'):
@@ -77,6 +91,10 @@ async def _show_subjects(query, back_cb='resources:menu'):
         reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+# ══════════════════════════════════════════════════════════
+#  نمایش کتاب‌های یک درس
+# ══════════════════════════════════════════════════════════
+
 async def _show_books(query, context, subject_id, back_cb='ref:main'):
     subject = await db.ref_get_subject(subject_id)
     if not subject:
@@ -93,7 +111,6 @@ async def _show_books(query, context, subject_id, back_cb='ref:main'):
     keyboard = []
     for b in books:
         bid = str(b['_id'])
-        # نشون بده چند فایل داره
         files     = await db.ref_get_files(bid)
         fa_count  = sum(1 for f in files if f.get('lang') == 'fa')
         en_count  = sum(1 for f in files if f.get('lang') == 'en')
@@ -112,8 +129,12 @@ async def _show_books(query, context, subject_id, back_cb='ref:main'):
         reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+# ══════════════════════════════════════════════════════════
+#  انتخاب زبان / نسخه
+# ══════════════════════════════════════════════════════════
+
 async def _show_lang_choice(query, context, book_id, back_cb='ref:main'):
-    """انتخاب زبان — اگه چند جلد داشت مستقیم جلدها رو نشون بده"""
+    """انتخاب زبان — اگه یه جلد داشت مستقیم دانلود، اگه چند جلد داشت صفحه جلدها"""
     book = await db.ref_get_book(book_id)
     if not book:
         await query.answer("❌ کتاب پیدا نشد!", show_alert=True); return
@@ -128,7 +149,6 @@ async def _show_lang_choice(query, context, book_id, back_cb='ref:main'):
             ]]))
         return
 
-    # گروه‌بندی بر اساس زبان
     fa_files = sorted([f for f in files if f.get('lang') == 'fa'],
                       key=lambda x: x.get('volume', 1))
     en_files = sorted([f for f in files if f.get('lang') == 'en'],
@@ -144,11 +164,9 @@ async def _show_lang_choice(query, context, book_id, back_cb='ref:main'):
             continue
 
         if len(lang_files) == 1:
-            # فقط یه جلد — مستقیم دانلود
             f   = lang_files[0]
             fid = str(f['_id'])
             dl  = f.get('downloads', 0)
-            vol = f.get('volume', 1)
             desc = f.get('description', '')
             btn_label = f"{lang_icon} {lang_label} | ⬇️ {dl}"
             if desc:
@@ -156,7 +174,6 @@ async def _show_lang_choice(query, context, book_id, back_cb='ref:main'):
             keyboard.append([InlineKeyboardButton(btn_label,
                                                   callback_data=f'ref:dl:{fid}')])
         else:
-            # چند جلد — نشون بده چند جلده، برو صفحه انتخاب جلد
             total_dl = sum(f.get('downloads', 0) for f in lang_files)
             keyboard.append([InlineKeyboardButton(
                 f"{lang_icon} {lang_label} | {len(lang_files)} جلد | ⬇️ {total_dl}",
@@ -172,6 +189,10 @@ async def _show_lang_choice(query, context, book_id, back_cb='ref:main'):
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard))
 
+
+# ══════════════════════════════════════════════════════════
+#  نمایش جلدها
+# ══════════════════════════════════════════════════════════
 
 async def _show_volumes(query, context, book_id, lang, back_cb='ref:main'):
     """نمایش همه جلدهای یک زبان برای انتخاب"""
@@ -196,7 +217,6 @@ async def _show_volumes(query, context, book_id, lang, back_cb='ref:main'):
         dl   = f.get('downloads', 0)
         desc = f.get('description', '')
 
-        # لیبل دکمه: جلد شماره + توضیح (اگه داشت) + تعداد دانلود
         if desc:
             btn_label = f"{lang_icon} جلد {vol} — {desc} | ⬇️ {dl}"
         else:
@@ -205,6 +225,7 @@ async def _show_volumes(query, context, book_id, lang, back_cb='ref:main'):
         keyboard.append([InlineKeyboardButton(btn_label,
                                               callback_data=f'ref:dl:{fid}')])
 
+    # بازگشت به صفحه انتخاب زبان
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb)])
 
     await query.edit_message_text(
@@ -215,6 +236,10 @@ async def _show_volumes(query, context, book_id, lang, back_cb='ref:main'):
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard))
 
+
+# ══════════════════════════════════════════════════════════
+#  دانلود
+# ══════════════════════════════════════════════════════════
 
 async def _download_ref(query, file_id_db, uid):
     item = await db.ref_get_file(file_id_db)
@@ -236,11 +261,20 @@ async def _download_ref(query, file_id_db, uid):
     caption_parts.append(f"📥 {dl} دانلود")
     caption = "\n".join(caption_parts)
 
+    # دکمه بازگشت به کتاب
+    book_id = str(item.get('book_id', ''))
+    back_kb = None
+    if book_id:
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 بازگشت به کتاب", callback_data=f'ref:book:{book_id}')
+        ]])
+
     try:
         await query.message.reply_document(
             item['file_id'],
             caption=caption,
-            parse_mode='HTML')
+            parse_mode='HTML',
+            reply_markup=back_kb)
     except Exception as e:
         logger.error(f"ref download error: {e}")
         await query.answer("❌ خطا در ارسال فایل!", show_alert=True)
