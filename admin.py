@@ -366,6 +366,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _pending_questions(query)
 
     # ── ارسال همگانی ──
+    # FIX: فقط mode رو ست می‌کنیم و UI رو نشون میدیم
+    # پیام ادمین توسط unified_text/file_handler در bot.py خوانده میشه
     elif action == 'broadcast':
         context.user_data['mode'] = 'broadcast'
         context.user_data.pop('broadcast_preview', None)
@@ -378,15 +380,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
             ]])
         )
-        return BROADCAST
+        # بدون return BROADCAST — این callback خارج از ConversationHandler است
 
-    # FIX: لغو broadcast — state رو پاک و به پنل برمی‌گرده
+    # لغو broadcast
     elif action == 'broadcast_cancel':
         context.user_data['mode'] = ''
         context.user_data.pop('broadcast_preview', None)
         await query.answer("✅ ارسال همگانی لغو شد.")
         await _admin_menu(query)
-        return ConversationHandler.END
 
     # تأیید ارسال بعد از preview
     elif action == 'broadcast_confirm':
@@ -395,10 +396,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ خطا: پیام پیدا نشد.", show_alert=True)
             context.user_data['mode'] = ''
             await _admin_menu(query)
-            return ConversationHandler.END
+            return
         await query.edit_message_text("⏳ <b>در حال ارسال...</b>", parse_mode='HTML')
         await _do_broadcast(query, context, preview)
-        return ConversationHandler.END
 
     # ویرایش پیام قبل از ارسال
     elif action == 'broadcast_edit':
@@ -411,7 +411,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ لغو کامل", callback_data='admin:broadcast_cancel')
             ]])
         )
-        return BROADCAST
 
 
 # ══════════════════════════════════════════════════
@@ -756,15 +755,14 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     هندلر broadcast — با preview قبل از ارسال
-    FIX: بررسی mode در ابتدا — اگر mode نبود، پیام رو نادیده بگیر
+    مستقیم از unified_text_handler و unified_file_handler در bot.py صدا میشه
     """
     uid = update.effective_user.id
     if uid != ADMIN_ID:
-        return ConversationHandler.END
+        return
 
-    # FIX: اگر mode دقیقاً 'broadcast' نبود، این هندلر نباید اجرا بشه
     if context.user_data.get('mode') != 'broadcast':
-        return ConversationHandler.END
+        return
 
     msg = update.message
 
@@ -789,7 +787,7 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
                 InlineKeyboardButton("❌ لغو", callback_data='admin:broadcast_cancel')
             ]])
         )
-        return BROADCAST
+        return
 
     # ذخیره اطلاعات پیام برای ارسال بعدی
     context.user_data['broadcast_preview'] = {
@@ -835,8 +833,7 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("❌ لغو",                 callback_data='admin:broadcast_cancel')],
         ])
     )
-    # mode رو نگه میداریم تا تأیید بشه
-    return BROADCAST
+    # mode رو نگه میداریم تا تأیید بشه (پیام بعدی دوباره این handler رو صدا میزنه)
 
 
 async def _do_broadcast(query, context: ContextTypes.DEFAULT_TYPE, preview: dict):
