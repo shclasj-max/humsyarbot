@@ -23,11 +23,6 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── حالت‌های خاص ادمین ──
     if uid == ADMIN_ID:
         mode = context.user_data.get('mode', '')
-        # FIX: search_user باید قبل از هر چیز چک بشه
-        if mode == 'search_user':
-            from admin import handle_admin_text
-            await handle_admin_text(update, context)
-            return
         if mode in ('add_lesson', 'add_topic', 'edit_user'):
             from admin import handle_admin_text
             if await handle_admin_text(update, context):
@@ -48,7 +43,21 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'add_ref_book', 'edit_lesson', 'edit_session',
         'edit_ref_subject', 'edit_ref_book',
     }
-    if context.user_data.get('ca_mode') in ca_text_modes:
+    ca_mode = context.user_data.get('ca_mode', '')
+    # اگه کاربر به‌جای ادامه دادن به state، دکمه منو زد → state را پاک کن
+    MENU_BUTTONS = {
+        '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '📅 برنامه',
+        '📊 آمار', '🔔 اعلانات', '🎓 پنل محتوا', '🛡 پنل ادمین',
+    }
+    if ca_mode in ca_text_modes and text in MENU_BUTTONS:
+        context.user_data.pop('ca_mode', None)
+        context.user_data.pop('ca_pending_file', None)
+        context.user_data.pop('ca_session_id', None)
+        context.user_data.pop('ca_content_type', None)
+        context.user_data.pop('ca_ref_book_id', None)
+        context.user_data.pop('ca_ref_lang', None)
+        ca_mode = ''  # reset
+    elif ca_mode in ca_text_modes:
         if await db.is_content_admin(uid):
             from content_admin import ca_text_handler
             return await ca_text_handler(update, context)
