@@ -11,9 +11,10 @@ from utils import main_keyboard, admin_keyboard, content_admin_keyboard, get_key
 logger = logging.getLogger(__name__)
 
 ADMIN_ID  = int(os.getenv('ADMIN_ID', '0'))
-REGISTER  = 0
-STEP_NAME = 10
-STEP_GROUP = 12
+REGISTER     = 0
+STEP_NAME    = 10
+STEP_GROUP   = 12
+STEP_INTAKE  = 13
 
 
 # ══════════════════════════════════════════════════
@@ -143,6 +144,40 @@ async def _save_group(update, context, group: str):
         await query.edit_message_text("❌ خطا. لطفاً /start بزنید.")
         return ConversationHandler.END
 
+    context.user_data['reg_group'] = group
+
+    # نمایش ورودی‌های فعال از دیتابیس
+    intakes = await db.get_active_intakes()
+    if not intakes:
+        # اگه ورودی تعریف نشده، مستقیم ذخیره کن
+        await db.create_user(uid, name, '', group, username)
+        return await _finish_registration(update, context, uid, name, group, '', username)
+
+    keyboard = [[InlineKeyboardButton(i['label'], callback_data=f'register:intake:{i["code"]}')]
+                for i in intakes]
+    keyboard.append([InlineKeyboardButton("❌ انصراف", callback_data='register:cancel')])
+    await query.edit_message_text(
+        f"✅ <b>گروه {group} انتخاب شد</b>\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "📝 <b>مرحله ۳ از ۳ — ورودی تحصیلی</b>\n\n"
+        "📅 ورودی خود را انتخاب کنید:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return STEP_INTAKE
+
+
+async def _save_group_old_unused(update, context, group: str):
+    """نسخه قدیمی — نگه‌داشته شده برای مرجع"""
+    query    = update.callback_query
+    uid      = update.effective_user.id
+    username = update.effective_user.username
+    name     = context.user_data.get('reg_name', '')
+
+    if not name:
+        await query.edit_message_text("❌ خطا. لطفاً /start بزنید.")
+        return ConversationHandler.END
+
     await db.create_user(uid, name, '', group, username)
 
     if uid == ADMIN_ID:
@@ -189,6 +224,75 @@ async def _save_group(update, context, group: str):
     # پاک‌سازی user_data
     context.user_data.pop('reg_name', None)
     context.user_data.pop('reg_step', None)
+    return ConversationHandler.END
+
+
+# ══════════════════════════════════════════════════
+#  هندلر انتخاب ورودی در ثبت‌نام
+# ══════════════════════════════════════════════════
+
+async def register_intake_callback(update, context):
+    """وقتی کاربر ورودی رو انتخاب کرد"""
+    query    = update.callback_query
+    await query.answer()
+    uid      = update.effective_user.id
+    username = update.effective_user.username
+    intake   = query.data.split(':')[2]
+    name     = context.user_data.get('reg_name', '')
+    group    = context.user_data.get('reg_group', '1')
+
+    await db.create_user(uid, name, '', group, username, intake=intake)
+    return await _finish_registration(update, context, uid, name, group, intake, username)
+
+
+async def _finish_registration(update, context, uid, name, group, intake, username):
+    """پایان ثبت‌نام — اطلاع به ادمین + پیام کاربر"""
+    query = update.callback_query
+    intake_label = intake or 'نامشخص'
+
+    if uid == ADMIN_ID:
+        await db.update_user(uid, {'approved': True})
+        await query.edit_message_text(
+            f"🎉 <b>ثبت‌نام کامل شد!</b>\n\n"
+            f"👤 نام: <b>{name}</b>  |  👥 گروه: <b>{group}</b>\n"
+            f"📅 ورودی: <b>{intake_label}</b>\n"
+            f"🔑 نقش: <b>ادمین</b>  |  ✅ دسترسی فعال",
+            parse_mode='HTML'
+        )
+        await context.bot.send_message(uid, "به پنل ادمین خوش آمدید! 👨‍⚕️",
+            reply_markup=admin_keyboard())
+        await _send_dashboard_by_id(context, uid)
+    else:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"🔔 <b>درخواست ثبت‌نام جدید</b>\n\n"
+                f"👤 نام: <b>{name}</b>\n"
+                f"👥 گروه: <b>{group}</b>\n"
+                f"📅 ورودی: <b>{intake_label}</b>\n"
+                f"📱 یوزرنیم: @{username or 'ندارد'}\n"
+                f"🆔 آیدی: <code>{uid}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{uid}'),
+                    InlineKeyboardButton("❌ رد",    callback_data=f'admin:reject:{uid}'),
+                ]])
+            )
+        except Exception as e:
+            logger.warning(f"Cannot notify admin: {e}")
+
+        await query.edit_message_text(
+            f"🎉 <b>ثبت‌نام با موفقیت انجام شد!</b>\n\n"
+            f"👤 نام: <b>{name}</b>\n"
+            f"👥 گروه: <b>{group}</b>  |  📅 ورودی: <b>{intake_label}</b>\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "⏳ <b>در انتظار تأیید ادمین...</b>\n\n"
+            "پس از تأیید، پیام دریافت خواهید کرد. 🙏",
+            parse_mode='HTML'
+        )
+
+    for k in ('reg_name', 'reg_step', 'reg_group'):
+        context.user_data.pop(k, None)
     return ConversationHandler.END
 
 
