@@ -212,7 +212,7 @@ def build_application() -> Application:
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .concurrent_updates(True)      # پردازش موازی آپدیت‌ها
+        .concurrent_updates(True)
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(15)
@@ -338,23 +338,24 @@ async def post_init(application: Application):
     await db.ensure_indexes()
     logger.info("✅ ایندکس‌های دیتابیس آماده شدند")
 
-    # ثبت job یادآوری امتحان — هر روز ۰۸:۰۰ UTC+3:30
-    reminder_time = dtime(hour=4, minute=30, tzinfo=timezone.utc)  # ۰۸:۰۰ تهران
-    application.job_queue.run_daily(
-        exam_reminder_job,
-        time=reminder_time,
-        name='exam_reminder'
-    )
-
-    # ثبت job سوال روزانه — ۰۹:۰۰ تهران
-    daily_q_time = dtime(hour=5, minute=30, tzinfo=timezone.utc)
-    application.job_queue.run_daily(
-        daily_question_job,
-        time=daily_q_time,
-        name='daily_question'
-    )
-
-    logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
+    # ثبت jobهای زمان‌بندی — فقط اگر job_queue فعال باشد
+    if application.job_queue is not None:
+        reminder_time = dtime(hour=4, minute=30, tzinfo=timezone.utc)
+        application.job_queue.run_daily(
+            exam_reminder_job,
+            time=reminder_time,
+            name='exam_reminder'
+        )
+        daily_q_time = dtime(hour=5, minute=30, tzinfo=timezone.utc)
+        application.job_queue.run_daily(
+            daily_question_job,
+            time=daily_q_time,
+            name='daily_question'
+        )
+        logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
+    else:
+        logger.warning("⚠️ JobQueue فعال نیست — یادآوری‌های زمان‌بندی غیرفعال هستند")
+        logger.warning("   برای فعال‌سازی: pip install \"python-telegram-bot[job-queue]\"")
 
 
 def main():
