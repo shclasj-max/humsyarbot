@@ -28,20 +28,15 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'search_user', 'edit_user',
             'add_lesson', 'add_topic',
             'qbank_awaiting_desc',
+            'add_intake',   # FIX: اضافه شد
         )
         if mode in ADMIN_TEXT_MODES:
             from admin import handle_admin_text
             await handle_admin_text(update, context)
             return
-        # FIX: broadcast دیگه اینجا handle نمیشه — ConversationHandler مستقیم
-        # admin_broadcast_handler رو صدا میزنه. این خط رو حذف کردیم چون
-        # اگه اینجا هم صدا بشه، double-execution میشه و باگ ایجاد میکنه.
-        # اگه mode == 'broadcast' باشه ولی ConversationHandler نگرفته باشه،
-        # یعنی state گم شده — mode رو پاک میکنیم:
         if mode == 'broadcast':
-            context.user_data['mode'] = ''
-            context.user_data.pop('broadcast_preview', None)
-            return  # نادیده بگیر
+            from admin import admin_broadcast_handler
+            return await admin_broadcast_handler(update, context)
 
     # ── حالت ساخت سوال ──
     if context.user_data.get('mode') == 'creating_question':
