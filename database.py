@@ -1023,11 +1023,8 @@ class DB:
         )
         return bs + refs
 
-
-# instance جهانی
     # ══════════════════════════════════════════════════
     #  منابع درسی (resources.py)
-    #  FIX: این متدها قبلاً وجود نداشتند — باعث کرش می‌شدند
     # ══════════════════════════════════════════════════
 
     async def add_resource(self, term: str, lesson: str, topic: str,
@@ -1108,4 +1105,5 @@ class DB:
             return None
 
 
+# instance جهانی
 db = DB()
