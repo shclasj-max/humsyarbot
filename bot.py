@@ -285,7 +285,16 @@ def build_application() -> Application:
                 CallbackQueryHandler(handle_question_answer, pattern=r'^answer:')
             ],
             BROADCAST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_handler)
+                # FIX: اضافه کردن handler برای دکمه لغو — بدون این، لغو کار نمی‌کرد
+                CallbackQueryHandler(admin_callback, pattern=r'^admin:'),
+                CommandHandler('cancel', cancel_handler),
+                # پیام‌های متنی که شامل دستورات ناوبری نیستن
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_handler),
+                # فایل، عکس، ویدیو
+                MessageHandler(
+                    filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+                    admin_broadcast_handler
+                ),
             ],
             CREATING_Q: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_create_question_steps),
