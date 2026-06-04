@@ -23,6 +23,11 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── حالت‌های خاص ادمین ──
     if uid == ADMIN_ID:
         mode = context.user_data.get('mode', '')
+        # FIX: search_user باید قبل از هر چیز چک بشه
+        if mode == 'search_user':
+            from admin import handle_admin_text
+            await handle_admin_text(update, context)
+            return
         if mode in ('add_lesson', 'add_topic', 'edit_user'):
             from admin import handle_admin_text
             if await handle_admin_text(update, context):
