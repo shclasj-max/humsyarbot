@@ -250,6 +250,35 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lesson = context.user_data.get('pdf_lesson','')
         await _pdf_count_select(query, context, lesson, topic)
 
+    # ── مدیریت سوالات توسط ادمین محتوا/ادمین ──
+    elif action == 'ca_q_list':
+        await _ca_question_list(query, uid, context)
+
+    elif action == 'ca_q_view':
+        qid = parts[2] if len(parts) > 2 else ''
+        await _ca_question_view(query, uid, qid)
+
+    elif action == 'ca_q_del':
+        qid = parts[2] if len(parts) > 2 else ''
+        if await db.is_content_admin(uid):
+            await db.delete_question(qid)
+            await query.answer("🗑 سوال حذف شد!", show_alert=True)
+            await _ca_question_list(query, uid, context)
+
+    elif action == 'ca_q_approve':
+        qid = parts[2] if len(parts) > 2 else ''
+        if await db.is_content_admin(uid):
+            await db.approve_question(qid)
+            await query.answer("✅ تأیید شد!", show_alert=True)
+            await _ca_question_list(query, uid, context)
+
+    elif action == 'ca_q_filter':
+        # فیلتر: ca_q_filter:type:value
+        ftype = parts[2] if len(parts) > 2 else 'all'
+        fval  = parts[3] if len(parts) > 3 else ''
+        context.user_data[f'caq_filter_{ftype}'] = fval
+        await _ca_question_list(query, uid, context)
+
     elif data.startswith('answer:'):
         await handle_question_answer(update, context)
 
@@ -938,14 +967,18 @@ async def handle_difficulty_choice(update: Update, context: ContextTypes.DEFAULT
 
 
 async def _save_question(update, context):
-    uid  = update.effective_user.id
-    q    = context.user_data.get('new_q', {})
+    uid       = update.effective_user.id
+    q         = context.user_data.get('new_q', {})
     is_ca     = context.user_data.get('creating_as_ca', False)
     is_admin  = (uid == ADMIN_ID)
     auto      = is_ca or is_admin
     by_bot    = is_ca
 
-    await db.questions.insert_one({
+    # دریافت نام طراح
+    creator_user = await db.get_user(uid)
+    creator_name = creator_user.get('name', '') if creator_user else ''
+
+    result = await db.questions.insert_one({
         'lesson':         q.get('lesson', ''),
         'topic':          q.get('topic', ''),
         'difficulty':     q.get('difficulty', 'متوسط 🟡'),
@@ -954,23 +987,224 @@ async def _save_question(update, context):
         'correct_answer': q.get('correct', 0),
         'explanation':    q.get('explanation', ''),
         'creator_id':     uid,
+        'creator_name':   creator_name,
         'by_bot':         by_bot,
         'approved':       auto,
         'created_at':     datetime.now().isoformat(),
         'attempt_count':  0,
         'correct_count':  0,
     })
+    qid = str(result.inserted_id)
 
     for k in ['new_q', 'create_step', 'mode', 'cr_lesson', 'creating_as_ca']:
         context.user_data.pop(k, None)
 
     if auto:
         msg = "✅ <b>سوال با موفقیت در بانک سوال ثبت شد!</b>"
+        if by_bot:
+            msg += "\n\n<i>🤖 برچسب: طراحی شده توسط ادمین محتوا</i>"
     else:
-        msg = "✅ <b>سوال ارسال شد و در انتظار تأیید ادمین است.</b>\nپس از تأیید در بانک سوال نمایش داده می‌شود."
+        msg = (
+            "✅ <b>سوال ارسال شد و در انتظار تأیید ادمین است.</b>\n"
+            "پس از تأیید در بانک سوال نمایش داده می‌شود.\n\n"
+            f"<i>✏️ طراح: {creator_name}</i>"
+        )
+        # FIX: اطلاع‌رسانی به ادمین برای تأیید
+        try:
+            opts   = q.get('options', [])
+            ltrs   = ['الف', 'ب', 'ج', 'د']
+            ca_idx = q.get('correct', 0)
+            opts_text = '\n'.join(
+                f"  {'✅' if i == ca_idx else '▪️'} {ltrs[i]}) {opt}"
+                for i, opt in enumerate(opts[:4])
+            )
+            diff_map = {'آسان 🟢': '🟢 آسان', 'متوسط 🟡': '🟡 متوسط', 'سخت 🔴': '🔴 سخت'}
+            diff_txt = diff_map.get(q.get('difficulty', ''), q.get('difficulty', ''))
+            admin_notif = (
+                f"🔔 <b>سوال جدید برای تأیید</b>\n\n"
+                f"✏️ طراح: <b>{creator_name}</b>\n"
+                f"📚 {q.get('lesson','')} — {q.get('topic','')}\n"
+                f"📊 {diff_txt}\n\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"❓ <b>{q.get('question', '')}</b>\n\n"
+                f"{opts_text}\n\n"
+                f"📝 توضیح: {q.get('explanation','') or '—'}"
+            )
+            await context.bot.send_message(
+                ADMIN_ID, admin_notif, parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve_q:{qid}'),
+                    InlineKeyboardButton("🗑 رد",    callback_data=f'admin:reject_q:{qid}'),
+                ]])
+            )
+        except Exception as e:
+            logger.warning(f"Admin notification failed: {e}")
 
     await update.message.reply_text(
         msg, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([
             _back("🔙 بازگشت به بانک سوال", "questions:main")
         ]))
+
+
+# ══════════════════════════════════════════════════════════
+#  مدیریت سوالات توسط ادمین محتوا
+# ══════════════════════════════════════════════════════════
+
+async def _ca_question_list(query, uid: int, context):
+    """لیست سوالات با قابلیت فیلتر — برای ادمین محتوا و ادمین"""
+    if not await db.is_content_admin(uid):
+        await query.answer("❌ دسترسی ندارید!", show_alert=True)
+        return
+
+    # فیلترها
+    f_status = context.user_data.get('caq_filter_status', 'all')  # all/approved/pending
+    f_source = context.user_data.get('caq_filter_source', 'all')  # all/bot/student
+
+    # ساخت query
+    q_filter = {}
+    if f_status == 'approved':
+        q_filter['approved'] = True
+    elif f_status == 'pending':
+        q_filter['approved'] = False
+
+    if f_source == 'bot':
+        q_filter['by_bot'] = True
+    elif f_source == 'student':
+        q_filter['by_bot'] = {'$ne': True}
+
+    questions = await db.questions.find(q_filter).sort('created_at', -1).to_list(200)
+
+    # آمار
+    total    = len(questions)
+    approved = sum(1 for q in questions if q.get('approved'))
+    pending  = total - approved
+    by_bot_c = sum(1 for q in questions if q.get('by_bot'))
+    by_stu_c = total - by_bot_c
+
+    # دکمه‌های فیلتر
+    status_labels = {
+        'all':      f"{'✅' if f_status=='all' else '⬜'} همه",
+        'approved': f"{'✅' if f_status=='approved' else '⬜'} تأییدشده",
+        'pending':  f"{'✅' if f_status=='pending' else '⬜'} در انتظار",
+    }
+    source_labels = {
+        'all':     f"{'✅' if f_source=='all' else '⬜'} همه منابع",
+        'bot':     f"{'✅' if f_source=='bot' else '⬜'} توسط بات",
+        'student': f"{'✅' if f_source=='student' else '⬜'} توسط دانشجو",
+    }
+
+    keyboard = [
+        [
+            InlineKeyboardButton(status_labels['all'],      callback_data='questions:ca_q_filter:status:all'),
+            InlineKeyboardButton(status_labels['approved'], callback_data='questions:ca_q_filter:status:approved'),
+            InlineKeyboardButton(status_labels['pending'],  callback_data='questions:ca_q_filter:status:pending'),
+        ],
+        [
+            InlineKeyboardButton(source_labels['all'],     callback_data='questions:ca_q_filter:source:all'),
+            InlineKeyboardButton(source_labels['bot'],     callback_data='questions:ca_q_filter:source:bot'),
+            InlineKeyboardButton(source_labels['student'], callback_data='questions:ca_q_filter:source:student'),
+        ],
+    ]
+
+    # لیست سوالات (حداکثر ۱۵ تا)
+    for q in questions[:15]:
+        qid     = str(q['_id'])
+        status  = "✅" if q.get('approved') else "⏳"
+        source  = "🤖" if q.get('by_bot') else "✏️"
+        creator = q.get('creator_name', '') or ''
+        lesson  = q.get('lesson', '')
+        text_q  = q.get('question', '')[:30]
+        keyboard.append([InlineKeyboardButton(
+            f"{status}{source} {text_q} | {lesson}",
+            callback_data=f'questions:ca_q_view:{qid}'
+        )])
+
+    back_cb = 'ca:main' if uid != int(__import__('os').getenv('ADMIN_ID', '0')) else 'admin:main'
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb)])
+
+    header = (
+        f"🧪 <b>مدیریت سوالات</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📊 مجموع: <b>{total}</b>  ✅ تأیید: <b>{approved}</b>  ⏳ انتظار: <b>{pending}</b>\n"
+        f"🤖 توسط بات: <b>{by_bot_c}</b>  ✏️ توسط دانشجو: <b>{by_stu_c}</b>\n\n"
+        f"<i>روی هر سوال بزنید برای مشاهده و مدیریت</i>"
+    )
+
+    try:
+        await query.edit_message_text(
+            header, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        pass
+
+
+async def _ca_question_view(query, uid: int, qid: str):
+    """نمایش کامل یک سوال با دکمه‌های مدیریت"""
+    if not await db.is_content_admin(uid):
+        await query.answer("❌ دسترسی ندارید!", show_alert=True)
+        return
+
+    q = await db.get_question_by_id(qid)
+    if not q:
+        await query.answer("❌ سوال پیدا نشد!", show_alert=True)
+        return
+
+    opts    = q.get('options', [])
+    ltrs    = ['الف', 'ب', 'ج', 'د']
+    ca_idx  = q.get('correct_answer', 0)
+    opts_text = '\n'.join(
+        f"  {'✅' if i == ca_idx else '▪️'} {ltrs[i]}) {opt}"
+        for i, opt in enumerate(opts[:4])
+    )
+
+    diff_map = {'آسان 🟢': '🟢 آسان', 'متوسط 🟡': '🟡 متوسط', 'سخت 🔴': '🔴 سخت'}
+    diff_txt = diff_map.get(q.get('difficulty', ''), q.get('difficulty', ''))
+
+    status = "✅ تأیید شده" if q.get('approved') else "⏳ در انتظار تأیید"
+
+    # تگ طراح
+    if q.get('by_bot'):
+        creator_line = "🤖 <b>طراح:</b> ادمین محتوا (بات)"
+    elif q.get('creator_name'):
+        creator_line = f"✏️ <b>طراح:</b> {q['creator_name']}"
+    else:
+        creator_line = "✏️ <b>طراح:</b> نامشخص"
+
+    text = (
+        f"🧪 <b>مشاهده سوال</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📚 {q.get('lesson','')} — {q.get('topic','')}\n"
+        f"📊 {diff_txt}  |  {status}\n"
+        f"{creator_line}\n"
+        f"📅 {q.get('created_at','')[:10]}\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"❓ <b>{q.get('question','')}</b>\n\n"
+        f"{opts_text}\n\n"
+        f"📝 <b>توضیح:</b> {q.get('explanation','') or '—'}\n\n"
+        f"📈 آمار: {q.get('attempt_count',0)} بار — {q.get('correct_count',0)} صحیح"
+    )
+
+    keyboard = []
+
+    # دکمه تأیید/رد
+    if not q.get('approved'):
+        keyboard.append([
+            InlineKeyboardButton("✅ تأیید",  callback_data=f'questions:ca_q_approve:{qid}'),
+            InlineKeyboardButton("🗑 حذف",    callback_data=f'questions:ca_q_del:{qid}'),
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton("🗑 حذف سوال", callback_data=f'questions:ca_q_del:{qid}'),
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست", callback_data='questions:ca_q_list')])
+
+    try:
+        await query.edit_message_text(
+            text, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        pass
