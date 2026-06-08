@@ -1,6 +1,14 @@
-"""تیکت پشتیبانی — چند پاسخ، بستن دستی توسط ادمین"""
-import os, logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+"""
+🎫 تیکت پشتیبانی — نسخه پیشرفته
+  ✅ پیش‌نمایش تیکت قبل از ارسال
+  ✅ گفتگوی دوطرفه — دانشجو میتونه ادامه بده
+  ✅ مدیریت پیشرفته برای ادمین: فیلتر، جستجو، ورودی
+  ✅ اطلاعات کامل کاربری در پیام ادمین (ورودی، گروه)
+  ✅ تیکت باز = کانال گفتگو، نه یک پیام
+"""
+import os
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes
 from database import db
 from utils import fmt_jalali
@@ -23,19 +31,25 @@ SUBJECTS = [
 ]
 
 
+# ══════════════════════════════════════════════════
+#  Callback اصلی
+# ══════════════════════════════════════════════════
+
 async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     await query.answer()
     uid    = update.effective_user.id
-    data   = query.data
-    parts  = data.split(':')
+    parts  = query.data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
 
     if action == 'main':
         await _ticket_main(query, uid)
 
     elif action == 'new':
-        keyboard = [[InlineKeyboardButton(s, callback_data=f'ticket:subject:{i}')] for i, s in enumerate(SUBJECTS)]
+        keyboard = [
+            [InlineKeyboardButton(s, callback_data=f'ticket:subject:{i}')]
+            for i, s in enumerate(SUBJECTS)
+        ]
         keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ticket:main')])
         await query.edit_message_text(
             "🎫 <b>تیکت جدید</b>\n\nموضوع مشکل را انتخاب کنید:",
@@ -43,8 +57,7 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == 'subject':
-        idx     = int(parts[2])
-        subject = SUBJECTS[idx]
+        subject = SUBJECTS[int(parts[2])]
         context.user_data['ticket_subject'] = subject
         context.user_data['ticket_mode']    = 'waiting_message'
         await query.edit_message_text(
@@ -52,7 +65,27 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✍️ توضیح کامل مشکل خود را بنویسید:\n"
             "<i>هرچه دقیق‌تر بنویسید، سریع‌تر پاسخ می‌گیرید.</i>",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='ticket:main')]])
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='ticket:main')
+            ]])
+        )
+        return TICKET_WAITING
+
+    elif action == 'preview_confirm':
+        # تأیید پیش‌نمایش — ارسال واقعی
+        await _do_create_ticket(update, context, confirmed=True)
+
+    elif action == 'preview_cancel':
+        # ویرایش — برگشت به نوشتن
+        context.user_data['ticket_mode'] = 'waiting_message'
+        subject = context.user_data.get('ticket_subject', '')
+        await query.edit_message_text(
+            f"🎫 <b>{subject}</b>\n\n"
+            "✍️ پیام جدید خود را بنویسید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو کامل", callback_data='ticket:main')
+            ]])
         )
         return TICKET_WAITING
 
@@ -63,38 +96,75 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid    = int(parts[2])
         ticket = await db.ticket_get(tid)
         if not ticket or ticket['user_id'] != uid:
-            await query.answer("❌ تیکت پیدا نشد!", show_alert=True); return
+            await query.answer("❌ تیکت پیدا نشد!", show_alert=True)
+            return
         await _show_ticket_detail(query, ticket, is_admin=False)
 
-    # ── ادمین ──
-    elif action == 'admin_list':
-        if uid != ADMIN_ID: return
-        await _admin_ticket_list(query, status_filter='open')
+    # ── ادامه مکالمه توسط دانشجو ──
+    elif action == 'reply_user':
+        tid    = int(parts[2])
+        ticket = await db.ticket_get(tid)
+        if not ticket or ticket['user_id'] != uid:
+            await query.answer("❌ دسترسی ندارید!", show_alert=True)
+            return
+        if ticket.get('status') == 'closed':
+            await query.answer("❌ این تیکت بسته شده. تیکت جدید باز کنید.", show_alert=True)
+            return
+        context.user_data['user_replying_ticket'] = tid
+        context.user_data['ticket_mode']          = 'user_reply'
+        await query.edit_message_text(
+            f"💬 <b>ادامه تیکت #{tid}</b>\n\n"
+            "پیام جدید خود را بنویسید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data=f'ticket:view:{tid}')
+            ]])
+        )
+        return TICKET_WAITING
 
-    elif action == 'admin_all':
-        if uid != ADMIN_ID: return
-        await _admin_ticket_list(query, status_filter=None)
+    # ══════════════════════════════════════════════
+    # بخش ادمین — مدیریت پیشرفته
+    # ══════════════════════════════════════════════
 
-    elif action == 'admin_view':
-        if uid != ADMIN_ID: return
+    elif action == 'manage' and uid == ADMIN_ID:
+        await _admin_manage(query, context)
+
+    elif action == 'admin_filter' and uid == ADMIN_ID:
+        ftype = parts[2] if len(parts) > 2 else 'status'
+        fval  = parts[3] if len(parts) > 3 else 'all'
+        context.user_data[f'tkt_f_{ftype}'] = fval
+        await _admin_manage(query, context)
+
+    elif action == 'admin_search' and uid == ADMIN_ID:
+        context.user_data['ticket_mode']   = 'admin_search'
+        context.user_data['mode']          = 'ticket_search'
+        await query.edit_message_text(
+            "🔍 <b>جستجوی تیکت</b>\n\n"
+            "شماره تیکت یا نام کاربر را وارد کنید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='ticket:manage')
+            ]])
+        )
+
+    elif action == 'admin_view' and uid == ADMIN_ID:
         tid    = int(parts[2])
         ticket = await db.ticket_get(tid)
         if not ticket:
-            await query.answer("❌ پیدا نشد!", show_alert=True); return
+            await query.answer("❌ پیدا نشد!", show_alert=True)
+            return
         await _show_ticket_detail(query, ticket, is_admin=True)
 
-    elif action == 'admin_reply':
-        if uid != ADMIN_ID: return
+    elif action == 'admin_reply' and uid == ADMIN_ID:
         tid = int(parts[2])
         context.user_data['replying_ticket'] = tid
         context.user_data['ticket_mode']     = 'admin_reply'
-        ticket = await db.ticket_get(tid)
-        replies_count = len(ticket.get('replies', [])) if ticket else 0
+        ticket  = await db.ticket_get(tid)
+        rc      = len(ticket.get('replies', [])) if ticket else 0
         await query.edit_message_text(
             f"✏️ <b>پاسخ به تیکت #{tid}</b>\n"
-            f"تعداد پاسخ‌های قبلی: {replies_count}\n\n"
-            "پاسخ جدید خود را بنویسید:\n"
-            "<i>تیکت باز می‌ماند تا زمانی که شما آن را ببندید.</i>",
+            f"پاسخ‌های قبلی: {rc}\n\n"
+            "پاسخ جدید خود را بنویسید:",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ لغو", callback_data=f'ticket:admin_view:{tid}')
@@ -102,27 +172,22 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return TICKET_REPLY_WAITING
 
-    elif action == 'admin_close':
-        if uid != ADMIN_ID: return
-        tid    = int(parts[2])
-        ticket = await db.ticket_get(tid)
-        # تأییدیه بستن
+    elif action == 'admin_close' and uid == ADMIN_ID:
+        tid = int(parts[2])
         await query.edit_message_text(
             f"🔒 <b>بستن تیکت #{tid}</b>\n\n"
-            "آیا مطمئنید که مشکل حل شده و می‌خواهید تیکت را ببندید؟",
+            "آیا مطمئنید که مشکل حل شده؟",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ بله، تیکت را ببند", callback_data=f'ticket:admin_close_confirm:{tid}')],
-                [InlineKeyboardButton("❌ خیر، برگشت",       callback_data=f'ticket:admin_view:{tid}')],
+                [InlineKeyboardButton("✅ بله، ببند", callback_data=f'ticket:admin_close_confirm:{tid}')],
+                [InlineKeyboardButton("❌ برگشت",     callback_data=f'ticket:admin_view:{tid}')],
             ])
         )
 
-    elif action == 'admin_close_confirm':
-        if uid != ADMIN_ID: return
+    elif action == 'admin_close_confirm' and uid == ADMIN_ID:
         tid    = int(parts[2])
         ticket = await db.ticket_get(tid)
         await db.ticket_close(tid)
-        # اطلاع به کاربر
         if ticket:
             try:
                 await context.bot.send_message(
@@ -136,146 +201,27 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("🎫 تیکت جدید", callback_data='ticket:new')
                     ]])
                 )
-            except: pass
+            except Exception:
+                pass
         await query.edit_message_text(
-            f"✅ تیکت #{tid} با موفقیت بسته شد.",
+            f"✅ تیکت #{tid} بسته شد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت به تیکت‌های باز", callback_data='ticket:admin_list')
+                InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')
             ]])
         )
 
+    # سازگاری با callback های قدیمی
+    elif action == 'admin_list' and uid == ADMIN_ID:
+        await _admin_manage(query, context)
 
-async def _show_ticket_detail(query, ticket, is_admin: bool):
-    tid     = ticket['ticket_id']
-    status  = ticket.get('status', 'open')
-    status_icon = "🟢 بسته شده" if status == 'closed' else "🟡 در انتظار / در جریان"
-
-    # پاسخ‌ها (سازگار با فیلد reply قدیمی)
-    replies = ticket.get('replies', [])
-    if not replies and ticket.get('reply'):
-        replies = [{'text': ticket['reply'], 'at': ticket.get('replied_at', '')}]
-
-    if is_admin:
-        # نمایش کامل اطلاعات دانشجو برای ادمین
-        text = (
-            f"🎫 <b>تیکت #{tid}</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"👤 <b>نام:</b> {ticket.get('user_name','')}\n"
-            f"🆔 <b>آیدی:</b> <code>{ticket['user_id']}</code>\n"
-            f"📋 <b>موضوع:</b> {ticket.get('subject','')}\n"
-            f"🔘 <b>وضعیت:</b> {status_icon}\n"
-            f"📅 <b>تاریخ ثبت:</b> {fmt_jalali(ticket['created_at'][:10])}\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-            f"💬 <b>پیام دانشجو:</b>\n{ticket['message']}\n"
-        )
-    else:
-        text = (
-            f"🎫 <b>تیکت #{tid}</b>\n"
-            f"📋 {ticket.get('subject','')}\n"
-            f"🔘 وضعیت: {status_icon}\n"
-            f"📅 {fmt_jalali(ticket['created_at'][:10])}\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-            f"💬 <b>پیام شما:</b>\n{ticket['message']}\n"
-        )
-
-    if replies:
-        text += f"\n━━━━━━━━━━━━━━━━\n📨 <b>پاسخ‌های پشتیبانی ({len(replies)}):</b>\n"
-        for i, r in enumerate(replies, 1):
-            at_str = fmt_jalali(r.get('at', '')[:10]) if r.get('at') else ''
-            text += f"\n<b>پاسخ {i}</b>  <i>{at_str}</i>\n{r.get('text','')}\n"
-
-    keyboard = []
-    if is_admin:
-        if status == 'open':
-            keyboard.append([InlineKeyboardButton("✏️ ارسال پاسخ جدید", callback_data=f'ticket:admin_reply:{tid}')])
-            keyboard.append([InlineKeyboardButton("🔒 بستن تیکت",        callback_data=f'ticket:admin_close:{tid}')])
-        else:
-            keyboard.append([InlineKeyboardButton("📋 تیکت بسته است",    callback_data=f'ticket:admin_view:{tid}')])
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست",   callback_data='ticket:admin_list')])
-    else:
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت به تیکت‌ها", callback_data='ticket:list')])
-
-    try:
-        await query.edit_message_text(text[:4090], parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        # اگر متن طولانی بود
-        await query.edit_message_text(text[:4090], parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+    elif action == 'admin_all' and uid == ADMIN_ID:
+        context.user_data['tkt_f_status'] = 'all'
+        await _admin_manage(query, context)
 
 
-async def _ticket_main(query, uid):
-    tickets    = await db.ticket_get_user(uid)
-    open_count = sum(1 for t in tickets if t['status'] == 'open')
-    done_count = sum(1 for t in tickets if t['status'] == 'closed')
-    keyboard   = [
-        [InlineKeyboardButton("🎫 ارسال تیکت جدید",           callback_data='ticket:new')],
-        [InlineKeyboardButton(f"📋 تیکت‌های من ({len(tickets)})", callback_data='ticket:list')],
-    ]
-    if uid == ADMIN_ID:
-        open_t = await db.ticket_get_all('open')
-        all_t  = await db.ticket_get_all()
-        keyboard.append([InlineKeyboardButton(f"🟡 تیکت‌های باز ({len(open_t)})",  callback_data='ticket:admin_list')])
-        keyboard.append([InlineKeyboardButton(f"📂 همه تیکت‌ها ({len(all_t)})",   callback_data='ticket:admin_all')])
-    await query.edit_message_text(
-        f"🎫 <b>پشتیبانی</b>\n\n"
-        f"🟡 تیکت‌های باز: {open_count}  |  🟢 بسته‌شده: {done_count}\n\n"
-        "برای ارسال مشکل یا سوال، تیکت جدید بزنید:",
-        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def _ticket_list(query, uid):
-    tickets = await db.ticket_get_user(uid)
-    if not tickets:
-        await query.edit_message_text(
-            "📋 هیچ تیکتی ندارید.\n\nبرای ارسال مشکل، تیکت جدید بزنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎫 تیکت جدید", callback_data='ticket:new')],
-                [InlineKeyboardButton("🔙 بازگشت",    callback_data='ticket:main')]
-            ])
-        ); return
-    keyboard = []
-    for t in tickets[:12]:
-        icon   = "🟢" if t['status'] == 'closed' else "🟡"
-        rc     = len(t.get('replies', []))
-        if not rc and t.get('reply'): rc = 1
-        r_txt  = f" | {rc} پاسخ" if rc else ' | بدون پاسخ'
-        keyboard.append([InlineKeyboardButton(
-            f"{icon} #{t['ticket_id']} — {t.get('subject','')[:22]}{r_txt}",
-            callback_data=f'ticket:view:{t["ticket_id"]}'
-        )])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ticket:main')])
-    await query.edit_message_text("📋 <b>تیکت‌های من</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def _admin_ticket_list(query, status_filter='open'):
-    tickets = await db.ticket_get_all(status_filter)
-    title   = "🟡 تیکت‌های باز" if status_filter == 'open' else "📂 همه تیکت‌ها"
-    if not tickets:
-        await query.edit_message_text(
-            f"✅ {title}\n\nهیچ تیکتی وجود ندارد!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
-        return
-    keyboard = []
-    for t in tickets[:15]:
-        icon  = "🟢" if t['status'] == 'closed' else "🟡"
-        rc    = len(t.get('replies', []))
-        if not rc and t.get('reply'): rc = 1
-        keyboard.append([InlineKeyboardButton(
-            f"{icon} #{t['ticket_id']} | {t.get('user_name','')[:8]} | {t.get('subject','')[:18]} | {rc}💬",
-            callback_data=f'ticket:admin_view:{t["ticket_id"]}'
-        )])
-    nav = []
-    if status_filter == 'open':
-        nav.append(InlineKeyboardButton("📂 همه تیکت‌ها", callback_data='ticket:admin_all'))
-    else:
-        nav.append(InlineKeyboardButton("🟡 فقط باز", callback_data='ticket:admin_list'))
-    keyboard.append(nav)
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
-    await query.edit_message_text(
-        f"🎫 <b>{title}</b> — {len(tickets)} تیکت",
-        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
+# ══════════════════════════════════════════════════
+#  هندلر پیام
+# ══════════════════════════════════════════════════
 
 async def ticket_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
@@ -283,100 +229,446 @@ async def ticket_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     mode = context.user_data.get('ticket_mode', '')
     text = update.message.text.strip()
 
+    # ── دانشجو: پیام اولیه تیکت — نمایش پیش‌نمایش ──
     if mode == 'waiting_message':
         subject = context.user_data.get('ticket_subject', 'سوال')
-        name    = user.get('name', '') if user else ''
-        sid     = user.get('student_id', '') if user else ''
-        group   = user.get('group', '') if user else ''
-        uname   = f"@{user.get('username','')}" if user and user.get('username') else 'ندارد'
-        tid     = await db.ticket_create(uid, name, subject, text)
-        context.user_data['ticket_mode'] = ''
+        context.user_data['ticket_draft'] = text
+        context.user_data['ticket_mode']  = 'awaiting_confirm'
 
-        # اطلاع کامل به ادمین
+        await update.message.reply_text(
+            f"👁 <b>پیش‌نمایش تیکت</b>\n\n"
+            f"📋 موضوع: <b>{subject}</b>\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"💬 {text}\n\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            "آیا این تیکت را ارسال می‌کنید؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ بله، ارسال کن", callback_data='ticket:preview_confirm'),
+                    InlineKeyboardButton("✏️ ویرایش",        callback_data='ticket:preview_cancel'),
+                ],
+                [InlineKeyboardButton("❌ لغو کامل", callback_data='ticket:main')],
+            ])
+        )
+        return TICKET_WAITING
+
+    # ── دانشجو: تأیید شده — ارسال واقعی ──
+    elif mode == 'awaiting_confirm':
+        # این حالت از callback handle میشه، نه از پیام
+        pass
+
+    # ── دانشجو: ادامه مکالمه در تیکت باز ──
+    elif mode == 'user_reply':
+        tid = context.user_data.get('user_replying_ticket')
+        if not tid:
+            return
+        ticket = await db.ticket_get(tid)
+        if not ticket or ticket.get('status') == 'closed':
+            await update.message.reply_text("❌ این تیکت بسته شده.")
+            context.user_data.pop('ticket_mode', None)
+            return
+
+        # اضافه کردن پیام به replies با تگ [دانشجو]
+        reply_text = f"[دانشجو] {text}"
+        await db.ticket_add_reply(tid, reply_text)
+        context.user_data.pop('ticket_mode', None)
+        context.user_data.pop('user_replying_ticket', None)
+
+        name = user.get('name', '') if user else ''
+        # اطلاع به ادمین
         try:
             await context.bot.send_message(
                 ADMIN_ID,
-                f"🔔 <b>تیکت جدید #{tid}</b>\n"
+                f"💬 <b>پیام جدید در تیکت #{tid}</b>\n"
+                f"👤 {name}\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>نام:</b> {name}\n"
-                f"🎓 <b>شماره دانشجویی:</b> {sid}\n"
-                f"👥 <b>گروه:</b> {group}\n"
-                f"📱 <b>یوزرنیم:</b> {uname}\n"
-                f"🆔 <b>آیدی:</b> <code>{uid}</code>\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"📋 <b>موضوع:</b> {subject}\n\n"
-                f"💬 <b>متن تیکت:</b>\n{text}",
+                f"{text}",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(f"✏️ پاسخ به تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}')
+                    InlineKeyboardButton(f"✏️ پاسخ تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}')
                 ]])
             )
-        except: pass
+        except Exception:
+            pass
 
         await update.message.reply_text(
-            f"✅ <b>تیکت #{tid} ثبت شد!</b>\n\n"
-            "📬 به زودی پاسخ داده خواهد شد.\n"
-            "وضعیت تیکت را از بخش پشتیبانی پیگیری کنید. 🙏",
-            parse_mode='HTML',
+            f"✅ پیام شما به تیکت #{tid} اضافه شد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 مشاهده تیکت‌هایم", callback_data='ticket:list')
+                InlineKeyboardButton(f"📋 مشاهده تیکت #{tid}", callback_data=f'ticket:view:{tid}')
             ]])
         )
 
+    # ── جستجوی تیکت توسط ادمین ──
+    elif mode == 'admin_search' and uid == ADMIN_ID:
+        context.user_data.pop('ticket_mode', None)
+        context.user_data.pop('mode', None)
+        await _search_tickets(update, text)
+
+    # ── پاسخ ادمین به تیکت ──
     elif mode == 'admin_reply' and uid == ADMIN_ID:
-        tid = context.user_data.get('replying_ticket')
-        if not tid: return
+        tid = context.user_data.pop('replying_ticket', None)
+        if not tid:
+            return
+        context.user_data['ticket_mode'] = ''
         ticket = await db.ticket_get(tid)
         await db.ticket_add_reply(tid, text)
-        context.user_data['ticket_mode'] = ''
 
-        # پاسخ به کاربر
         if ticket:
             try:
-                rcount = len(ticket.get('replies', [])) + 1
                 await context.bot.send_message(
                     ticket['user_id'],
                     f"📨 <b>پاسخ به تیکت #{tid}</b>\n"
                     f"📋 {ticket.get('subject','')}\n"
                     f"━━━━━━━━━━━━━━━━\n\n"
                     f"💬 {text}\n\n"
-                    "<i>اگر سوال دارید، از بخش پشتیبانی ادامه دهید.</i>",
+                    "<i>برای ادامه گفتگو می‌توانید پاسخ دهید.</i>",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(f"📋 مشاهده تیکت #{tid}", callback_data=f'ticket:view:{tid}')
+                        InlineKeyboardButton(f"💬 ادامه گفتگو", callback_data=f'ticket:reply_user:{tid}'),
+                        InlineKeyboardButton(f"📋 مشاهده تیکت", callback_data=f'ticket:view:{tid}'),
                     ]])
                 )
-            except: pass
+            except Exception:
+                pass
 
         await update.message.reply_text(
-            f"✅ پاسخ به تیکت #{tid} ارسال شد!\n"
-            "تیکت همچنان باز است. هر وقت مشکل حل شد، آن را ببندید.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"📋 مشاهده تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}'),
-                InlineKeyboardButton("🔒 بستن تیکت", callback_data=f'ticket:admin_close:{tid}')
-            ]])
+            f"✅ پاسخ به تیکت #{tid} ارسال شد!",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"📋 تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}'),
+                    InlineKeyboardButton("🔒 بستن",          callback_data=f'ticket:admin_close:{tid}'),
+                ],
+                [InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')],
+            ])
         )
 
 
-async def show_ticket_main(message, uid: int):
-    """فراخوانی از message_router — دکمه 🎫 پشتیبانی"""
+async def _do_create_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE, confirmed: bool = False):
+    """ارسال واقعی تیکت بعد از تأیید پیش‌نمایش"""
+    query   = update.callback_query
+    uid     = update.effective_user.id
+    user    = await db.get_user(uid)
+    subject = context.user_data.get('ticket_subject', 'سوال')
+    text    = context.user_data.get('ticket_draft', '')
+
+    if not text:
+        await query.answer("❌ پیامی برای ارسال وجود ندارد!", show_alert=True)
+        return
+
+    name    = user.get('name', '')      if user else ''
+    sid     = user.get('student_id','') if user else ''
+    group   = user.get('group', '')     if user else ''
+    intake  = user.get('intake', '')    if user else ''
+    uname   = f"@{user.get('username','')}" if user and user.get('username') else 'ندارد'
+
+    tid = await db.ticket_create(uid, name, subject, text)
+    context.user_data.pop('ticket_mode', None)
+    context.user_data.pop('ticket_draft', None)
+    context.user_data.pop('ticket_subject', None)
+
+    # اطلاع کامل به ادمین با ورودی
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🔔 <b>تیکت جدید #{tid}</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>نام:</b> {name}\n"
+            f"🎓 <b>شماره دانشجویی:</b> {sid or '—'}\n"
+            f"📅 <b>ورودی:</b> {intake or '—'}\n"
+            f"👥 <b>گروه:</b> {group or '—'}\n"
+            f"📱 <b>یوزرنیم:</b> {uname}\n"
+            f"🆔 <b>آیدی:</b> <code>{uid}</code>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 <b>موضوع:</b> {subject}\n\n"
+            f"💬 <b>متن تیکت:</b>\n{text}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"✏️ پاسخ به تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}')
+            ]])
+        )
+    except Exception:
+        pass
+
+    await query.edit_message_text(
+        f"✅ <b>تیکت #{tid} با موفقیت ثبت شد!</b>\n\n"
+        "📬 به زودی پاسخ داده خواهد شد.\n"
+        "تا زمانی که تیکت باز است، می‌توانید پیام جدید اضافه کنید. 🙏",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📋 مشاهده تیکت #{tid}", callback_data=f'ticket:view:{tid}')],
+            [InlineKeyboardButton("🔙 بازگشت به پشتیبانی",  callback_data='ticket:main')],
+        ])
+    )
+
+
+# ══════════════════════════════════════════════════
+#  مدیریت تیکت‌ها — ادمین پیشرفته
+# ══════════════════════════════════════════════════
+
+async def _admin_manage(query, context):
+    """پنل مدیریت تیکت‌ها با فیلتر پیشرفته"""
+    f_status = context.user_data.get('tkt_f_status', 'open')
+    f_intake = context.user_data.get('tkt_f_intake', 'all')
+
+    # دریافت تیکت‌ها
+    if f_status == 'all':
+        tickets = await db.ticket_get_all()
+    else:
+        tickets = await db.ticket_get_all(f_status)
+
+    # فیلتر ورودی
+    if f_intake != 'all':
+        user_ids_in_intake = set()
+        intake_users = await db.get_users_by_intake(f_intake)
+        user_ids_in_intake = {u['user_id'] for u in intake_users}
+        tickets = [t for t in tickets if t.get('user_id') in user_ids_in_intake]
+
+    total  = len(tickets)
+    open_c = sum(1 for t in tickets if t.get('status') == 'open')
+    closed_c = total - open_c
+
+    # دکمه‌های فیلتر وضعیت
+    s_btns = [
+        InlineKeyboardButton(
+            f"{'✅' if f_status=='open' else '⬜'} 🟡 باز ({open_c})",
+            callback_data='ticket:admin_filter:status:open'
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if f_status=='closed' else '⬜'} 🟢 بسته ({closed_c})",
+            callback_data='ticket:admin_filter:status:closed'
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if f_status=='all' else '⬜'} 📂 همه ({total})",
+            callback_data='ticket:admin_filter:status:all'
+        ),
+    ]
+
+    # دکمه‌های فیلتر ورودی
+    intakes = await db.get_all_intakes()
+    i_btns  = [InlineKeyboardButton(
+        f"{'✅' if f_intake=='all' else '⬜'} همه ورودی‌ها",
+        callback_data='ticket:admin_filter:intake:all'
+    )]
+    for i in intakes:
+        i_btns.append(InlineKeyboardButton(
+            f"{'✅' if f_intake==i['code'] else '⬜'} {i['label']}",
+            callback_data=f'ticket:admin_filter:intake:{i["code"]}'
+        ))
+
+    keyboard = [s_btns]
+    # اگه ورودی‌ها زیاد بود، دو تا در هر ردیف
+    for idx in range(0, len(i_btns), 2):
+        keyboard.append(i_btns[idx:idx+2])
+
+    # لیست تیکت‌ها
+    for t in tickets[:12]:
+        icon = "🟢" if t['status'] == 'closed' else "🟡"
+        rc   = len(t.get('replies', []))
+        keyboard.append([InlineKeyboardButton(
+            f"{icon} #{t['ticket_id']} | {t.get('user_name','')[:8]} | {t.get('subject','')[:16]} | {rc}💬",
+            callback_data=f"ticket:admin_view:{t['ticket_id']}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("🔍 جستجوی تیکت", callback_data='ticket:admin_search')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+
+    await query.edit_message_text(
+        f"🎫 <b>مدیریت تیکت‌ها</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🟡 باز: <b>{open_c}</b>  |  🟢 بسته: <b>{closed_c}</b>  |  📂 کل: <b>{total}</b>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _search_tickets(update: Update, query_text: str):
+    """جستجوی تیکت با شماره یا نام کاربر"""
+    results = []
+
+    # جستجو با شماره تیکت
+    if query_text.isdigit():
+        t = await db.ticket_get(int(query_text))
+        if t:
+            results = [t]
+    else:
+        # جستجو با نام
+        all_tickets = await db.ticket_get_all()
+        results = [
+            t for t in all_tickets
+            if query_text.lower() in t.get('user_name', '').lower()
+        ]
+
+    if not results:
+        await update.message.reply_text(
+            f"❌ نتیجه‌ای برای «{query_text}» پیدا نشد.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')
+            ]])
+        )
+        return
+
+    keyboard = []
+    for t in results[:10]:
+        icon = "🟢" if t['status'] == 'closed' else "🟡"
+        keyboard.append([InlineKeyboardButton(
+            f"{icon} #{t['ticket_id']} | {t.get('user_name','')} | {t.get('subject','')[:20]}",
+            callback_data=f"ticket:admin_view:{t['ticket_id']}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ticket:manage')])
+
+    await update.message.reply_text(
+        f"🔍 <b>{len(results)} نتیجه برای «{query_text}»:</b>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ══════════════════════════════════════════════════
+#  نمایش‌دهنده‌ها
+# ══════════════════════════════════════════════════
+
+async def _show_ticket_detail(query, ticket: dict, is_admin: bool):
+    tid         = ticket['ticket_id']
+    status      = ticket.get('status', 'open')
+    status_icon = "🟢 بسته شده" if status == 'closed' else "🟡 در جریان"
+    replies     = ticket.get('replies', [])
+
+    if is_admin:
+        # اطلاعات کامل کاربری برای ادمین
+        uid_t = ticket.get('user_id', '')
+        user  = await db.get_user(uid_t) if uid_t else None
+        intake = user.get('intake', '') if user else ''
+        group  = user.get('group', '')  if user else ''
+        sid    = user.get('student_id', '') if user else ''
+
+        text = (
+            f"🎫 <b>تیکت #{tid}</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"👤 نام: <b>{ticket.get('user_name','')}</b>\n"
+            f"🆔 آیدی: <code>{uid_t}</code>\n"
+            f"🎓 شماره: {sid or '—'}\n"
+            f"📅 ورودی: {intake or '—'}\n"
+            f"👥 گروه: {group or '—'}\n"
+            f"📋 موضوع: {ticket.get('subject','')}\n"
+            f"🔘 وضعیت: {status_icon}\n"
+            f"📅 تاریخ ثبت: {ticket['created_at'][:10]}\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"💬 <b>پیام اولیه:</b>\n{ticket['message']}\n"
+        )
+    else:
+        text = (
+            f"🎫 <b>تیکت #{tid}</b>\n"
+            f"📋 {ticket.get('subject','')}\n"
+            f"🔘 {status_icon}\n"
+            f"📅 {ticket['created_at'][:10]}\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"💬 <b>پیام شما:</b>\n{ticket['message']}\n"
+        )
+
+    # نمایش همه پاسخ‌ها
+    if replies:
+        text += f"\n━━━━━━━━━━━━━━━━\n💬 <b>ادامه گفتگو ({len(replies)}):</b>\n"
+        for i, r in enumerate(replies, 1):
+            at_str  = r.get('at', '')[:10] if r.get('at') else ''
+            msg_txt = r.get('text', '')
+            # تشخیص فرستنده
+            if msg_txt.startswith('[دانشجو]'):
+                sender = "🧑‍🎓"
+                msg_txt = msg_txt[8:].strip()
+            else:
+                sender = "🎓 پشتیبانی"
+            text += f"\n{sender}  <i>{at_str}</i>\n{msg_txt}\n"
+
+    keyboard = []
+    if is_admin:
+        if status == 'open':
+            keyboard.append([InlineKeyboardButton("✏️ پاسخ جدید", callback_data=f'ticket:admin_reply:{tid}')])
+            keyboard.append([InlineKeyboardButton("🔒 بستن تیکت",  callback_data=f'ticket:admin_close:{tid}')])
+        keyboard.append([InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')])
+    else:
+        if status == 'open':
+            keyboard.append([InlineKeyboardButton("💬 ادامه گفتگو", callback_data=f'ticket:reply_user:{tid}')])
+        keyboard.append([InlineKeyboardButton("🔙 تیکت‌های من", callback_data='ticket:list')])
+
+    try:
+        await query.edit_message_text(
+            text[:4090], parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        pass
+
+
+async def _ticket_main(query, uid: int):
     tickets    = await db.ticket_get_user(uid)
     open_count = sum(1 for t in tickets if t['status'] == 'open')
-    done_count = sum(1 for t in tickets if t['status'] == 'closed')
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    keyboard = [
+    done_count = len(tickets) - open_count
+    keyboard   = [
+        [InlineKeyboardButton("🎫 ارسال تیکت جدید",            callback_data='ticket:new')],
+        [InlineKeyboardButton(f"📋 تیکت‌های من ({len(tickets)})", callback_data='ticket:list')],
+    ]
+    if uid == ADMIN_ID:
+        open_t = await db.ticket_get_all('open')
+        all_t  = await db.ticket_get_all()
+        keyboard.append([InlineKeyboardButton(
+            f"🎫 مدیریت تیکت‌ها ({len(open_t)} باز / {len(all_t)} کل)",
+            callback_data='ticket:manage'
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='dashboard:refresh')])
+    await query.edit_message_text(
+        f"🎫 <b>پشتیبانی</b>\n\n"
+        f"🟡 باز: {open_count}  |  🟢 بسته‌شده: {done_count}\n\n"
+        "برای ارسال مشکل یا سوال، تیکت جدید بزنید:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _ticket_list(query, uid: int):
+    tickets = await db.ticket_get_user(uid)
+    if not tickets:
+        await query.edit_message_text(
+            "📋 هیچ تیکتی ندارید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎫 تیکت جدید", callback_data='ticket:new')],
+                [InlineKeyboardButton("🔙 بازگشت",    callback_data='ticket:main')],
+            ])
+        )
+        return
+    keyboard = []
+    for t in tickets[:12]:
+        icon = "🟢" if t['status'] == 'closed' else "🟡"
+        rc   = len(t.get('replies', []))
+        status_str = "بسته" if t['status'] == 'closed' else "در جریان"
+        keyboard.append([InlineKeyboardButton(
+            f"{icon} #{t['ticket_id']} | {t.get('subject','')[:20]} | {rc} پیام",
+            callback_data=f"ticket:view:{t['ticket_id']}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ticket:main')])
+    await query.edit_message_text(
+        "📋 <b>تیکت‌های من</b>",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_ticket_main(message: Message, uid: int):
+    tickets    = await db.ticket_get_user(uid)
+    open_count = sum(1 for t in tickets if t['status'] == 'open')
+    done_count = len(tickets) - open_count
+    keyboard   = [
         [InlineKeyboardButton("🎫 ارسال تیکت جدید",              callback_data='ticket:new')],
         [InlineKeyboardButton(f"📋 تیکت‌های من ({len(tickets)})", callback_data='ticket:list')],
     ]
     if uid == ADMIN_ID:
         open_t = await db.ticket_get_all('open')
         all_t  = await db.ticket_get_all()
-        keyboard.append([InlineKeyboardButton(f"🟡 تیکت‌های باز ({len(open_t)})", callback_data='ticket:admin_list')])
-        keyboard.append([InlineKeyboardButton(f"📂 همه تیکت‌ها ({len(all_t)})",   callback_data='ticket:admin_all')])
+        keyboard.append([InlineKeyboardButton(
+            f"🎫 مدیریت تیکت‌ها ({len(open_t)} باز / {len(all_t)} کل)",
+            callback_data='ticket:manage'
+        )])
     await message.reply_text(
         f"🎫 <b>پشتیبانی</b>\n\n"
-        f"🟡 تیکت‌های باز: {open_count}  |  🟢 بسته‌شده: {done_count}\n\n"
+        f"🟡 باز: {open_count}  |  🟢 بسته‌شده: {done_count}\n\n"
         "برای ارسال مشکل یا سوال، تیکت جدید بزنید:",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
     )
