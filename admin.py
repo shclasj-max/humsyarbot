@@ -52,6 +52,7 @@ async def _admin_menu(query_or_msg, edit: bool = True):
         [InlineKeyboardButton("🎫 تیکت‌های باز",       callback_data='ticket:admin_list')],
         [InlineKeyboardButton("📢 ارسال همگانی",        callback_data='admin:broadcast')],
         [InlineKeyboardButton("💾 پشتیبان‌گیری",        callback_data='backup:menu')],
+        [InlineKeyboardButton("📡 وضعیت ربات",            callback_data='admin:bot_status')],
     ]
     text   = "👨‍⚕️ <b>پنل مدیریت</b>\n━━━━━━━━━━━━━━━━"
     markup = InlineKeyboardMarkup(keyboard)
@@ -83,6 +84,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _admin_menu(query)
     elif action == 'stats':
         await _show_stats(query)
+
+    elif action == 'bot_status':
+        await _show_bot_status(query, context)
     elif action == 'users':
         page = int(parts[2]) if len(parts) > 2 else 0
         await _show_users_list(query, page, group=context.user_data.get('filter_group'), intake=context.user_data.get('filter_intake'))
@@ -106,11 +110,60 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_uid = int(parts[2])
         field_map  = {'edit_name': ('name','نام'), 'edit_group': ('group','گروه'), 'edit_sid': ('student_id','شماره دانشجویی')}
         field, label = field_map[action]
-        context.user_data['edit_user'] = {'uid': target_uid, 'field': field, 'label': label}
-        context.user_data['mode'] = 'edit_user'
+        if action == 'edit_group':
+            # ویرایش گروه با دکمه — نه متن
+            user_t = await db.get_user(target_uid)
+            cur_g  = user_t.get('group', '') if user_t else ''
+            await query.edit_message_text(
+                f"👥 <b>تغییر گروه کاربر</b>\n\nگروه فعلی: <b>{cur_g or 'تعیین نشده'}</b>\n\nگروه جدید را انتخاب کنید:",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"{'✅ ' if cur_g=='1' else ''}1️⃣ گروه ۱", callback_data=f'admin:set_group:{target_uid}:1'),
+                        InlineKeyboardButton(f"{'✅ ' if cur_g=='2' else ''}2️⃣ گروه ۲", callback_data=f'admin:set_group:{target_uid}:2'),
+                    ],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data=f'admin:user_detail:{target_uid}')],
+                ])
+            )
+        else:
+            context.user_data['edit_user'] = {'uid': target_uid, 'field': field, 'label': label}
+            context.user_data['mode'] = 'edit_user'
+            await query.edit_message_text(
+                f"✏️ <b>ویرایش {label}</b>\n\nمقدار جدید را وارد کنید:", parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data=f'admin:user_detail:{target_uid}')]]))
+
+    elif action == 'set_group':
+        target_uid = int(parts[2])
+        new_group  = parts[3] if len(parts) > 3 else '1'
+        await db.update_user(target_uid, {'group': new_group})
+        await query.answer(f"✅ گروه به {new_group} تغییر یافت!", show_alert=True)
+        await _show_user_detail(query, context, target_uid)
+
+    elif action == 'edit_intake':
+        target_uid = int(parts[2])
+        user_t     = await db.get_user(target_uid)
+        cur_intake = user_t.get('intake', '') if user_t else ''
+        intakes    = await db.get_all_intakes()
+        keyboard   = []
+        for i in intakes:
+            active = cur_intake == i['code']
+            keyboard.append([InlineKeyboardButton(
+                f"{'✅ ' if active else ''}{i['label']}",
+                callback_data=f'admin:set_intake_user:{target_uid}:{i["code"]}'
+            )])
+        keyboard.append([InlineKeyboardButton("❌ بدون ورودی", callback_data=f'admin:set_intake_user:{target_uid}:none')])
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f'admin:user_detail:{target_uid}')])
         await query.edit_message_text(
-            f"✏️ <b>ویرایش {label}</b>\n\nمقدار جدید را وارد کنید:", parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data=f'admin:user_detail:{target_uid}')]]))
+            f"📅 <b>تغییر ورودی کاربر</b>\n\nورودی فعلی: <b>{cur_intake or '—'}</b>\n\nورودی جدید را انتخاب کنید:",
+            parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif action == 'set_intake_user':
+        target_uid = int(parts[2])
+        new_intake = '' if parts[3] == 'none' else parts[3]
+        await db.update_user(target_uid, {'intake': new_intake})
+        await query.answer(f"✅ ورودی به‌روز شد!", show_alert=True)
+        await _show_user_detail(query, context, target_uid)
     elif action == 'suspend':
         target_uid = int(parts[2])
         await db.update_user(target_uid, {'approved': False})
@@ -275,6 +328,40 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = parts[2] if len(parts) > 2 else 'all'
         context.user_data['bc_target'] = target
         await _broadcast_ask_message(query, context, target)
+
+    elif action == 'bc_intake':
+        # زیرمنوی ورودی: همه / گروه ۱ / گروه ۲
+        code     = parts[2] if len(parts) > 2 else ''
+        intakes  = await db.get_all_intakes()
+        intake   = next((i for i in intakes if i['code'] == code), {})
+        label    = intake.get('label', code)
+        all_u    = await db.all_users(approved_only=True)
+        all_i    = [u for u in all_u if u.get('intake') == code]
+        g1_count = sum(1 for u in all_i if str(u.get('group','')) == '1')
+        g2_count = sum(1 for u in all_i if str(u.get('group','')) == '2')
+        keyboard = [
+            [InlineKeyboardButton(
+                f"👥 همه دانشجویان ورودی ({len(all_i)} نفر)",
+                callback_data=f'admin:bc_target:intake_{code}'
+            )],
+            [
+                InlineKeyboardButton(
+                    f"1️⃣ گروه ۱  ({g1_count} نفر)",
+                    callback_data=f'admin:bc_target:intake_{code}_g1'
+                ),
+                InlineKeyboardButton(
+                    f"2️⃣ گروه ۲  ({g2_count} نفر)",
+                    callback_data=f'admin:bc_target:intake_{code}_g2'
+                ),
+            ],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:broadcast')],
+        ]
+        await query.edit_message_text(
+            f"📢 <b>ارسال همگانی — ورودی {label}</b>\n\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📌 گروه مورد نظر را انتخاب کنید:",
+            parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     elif action == 'bc_cancel':
         _broadcast_clear(context)
         await query.answer("✅ لغو شد.")
@@ -298,20 +385,35 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════
 
 async def _broadcast_main(query, context):
+    """
+    ساختار صحیح:
+    - همه کاربران
+    - هر ورودی → زیرمنو: همه / گروه ۱ / گروه ۲
+    """
     intakes   = await db.get_all_intakes()
-    all_count = len(await db.all_users(approved_only=True))
+    all_users = await db.all_users(approved_only=True)
+    all_count = len(all_users)
+
     keyboard = [
         [InlineKeyboardButton(f"👥 همه کاربران ({all_count} نفر)", callback_data='admin:bc_target:all')],
-        [
-            InlineKeyboardButton("1️⃣ گروه ۱", callback_data='admin:bc_target:g1'),
-            InlineKeyboardButton("2️⃣ گروه ۲", callback_data='admin:bc_target:g2'),
-        ],
     ]
+    # هر ورودی یه دکمه جداگانه داره که زیرمنو باز میکنه
     for i in intakes:
-        keyboard.append([InlineKeyboardButton(f"📅 ورودی {i['label']}", callback_data=f'admin:bc_target:intake_{i["code"]}')])
+        code   = i['code']
+        label  = i['label']
+        # شمارش کاربران این ورودی
+        intake_users = [u for u in all_users if u.get('intake') == code]
+        cnt    = len(intake_users)
+        keyboard.append([InlineKeyboardButton(
+            f"📅 {label} ({cnt} نفر)",
+            callback_data=f'admin:bc_intake:{code}'
+        )])
+
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
     await query.edit_message_text(
-        "📢 <b>ارسال همگانی</b>\n\n━━━━━━━━━━━━━━━━\n📌 <b>مرحله ۱:</b> مخاطبین پیام را انتخاب کنید:",
+        "📢 <b>ارسال همگانی</b>\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "📌 <b>مرحله ۱:</b> مخاطبین پیام را انتخاب کنید:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -503,25 +605,47 @@ async def _do_broadcast_send(bot, users_list: list, msg_data: dict) -> tuple:
 
 
 async def _get_target_users(target: str) -> list:
+    """
+    فرمت‌های پشتیبانی‌شده:
+      all              → همه کاربران
+      g1 / g2          → گروه ۱ یا ۲ از همه ورودی‌ها
+      intake_CODE      → همه کاربران یک ورودی
+      intake_CODE_g1   → گروه ۱ از ورودی CODE
+      intake_CODE_g2   → گروه ۲ از ورودی CODE
+    """
     all_users = await db.all_users(approved_only=True)
-    if target == 'all':
+    if target == "all":
         return all_users
-    elif target == 'g1':
-        return [u for u in all_users if str(u.get('group','')) == '1']
-    elif target == 'g2':
-        return [u for u in all_users if str(u.get('group','')) == '2']
-    elif target.startswith('intake_'):
-        code = target[7:]
-        return [u for u in all_users if u.get('intake') == code]
+    elif target == "g1":
+        return [u for u in all_users if str(u.get("group", "")) == "1"]
+    elif target == "g2":
+        return [u for u in all_users if str(u.get("group", "")) == "2"]
+    elif target.startswith("intake_"):
+        rest = target[7:]
+        if rest.endswith("_g1"):
+            code = rest[:-3]
+            return [u for u in all_users
+                    if u.get("intake") == code and str(u.get("group","")) == "1"]
+        elif rest.endswith("_g2"):
+            code = rest[:-3]
+            return [u for u in all_users
+                    if u.get("intake") == code and str(u.get("group","")) == "2"]
+        else:
+            return [u for u in all_users if u.get("intake") == rest]
     return all_users
 
 
 def _get_target_label(target: str) -> str:
-    labels = {'all': 'همه کاربران', 'g1': 'گروه ۱', 'g2': 'گروه ۲'}
+    labels = {'all': 'همه کاربران', 'g1': 'گروه ۱ (همه ورودی‌ها)', 'g2': 'گروه ۲ (همه ورودی‌ها)'}
     if target in labels:
         return labels[target]
     if target.startswith('intake_'):
-        return f"ورودی {target[7:]}"
+        rest = target[7:]
+        if rest.endswith('_g1'):
+            return f"ورودی {rest[:-3]} — گروه ۱"
+        elif rest.endswith('_g2'):
+            return f"ورودی {rest[:-3]} — گروه ۲"
+        return f"ورودی {rest}"
     return target
 
 
@@ -562,6 +686,63 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
 # ══════════════════════════════════════════════════
 # نمایش‌دهنده‌ها
 # ══════════════════════════════════════════════════
+
+async def _show_bot_status(query, context):
+    import time
+    from datetime import datetime
+    db_status = "disconnected"
+    db_ping   = "—"
+    try:
+        t0 = time.monotonic()
+        await db.client.admin.command("ping")
+        db_ping   = f"{int((time.monotonic()-t0)*1000)} ms"
+        db_status = "✅ متصل"
+    except Exception as e:
+        db_status = f"❌ خطا: {str(e)[:30]}"
+    jobs_info = []
+    try:
+        if context.application.job_queue:
+            for job in context.application.job_queue.jobs():
+                nxt = job.next_t
+                nxt_str = nxt.strftime("%H:%M") if nxt else "—"
+                jobs_info.append(f"  ⏰ {job.name}  |  بعدی: {nxt_str}")
+    except Exception:
+        pass
+    jobs_text = "\n".join(jobs_info) if jobs_info else "  —"
+    s = await db.global_stats()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines_t = [
+        "📡 <b>وضعیت ربات</b>",
+        "━━━━━━━━━━━━━━━━",
+        "",
+        f"🗄 <b>دیتابیس:</b> {db_status}",
+        f"🏓 <b>پینگ DB:</b> {db_ping}",
+        "",
+        "⏰ <b>Job های فعال:</b>",
+        jobs_text,
+        "",
+        "━━━━━━━━━━━━━━━━",
+        "📊 <b>آمار کلی</b>",
+        "",
+        f"👥 کاربران تأیید: <b>{s['users']}</b>",
+        f"⏳ منتظر تأیید: <b>{s['pending']}</b>",
+        f"🧪 سوال تأییدشده: <b>{s['questions']}</b>",
+        f"📁 محتوای علوم پایه: <b>{s.get('bs_content', 0)}</b>",
+        f"📖 رفرنس ها: <b>{s.get('ref_files', 0)}</b>",
+        f"🎫 تیکت باز: <b>{s.get('open_tickets', 0)}</b>",
+        "",
+        "━━━━━━━━━━━━━━━━",
+        f"🕐 زمان سرور: <code>{now_str}</code>",
+    ]
+    text = "\n".join(lines_t)
+    await query.edit_message_text(
+        text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin:bot_status")],
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="admin:main")],
+        ])
+    )
+
 
 async def _show_stats(query):
     s = await db.global_stats()
@@ -674,10 +855,13 @@ async def _show_user_detail(query, context, target_uid: int):
         f"  📈 درصد: {stats['percentage']}%  🔥 هفتگی: {stats['week_activity']}\n"
         f"  🎫 تیکت باز: {open_t}"
     )
-    keyboard = [[
-        InlineKeyboardButton("✏️ ویرایش نام",  callback_data=f'admin:edit_name:{target_uid}'),
-        InlineKeyboardButton("✏️ ویرایش گروه", callback_data=f'admin:edit_group:{target_uid}'),
-    ]]
+    keyboard = [
+        [
+            InlineKeyboardButton("✏️ ویرایش نام",  callback_data=f'admin:edit_name:{target_uid}'),
+            InlineKeyboardButton("✏️ ویرایش گروه", callback_data=f'admin:edit_group:{target_uid}'),
+        ],
+        [InlineKeyboardButton("📅 ویرایش ورودی", callback_data=f'admin:edit_intake:{target_uid}')],
+    ]
     if user.get('role','student') == 'student':
         keyboard.append([InlineKeyboardButton("🎓 دادن دسترسی محتوا", callback_data=f'admin:ca_set:{target_uid}')])
     elif user.get('role') == 'content_admin':
