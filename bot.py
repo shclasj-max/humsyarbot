@@ -195,7 +195,12 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
         return await admin_broadcast_handler(update, context)
 
-    # ۲. FIX: search_user ادمین
+    # ۲. FIX: profile_edit — ویرایش نام/شماره دانشجویی (هر کاربری)
+    if context.user_data.get('mode') == 'profile_edit':
+        from profile import profile_text_handler
+        return await profile_text_handler(update, context)
+
+    # ۳. FIX: search_user ادمین
     if uid == ADMIN_ID and context.user_data.get('mode') == 'search_user':
         return await handle_admin_text(update, context)
 
@@ -222,8 +227,15 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if ca_mode in ca_text_modes and await db.is_content_admin(uid):
         return await ca_text_handler(update, context)
 
-    # ۷. ticket mode
-    if context.user_data.get('ticket_mode') in ('waiting_message', 'admin_reply'):
+    # ۷. ticket mode — شامل user_reply و admin_search هم هست
+    if context.user_data.get('ticket_mode') in (
+        'waiting_message', 'admin_reply', 'user_reply',
+        'admin_search', 'awaiting_confirm'
+    ):
+        return await ticket_message_handler(update, context)
+
+    # ۷b. ticket_search mode برای ادمین
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'ticket_search':
         return await ticket_message_handler(update, context)
 
     # ۸. روتر اصلی
