@@ -21,6 +21,11 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     # ── حالت‌های خاص ادمین ──
+    # profile_edit برای همه کاربران
+    if context.user_data.get('mode') == 'profile_edit':
+        from profile import profile_text_handler
+        return await profile_text_handler(update, context)
+
     if uid == ADMIN_ID:
         mode = context.user_data.get('mode', '')
         # FIX: همه mode های ادمین یکجا — qbank_awaiting_desc اضافه شد
@@ -56,7 +61,15 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await ca_text_handler(update, context)
 
     # ── تیکت ──
-    if context.user_data.get('ticket_mode') in ('waiting_message', 'admin_reply'):
+    if context.user_data.get('ticket_mode') in (
+        'waiting_message', 'admin_reply', 'user_reply',
+        'admin_search', 'awaiting_confirm'
+    ):
+        from ticket import ticket_message_handler
+        return await ticket_message_handler(update, context)
+
+    # ticket_search — جستجوی تیکت توسط ادمین
+    if context.user_data.get('mode') == 'ticket_search':
         from ticket import ticket_message_handler
         return await ticket_message_handler(update, context)
 
