@@ -24,10 +24,14 @@ class DB:
 
         self.client = motor.motor_asyncio.AsyncIOMotorClient(
             uri,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            maxPoolSize=50,
-            minPoolSize=5,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=20000,
+            socketTimeoutMS=45000,
+            maxPoolSize=10,
+            minPoolSize=1,
+            retryWrites=True,
+            retryReads=True,
+            waitQueueTimeoutMS=10000,
         )
         _db = self.client['medicalbot']
 
@@ -46,6 +50,9 @@ class DB:
         self.faq          = _db['faq']
         self.tickets      = _db['tickets']
         self.intakes      = _db['intakes']
+        self.settings     = _db['bot_settings']     # تنظیمات کلی + گروه‌های لاگ + maintenance
+        self.admin_roles  = _db['admin_roles']      # FIX جدید: سطوح دسترسی چندگانه ادمین
+        self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها
@@ -135,7 +142,14 @@ class DB:
         if uid == int(os.getenv('ADMIN_ID', '0')):
             return True
         u = await self.get_user(uid)
-        return bool(u and u.get('role') in ('content_admin', 'admin'))
+        if u and u.get('role') in ('content_admin', 'admin'):
+            return True
+        # FIX جدید: نقش content_scoped (مدیر محتوای محدود به یک ورودی)
+        # هم باید بتواند وارد پنل محتوا شود — فقط با محدودیت ورودی
+        role_doc = await self.get_admin_role(uid)
+        if role_doc and role_doc.get('role') == 'content_scoped':
+            return True
+        return False
 
     async def search_users(self, query_text: str):
         regex = {'$regex': query_text, '$options': 'i'}
@@ -660,12 +674,32 @@ class DB:
         await self.log(uid, 'answer', {'qid': qid, 'correct': is_correct})
 
     async def get_lessons(self):
-        return await self.questions.distinct('lesson', {'approved': True})
+        """دروس بانک سوال از bs_lessons (پنل محتوا) — سینک کامل"""
+        lessons = await self.bs_lessons.find({}).sort([('term', 1), ('order', 1)]).to_list(500)
+        seen, names = set(), []
+        for l in lessons:
+            n = l.get('name', '').strip()
+            if n and n not in seen:
+                seen.add(n); names.append(n)
+        return names
 
     async def get_topics(self, lesson: str = None):
-        q = {'approved': True}
-        if lesson: q['lesson'] = lesson
-        return await self.questions.distinct('topic', q)
+        """مباحث بانک سوال از bs_sessions همان درس"""
+        if not lesson:
+            sessions = await self.bs_sessions.find({}).to_list(2000)
+        else:
+            lesson_doc = await self.bs_lessons.find_one({'name': lesson})
+            if not lesson_doc:
+                return []
+            sessions = await self.bs_sessions.find(
+                {'lesson_id': str(lesson_doc['_id'])}
+            ).sort('number', 1).to_list(500)
+        seen, topics = set(), []
+        for s in sessions:
+            t = s.get('topic', '').strip()
+            if t and t not in seen:
+                seen.add(t); topics.append(t)
+        return topics
 
     # ══════════════════════════════════════════════════
     #  برنامه
@@ -893,4 +927,198 @@ class DB:
 
 
 # instance جهانی
+    # ══════════════════════════════════════════════════
+    #  تنظیمات کلی ربات (bot_settings)
+    # ══════════════════════════════════════════════════
+
+    async def get_setting(self, key: str, default=None):
+        doc = await self.settings.find_one({'_id': 'global'})
+        if not doc:
+            return default
+        return doc.get(key, default)
+
+    async def set_setting(self, key: str, value) -> None:
+        await self.settings.update_one(
+            {'_id': 'global'},
+            {'$set': {key: value, 'updated_at': datetime.now().isoformat()}},
+            upsert=True
+        )
+
+    async def get_all_settings(self) -> dict:
+        doc = await self.settings.find_one({'_id': 'global'})
+        return doc or {}
+
+    async def users_missing_student_id(self) -> list:
+        return await self.users.find({
+            'approved': True,
+            '$or': [
+                {'student_id': {'$exists': False}},
+                {'student_id': ''},
+                {'student_id': None},
+            ]
+        }).to_list(1000)
+
+    # ══════════════════════════════════════════════════
+    #  سطوح دسترسی چندگانه ادمین (admin_roles)
+    #  جدا از users.role (student/content_admin) — مخصوص
+    #  زیرمجموعه‌های ادمین ارشد: مدیر محتوا کلی/محدود، پشتیبان
+    # ══════════════════════════════════════════════════
+
+    # نقش‌های ممکن و برچسب فارسی‌شان
+    ROLE_LABELS = {
+        'support':        '🎫 پشتیبان (فقط تیکت)',
+        'content_admin':  '🎓 مدیر محتوا (کلی)',
+        'content_scoped': '📅 مدیر محتوا (محدود به ورودی)',
+        'broadcaster':    '📢 مسئول اطلاعیه',
+    }
+
+    # ماتریس مجوزها برای هر نقش — استفاده در has_permission
+    ROLE_PERMISSIONS = {
+        'support':        {'tickets'},
+        'content_admin':  {'content', 'questions_review'},
+        'content_scoped': {'content_scoped', 'questions_review_scoped'},
+        'broadcaster':     {'broadcast'},
+    }
+
+    async def add_admin_role(self, uid: int, role: str, added_by: int,
+                              scope_intake: str = None) -> bool:
+        """افزودن نقش فرعی ادمین — اگه از قبل نقشی داشت، آپدیت میشه"""
+        if role not in self.ROLE_LABELS:
+            return False
+        await self.admin_roles.update_one(
+            {'_id': uid},
+            {'$set': {
+                'role':         role,
+                'scope_intake': scope_intake,
+                'added_by':     added_by,
+                'added_at':     datetime.now().isoformat(),
+            }},
+            upsert=True
+        )
+        return True
+
+    async def remove_admin_role(self, uid: int):
+        await self.admin_roles.delete_one({'_id': uid})
+
+    async def get_admin_role(self, uid: int) -> dict:
+        """نقش فرعی یک کاربر — None اگه نداشت"""
+        return await self.admin_roles.find_one({'_id': uid})
+
+    async def get_all_admin_roles(self) -> list:
+        return await self.admin_roles.find({}).sort('added_at', -1).to_list(100)
+
+    async def has_permission(self, uid: int, permission: str) -> bool:
+        """
+        چک کردن دسترسی — ADMIN_ID (مدیر ارشد) همیشه همه‌چیز دارد.
+        بقیه بر اساس admin_roles چک می‌شوند.
+        """
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return True
+        doc = await self.get_admin_role(uid)
+        if not doc:
+            return False
+        perms = self.ROLE_PERMISSIONS.get(doc.get('role', ''), set())
+        return permission in perms
+
+    async def get_scoped_intake(self, uid: int) -> str:
+        """
+        اگه کاربر مدیر محتوای محدود به یک ورودی خاص باشد، کد آن
+        ورودی را برمی‌گرداند، وگرنه None (یعنی دسترسی کامل/بدون محدودیت)
+        """
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return None
+        doc = await self.get_admin_role(uid)
+        if doc and doc.get('role') == 'content_scoped':
+            return doc.get('scope_intake')
+        return None
+
+    # ══════════════════════════════════════════════════
+    #  لاگ فعالیت حساس (audit_logs)
+    # ══════════════════════════════════════════════════
+
+    async def log_action(self, actor_id: int, actor_name: str, action: str,
+                          details: str = '', category: str = 'admin') -> None:
+        """
+        ثبت یک عمل حساس. category: 'admin' یا 'content'
+        تا بدانیم به کدام گروه تلگرام باید ارسال شود.
+        """
+        await self.audit_logs.insert_one({
+            'actor_id':   actor_id,
+            'actor_name': actor_name,
+            'action':     action,
+            'details':    details,
+            'category':   category,
+            'at':         datetime.now().isoformat(),
+        })
+
+    async def get_recent_logs(self, category: str = None, limit: int = 30) -> list:
+        q = {'category': category} if category else {}
+        return await self.audit_logs.find(q).sort('at', -1).to_list(limit)
+
+    # ══════════════════════════════════════════════════
+    #  گزارش هفتگی/ماهانه خودکار
+    # ══════════════════════════════════════════════════
+
+    async def weekly_report_stats(self) -> dict:
+        """آمار خلاصه برای گزارش دوره‌ای ادمین"""
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+
+        new_users = await self.users.count_documents(
+            {'registered_at': {'$gte': week_ago}}
+        )
+        active_users = await self.answers.distinct(
+            'user_id', {'answered_at': {'$gte': week_ago}}
+        ) if hasattr(self, 'answers') else []
+
+        # FIX: پرطرفدارترین درس — بر اساس مجموع دانلود محتوای هر درس.
+        # bs_content فیلد lesson مستقیم ندارد (فقط session_id) پس باید
+        # session → lesson_id → lesson.name را در پایتون join بزنیم.
+        top_lesson = None
+        try:
+            all_content  = await self.bs_content.find({}).to_list(5000)
+            all_sessions = await self.bs_sessions.find({}).to_list(2000)
+            all_lessons  = await self.bs_lessons.find({}).to_list(500)
+            session_to_lesson = {str(s['_id']): s.get('lesson_id', '') for s in all_sessions}
+            lesson_id_to_name = {str(l['_id']): l.get('name', '') for l in all_lessons}
+            downloads_by_lesson: dict = {}
+            for c in all_content:
+                sid = c.get('session_id', '')
+                lid = session_to_lesson.get(sid, '')
+                lname = lesson_id_to_name.get(lid, '')
+                if lname:
+                    downloads_by_lesson[lname] = downloads_by_lesson.get(lname, 0) + c.get('downloads', 0)
+            if downloads_by_lesson:
+                top_lesson = max(downloads_by_lesson, key=downloads_by_lesson.get)
+        except Exception as e:
+            logger.debug(f"weekly_report_stats top_lesson error: {e}")
+
+        open_tickets   = await self.tickets.count_documents({'status': 'open'})
+        closed_week    = await self.tickets.count_documents(
+            {'status': 'closed', 'closed_at': {'$gte': week_ago}}
+        )
+        total_tickets_week = await self.tickets.count_documents(
+            {'created_at': {'$gte': week_ago}}
+        )
+
+        # کاربرانی که بیش از ۱۴ روز فعالیت نداشتند (احتمال غیرفعال شدن)
+        inactive_cutoff = (datetime.now() - timedelta(days=14)).isoformat()
+        all_appr = await self.users.find({'approved': True}).to_list(5000)
+        inactive_count = 0
+        for u in all_appr:
+            last = u.get('last_active', u.get('registered_at', ''))
+            if last < inactive_cutoff:
+                inactive_count += 1
+
+        return {
+            'new_users':          new_users,
+            'active_users_count': len(set(active_users)),
+            'top_lesson':         top_lesson or 'داده‌ای نیست',
+            'open_tickets':       open_tickets,
+            'closed_week':        closed_week,
+            'total_tickets_week': total_tickets_week,
+            'inactive_count':     inactive_count,
+            'total_users':        await self.users.count_documents({'approved': True}),
+        }
+
+
 db = DB()
