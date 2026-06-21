@@ -79,13 +79,38 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     ], resize_keyboard=True)
 
 
-def get_keyboard_for_user(user: dict, uid: int) -> ReplyKeyboardMarkup:
-    """کیبورد مناسب بر اساس نقش کاربر"""
+def sub_admin_keyboard() -> ReplyKeyboardMarkup:
+    """
+    FIX جدید: کیبورد برای کاربرانی که نقش فرعی ادمین دارند
+    (support/broadcaster) — دکمه‌های دانشجویی عادی + پنل ادمین محدود.
+    """
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
+        [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
+        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
+        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("👨‍⚕️ پنل ادمین")],
+    ], resize_keyboard=True)
+
+
+async def get_keyboard_for_user(user: dict, uid: int) -> ReplyKeyboardMarkup:
+    """
+    کیبورد مناسب بر اساس نقش کاربر — FIX جدید: حالا async است تا
+    بتواند نقش‌های فرعی ادمین (admin_roles) را هم چک کند.
+    """
     if uid == ADMIN_ID:
         return admin_keyboard()
     role = user.get('role', 'student') if user else 'student'
     if role == 'content_admin':
         return content_admin_keyboard()
+    # FIX جدید: چک نقش فرعی (support/broadcaster/content_scoped)
+    from database import db
+    role_doc = await db.get_admin_role(uid)
+    if role_doc:
+        sub_role = role_doc.get('role', '')
+        if sub_role == 'content_scoped':
+            return content_admin_keyboard()
+        return sub_admin_keyboard()
     return main_keyboard()
 
 
@@ -261,3 +286,60 @@ async def broadcast_message(bot, users: List[dict], text: str,
         if i % 30 == 29:
             await asyncio.sleep(1)  # تنفس بین دسته‌ها
     return sent, failed
+
+
+# ══════════════════════════════════════════════════
+#  لاگ فعالیت حساس — ارسال به گروه‌های مشخص‌شده
+# ══════════════════════════════════════════════════
+
+async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
+                          action: str, details: str = '') -> None:
+    """
+    ثبت یک عمل حساس در دیتابیس + ارسال آن به گروه تلگرامی مربوطه.
+    category: 'admin' (پنل ادمین ارشد) یا 'content' (پنل محتوا)
+    اگه گروه مربوطه در تنظیمات ست نشده باشد، فقط در دیتابیس ثبت می‌شود
+    و ارسالی صورت نمی‌گیرد (بدون خطا).
+    """
+    from database import db
+    await db.log_action(actor_id, actor_name, action, details, category)
+
+    group_key  = 'log_group_admin' if category == 'admin' else 'log_group_content'
+    chat_id    = await db.get_setting(group_key, None)
+    if not chat_id:
+        return
+
+    icon = '🛡' if category == 'admin' else '🎓'
+    text = (
+        f"{icon} <b>لاگ فعالیت</b>\n"
+        f"👤 <b>{actor_name}</b> (<code>{actor_id}</code>)\n"
+        f"⚡ {action}"
+    )
+    if details:
+        text += f"\n📝 {details}"
+
+    try:
+        await bot.send_message(int(chat_id), text, parse_mode='HTML')
+    except Exception as e:
+        logger.warning(f"send_audit_log failed for chat {chat_id}: {e}")
+
+
+# ══════════════════════════════════════════════════
+#  بررسی حالت تعمیر و نگهداری (Maintenance mode)
+# ══════════════════════════════════════════════════
+
+async def is_maintenance_on() -> bool:
+    """آیا ربات در حالت تعمیر و نگهداری است؟"""
+    from database import db
+    return bool(await db.get_setting('maintenance_mode', False))
+
+
+async def maintenance_message() -> str:
+    from database import db
+    custom = await db.get_setting('maintenance_text', '')
+    if custom:
+        return custom
+    return (
+        "🔧 <b>ربات موقتاً در حال بروزرسانی است</b>\n\n"
+        "لطفاً چند دقیقه دیگر دوباره تلاش کنید.\n"
+        "از صبر شما سپاسگزاریم 🙏"
+    )
