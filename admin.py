@@ -15,15 +15,81 @@ from telegram import (
 )
 from telegram.ext import ContextTypes, ConversationHandler
 from database import db
-from utils import main_keyboard, content_admin_keyboard, admin_keyboard, safe_send
+from utils import main_keyboard, content_admin_keyboard, admin_keyboard, safe_send, send_audit_log
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 BROADCAST = 5   # نگه داشته شده برای سازگاری با bot.py
 
 
-async def _admin_menu(query_or_msg, edit: bool = True):
-    s        = await db.global_stats()
+async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
+    """
+    FIX جدید: منو بر اساس نقش فیلتر می‌شود —
+    ADMIN_ID همه‌چیز می‌بیند، نقش‌های فرعی فقط بخش مجاز خودشان.
+    """
+    s     = await db.global_stats()
+    role  = None
+    if uid is not None and uid != ADMIN_ID:
+        role_doc = await db.get_admin_role(uid)
+        role = role_doc.get('role') if role_doc else None
+
+    # نقش پشتیبان: منوی بسیار محدود
+    if role == 'support':
+        keyboard = [
+            [InlineKeyboardButton("🎫 مدیریت تیکت‌ها", callback_data='ticket:admin_list')],
+        ]
+        text = "🎫 <b>پنل پشتیبان</b>\n━━━━━━━━━━━━━━━━\nشما فقط به مدیریت تیکت‌ها دسترسی دارید."
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(support): {e}")
+        return
+
+    # نقش مسئول اطلاعیه: فقط broadcast
+    if role == 'broadcaster':
+        keyboard = [
+            [InlineKeyboardButton("📢 ارسال همگانی", callback_data='admin:broadcast')],
+        ]
+        text = "📢 <b>پنل مسئول اطلاعیه</b>\n━━━━━━━━━━━━━━━━"
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(broadcaster): {e}")
+        return
+
+    # FIX امنیتی: content_scoped باید به پنل محتوا هدایت شود،
+    # نه منوی کامل ادمین ارشد را ببیند.
+    if role == 'content_scoped':
+        keyboard = [
+            [InlineKeyboardButton("🎓 رفتن به پنل محتوا", callback_data='ca:main')],
+        ]
+        text = (
+            "📅 <b>پنل مدیر محتوای محدود</b>\n━━━━━━━━━━━━━━━━\n\n"
+            "شما فقط به محتوای ورودی خاص خودتان دسترسی دارید.\n"
+            "از دکمه زیر وارد پنل محتوا شوید:"
+        )
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(content_scoped): {e}")
+        return
+
+    # فقط ادمین ارشد به این نقطه می‌رسد — منوی کامل
     keyboard = [
         [InlineKeyboardButton(
             f"📊 آمار سیستم  ({s['users']} کاربر | {s.get('open_tickets', 0)} تیکت باز)",
@@ -49,11 +115,21 @@ async def _admin_menu(query_or_msg, edit: bool = True):
             InlineKeyboardButton("📅 برنامه جدید",     callback_data='schedule:add_type'),
             InlineKeyboardButton("🗑 حذف برنامه",      callback_data='schedule:del_list'),
         ],
-        [InlineKeyboardButton("🎫 تیکت‌های باز",       callback_data='ticket:admin_list')],
+        [InlineKeyboardButton("🎫 مدیریت تیکت‌ها",     callback_data='ticket:admin_list')],
         [InlineKeyboardButton("📢 ارسال همگانی",        callback_data='admin:broadcast')],
         [InlineKeyboardButton("💾 پشتیبان‌گیری",        callback_data='backup:menu')],
         [InlineKeyboardButton("📡 وضعیت ربات",            callback_data='admin:bot_status')],
     ]
+    # FIX جدید: دکمه‌های ویژه ادمین ارشد — نقش‌های فرعی این‌ها را نمی‌بینند
+    if uid is None or uid == ADMIN_ID:
+        keyboard.append([
+            InlineKeyboardButton("🛡 سطوح دسترسی ادمین", callback_data='admin:roles'),
+            InlineKeyboardButton("⚙️ تنظیمات ربات",      callback_data='admin:settings'),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📋 لاگ فعالیت",        callback_data='admin:audit_log'),
+            InlineKeyboardButton("📥 خروجی اکسل",        callback_data='admin:export_excel'),
+        ])
     text   = "👨‍⚕️ <b>پنل مدیریت</b>\n━━━━━━━━━━━━━━━━"
     markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -66,27 +142,190 @@ async def _admin_menu(query_or_msg, edit: bool = True):
         logger.debug(f"_admin_menu: {e}")
 
 
-async def show_admin_main(message):
-    await _admin_menu(message, edit=False)
+async def show_admin_main(message, uid: int = None):
+    await _admin_menu(message, edit=False, uid=uid)
+
+
+# FIX جدید: عملیاتی که فقط ادمین ارشد (ADMIN_ID) حق انجامش را دارد —
+# حتی پشتیبان/مسئول اطلاعیه/مدیر محتوای محدود هم نمی‌توانند.
+ROOT_ONLY_ACTIONS = {
+    'roles', 'role_add', 'role_remove', 'role_set',
+    'role_add_pick', 'role_type', 'role_intake',   # FIX امنیتی: این‌ها هم فقط مدیر ارشد
+    'settings', 'toggle_require_sid',
+    'toggle_maintenance', 'set_maintenance_text',
+    'set_log_group_admin', 'set_log_group_content',
+    'export_excel', 'audit_log',
+    'confirm_delete_user', 'delete_user',
+    'content_admins', 'ca_set', 'ca_remove',
+}
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid   = update.effective_user.id
-    if uid != ADMIN_ID:
-        await query.answer("❌ دسترسی ندارید!", show_alert=True)
-        return
-    await query.answer()
     parts  = query.data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
 
+    # FIX جدید: سطوح دسترسی چندگانه
+    if uid != ADMIN_ID:
+        role_doc = await db.get_admin_role(uid)
+        if not role_doc:
+            await query.answer("❌ دسترسی ندارید!", show_alert=True)
+            return
+        if action in ROOT_ONLY_ACTIONS:
+            await query.answer("❌ این بخش فقط در اختیار مدیر ارشد است.", show_alert=True)
+            return
+        role  = role_doc.get('role', '')
+        perms = db.ROLE_PERMISSIONS.get(role, set())
+        # FIX امنیتی: محدودیت دقیق هر نقش فرعی به منوی خودش —
+        # غیر از 'main' (که خودش منوی فیلترشده نشان می‌دهد)، فقط
+        # عمل متناسب با مجوز همان نقش اجازه دارد.
+        if action == 'broadcast' and 'broadcast' not in perms:
+            await query.answer("❌ شما دسترسی ارسال همگانی ندارید.", show_alert=True)
+            return
+        if action != 'main':
+            if role == 'support':
+                await query.answer(
+                    "ℹ️ شما دسترسی پشتیبان دارید — از منوی «🎫 مدیریت تیکت‌ها» استفاده کنید.",
+                    show_alert=True
+                )
+                return
+            if role == 'content_scoped' and action != 'broadcast':
+                await query.answer(
+                    "ℹ️ شما مدیر محتوای محدود هستید — از منوی «🎓 پنل محتوا» استفاده کنید.",
+                    show_alert=True
+                )
+                return
+            if role == 'broadcaster' and action != 'broadcast':
+                await query.answer(
+                    "ℹ️ شما فقط دسترسی ارسال همگانی دارید.",
+                    show_alert=True
+                )
+                return
+
+    await query.answer()
+
     if action == 'main':
-        await _admin_menu(query)
+        await _admin_menu(query, uid=uid)
     elif action == 'stats':
         await _show_stats(query)
 
     elif action == 'bot_status':
         await _show_bot_status(query, context)
+
+    # ══════════════════════════════════════════════
+    # ⚙️ تنظیمات ربات
+    # ══════════════════════════════════════════════
+    elif action == 'settings':
+        await _show_settings(query)
+
+    elif action == 'toggle_require_sid':
+        current = await db.get_setting('require_student_id', False)
+        new_val = not current
+        await db.set_setting('require_student_id', new_val)
+        await query.answer("✅ شماره دانشجویی اکنون اجباری است" if new_val else "✅ شماره دانشجویی اکنون اختیاری است", show_alert=True)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(context.bot, 'admin', actor_name, uid, "تغییر تنظیم: اجباری‌بودن شماره دانشجویی", f"وضعیت جدید: {'فعال' if new_val else 'غیرفعال'}")
+        await _show_settings(query)
+
+    elif action == 'toggle_maintenance':
+        current = await db.get_setting('maintenance_mode', False)
+        new_val = not current
+        await db.set_setting('maintenance_mode', new_val)
+        await query.answer("🔧 حالت تعمیر فعال شد" if new_val else "✅ حالت تعمیر غیرفعال شد", show_alert=True)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(context.bot, 'admin', actor_name, uid, "تغییر تنظیم: حالت تعمیر و نگهداری", f"وضعیت جدید: {'فعال' if new_val else 'غیرفعال'}")
+        await _show_settings(query)
+
+    elif action == 'set_maintenance_text':
+        context.user_data['mode'] = 'set_maintenance_text'
+        await query.edit_message_text(
+            "🔧 <b>متن حالت تعمیر</b>\n\nمتن جدیدی که کاربران در حالت تعمیر می‌بینند را ارسال کنید:\n"
+            "<i>برای بازگشت به متن پیش‌فرض، کلمه «پیشفرض» را بفرستید.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:settings')]])
+        )
+
+    elif action == 'set_log_group_admin':
+        context.user_data['mode'] = 'set_log_group_admin'
+        await query.edit_message_text(
+            "🛡 <b>تنظیم گروه لاگ پنل ادمین</b>\n\n"
+            "ربات را به گروه مورد نظر اضافه کنید، سپس یک پیام در آن گروه بفرستید و "
+            "آن را به اینجا فوروارد کنید — یا مستقیماً آیدی عددی گروه (با علامت منفی) را ارسال کنید.\n\n"
+            "<i>برای حذف تنظیم فعلی، کلمه «حذف» را بفرستید.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:settings')]])
+        )
+
+    elif action == 'set_log_group_content':
+        context.user_data['mode'] = 'set_log_group_content'
+        await query.edit_message_text(
+            "🎓 <b>تنظیم گروه لاگ پنل محتوا</b>\n\n"
+            "ربات را به گروه ادمین محتوا اضافه کنید، سپس یک پیام در آن گروه بفرستید و "
+            "آن را به اینجا فوروارد کنید — یا مستقیماً آیدی عددی گروه (با علامت منفی) را ارسال کنید.\n\n"
+            "<i>برای حذف تنظیم فعلی، کلمه «حذف» را بفرستید.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:settings')]])
+        )
+
+    elif action == 'export_excel':
+        await _export_excel(query, context)
+
+    elif action == 'audit_log':
+        await _show_audit_log(query, 'admin')
+
+    # ══════════════════════════════════════════════
+    # 🛡 سطوح دسترسی چندگانه ادمین (admin_roles)
+    # ══════════════════════════════════════════════
+    elif action == 'roles':
+        await _show_roles(query)
+
+    elif action == 'role_add_pick':
+        # انتخاب نوع نقش قبل از گرفتن آیدی
+        await _show_role_type_picker(query)
+
+    elif action == 'role_type':
+        role_type = parts[2]
+        context.user_data['new_role_type'] = role_type
+        if role_type == 'content_scoped':
+            await _show_role_intake_picker(query)
+        else:
+            context.user_data['mode'] = 'add_admin_role'
+            await query.edit_message_text(
+                f"🛡 <b>افزودن {db.ROLE_LABELS.get(role_type, role_type)}</b>\n\n"
+                "آیدی عددی تلگرام کاربر را ارسال کنید:\n"
+                "<i>(می‌توانید با فوروارد پیام کاربر به @userinfobot آیدی را پیدا کنید)</i>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ لغو", callback_data='admin:roles')
+                ]])
+            )
+
+    elif action == 'role_intake':
+        intake_code = parts[2]
+        context.user_data['new_role_intake'] = intake_code
+        context.user_data['mode'] = 'add_admin_role'
+        await query.edit_message_text(
+            "🛡 <b>افزودن مدیر محتوای محدود</b>\n\n"
+            "آیدی عددی تلگرام کاربر را ارسال کنید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='admin:roles')
+            ]])
+        )
+
+    elif action == 'role_remove':
+        target_uid = int(parts[2])
+        await db.remove_admin_role(target_uid)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(context.bot, 'admin', actor_name, uid,
+                              "حذف نقش فرعی ادمین", f"آیدی: {target_uid}")
+        await query.answer("✅ نقش حذف شد!", show_alert=True)
+        await _show_roles(query)
+
     elif action == 'users':
         page = int(parts[2]) if len(parts) > 2 else 0
         await _show_users_list(query, page, group=context.user_data.get('filter_group'), intake=context.user_data.get('filter_intake'))
@@ -200,6 +439,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.delete_user(target_uid)
         await safe_send(context.bot, target_uid, "❌ حساب شما حذف شد.")
         await query.answer(f"🗑 {name} حذف شد!", show_alert=True)
+        # FIX جدید: لاگ عمل حساس — گروه ادمین
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "حذف کامل کاربر", f"کاربر: {name} (آیدی: {target_uid})"
+        )
         await _show_users_list(query, 0)
     elif action == 'pending':
         await _show_pending(query)
@@ -258,13 +504,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.update_user(target_uid, {'role': 'content_admin'})
         await safe_send(context.bot, target_uid, "🎓 <b>دسترسی ادمین محتوا به شما داده شد!</b>", parse_mode='HTML', reply_markup=content_admin_keyboard())
         await query.answer("✅ دسترسی داده شد!", show_alert=True)
-        await _admin_menu(query)
+        await _admin_menu(query, uid=uid)
     elif action == 'ca_remove':
         target_uid = int(parts[2])
         await db.update_user(target_uid, {'role': 'student'})
         await safe_send(context.bot, target_uid, "⚠️ دسترسی ادمین محتوای شما لغو شد.", reply_markup=main_keyboard())
         await query.answer("↩️ دسترسی لغو شد!", show_alert=True)
-        await _admin_menu(query)
+        await _admin_menu(query, uid=uid)
     elif action == 'qbank_manage':
         await query.edit_message_text("🧪 <b>مدیریت بانک سوال</b>", parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
@@ -313,10 +559,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'approve_q':
         await db.approve_question(parts[2])
         await query.answer("✅ تأیید شد!")
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        await send_audit_log(context.bot, 'admin', actor_name, uid, "تأیید سوال دانشجو")
         await _pending_questions(query)
     elif action == 'reject_q':
         await db.delete_question(parts[2])
         await query.answer("🗑 رد شد!")
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        await send_audit_log(context.bot, 'admin', actor_name, uid, "رد و حذف سوال دانشجو")
         await _pending_questions(query)
 
     # ══════════════════════════════════════════════
@@ -365,7 +617,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'bc_cancel':
         _broadcast_clear(context)
         await query.answer("✅ لغو شد.")
-        await _admin_menu(query)
+        await _admin_menu(query, uid=uid)
     elif action == 'bc_confirm':
         await _broadcast_do_send(query, context)
     elif action == 'bc_schedule':
@@ -549,6 +801,14 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
     users_list = await _get_target_users(target)
     sent, failed = await _do_broadcast_send(context.bot, users_list, msg_data)
     _broadcast_clear(context)
+    # FIX جدید: لاگ broadcast — گروه ادمین
+    actor_id   = query.from_user.id
+    actor_user = await db.get_user(actor_id)
+    actor_name = actor_user.get('name', 'مدیر') if actor_user else 'مدیر'
+    await send_audit_log(
+        context.bot, 'admin', actor_name, actor_id,
+        "ارسال همگانی", f"هدف: {target} | موفق: {sent} | ناموفق: {failed}"
+    )
     await query.edit_message_text(
         f"📢 <b>ارسال همگانی تمام شد</b>\n\n━━━━━━━━━━━━━━━━\n"
         f"✅ موفق: <b>{sent} نفر</b>\n❌ ناموفق: <b>{failed} نفر</b>\n📊 مجموع: <b>{sent+failed} نفر</b>",
@@ -935,6 +1195,151 @@ async def _show_qbank_list(query):
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def _show_settings(query):
+    """
+    FIX جدید: صفحه تنظیمات کلی ربات — شامل اجباری‌بودن شماره
+    دانشجویی، حالت تعمیر و نگهداری، و گروه‌های لاگ تلگرامی.
+    """
+    require_sid = await db.get_setting('require_student_id', False)
+    maint       = await db.get_setting('maintenance_mode', False)
+    log_admin   = await db.get_setting('log_group_admin', None)
+    log_content = await db.get_setting('log_group_content', None)
+    missing     = await db.users_missing_student_id()
+
+    sid_status   = "✅ فعال (اجباری)" if require_sid else "⬜ غیرفعال (اختیاری)"
+    sid_toggle    = "🔴 غیرفعال کردن" if require_sid else "🟢 فعال کردن"
+    maint_status = "🔧 فعال (ربات در دسترس کاربران عادی نیست)" if maint else "✅ غیرفعال (ربات عادی کار می‌کند)"
+    maint_toggle  = "🟢 خاموش کردن حالت تعمیر" if maint else "🔴 روشن کردن حالت تعمیر"
+    admin_grp_txt = f"<code>{log_admin}</code>" if log_admin else "تنظیم نشده"
+    content_grp_txt = f"<code>{log_content}</code>" if log_content else "تنظیم نشده"
+
+    text = (
+        "⚙️ <b>تنظیمات ربات</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"🎓 <b>الزامی بودن شماره دانشجویی:</b> {sid_status}\n"
+        f"👥 کاربران بدون شماره دانشجویی: <b>{len(missing)}</b> نفر\n\n"
+        f"🔧 <b>حالت تعمیر و نگهداری:</b> {maint_status}\n\n"
+        f"🛡 گروه لاگ پنل ادمین: {admin_grp_txt}\n"
+        f"🎓 گروه لاگ پنل محتوا: {content_grp_txt}\n"
+    )
+    keyboard = [
+        [InlineKeyboardButton(sid_toggle, callback_data='admin:toggle_require_sid')],
+        [InlineKeyboardButton(maint_toggle, callback_data='admin:toggle_maintenance')],
+        [InlineKeyboardButton("✏️ متن حالت تعمیر", callback_data='admin:set_maintenance_text')],
+        [InlineKeyboardButton("🛡 تنظیم گروه لاگ ادمین", callback_data='admin:set_log_group_admin')],
+        [InlineKeyboardButton("🎓 تنظیم گروه لاگ محتوا", callback_data='admin:set_log_group_content')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_audit_log(query, category: str):
+    """نمایش آخرین ۲۰ لاگ فعالیت حساس داخل خود ربات (علاوه بر ارسال به گروه)"""
+    logs = await db.get_recent_logs(category, limit=20)
+    if not logs:
+        text = "📋 <b>لاگ فعالیت</b>\n\nهنوز هیچ فعالیتی ثبت نشده."
+    else:
+        lines = ["📋 <b>۲۰ فعالیت اخیر</b>\n━━━━━━━━━━━━━━━━"]
+        for log in logs:
+            at = log.get('at', '')[:16].replace('T', ' ')
+            lines.append(f"\n🕐 {at}\n👤 {log.get('actor_name','')} — {log.get('action','')}")
+            if log.get('details'):
+                lines.append(f"   📝 {log['details']}")
+        text = '\n'.join(lines)
+    await query.edit_message_text(
+        text[:4000], parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+    )
+
+
+async def _export_excel(query, context):
+    """
+    FIX جدید: خروجی کامل دیتابیس (کاربران، تیکت‌ها، آمار سوالات)
+    به‌صورت یک فایل اکسل با چند شیت، آماده دانلود.
+    """
+    await query.edit_message_text("⏳ <b>در حال ساخت فایل اکسل...</b>", parse_mode='HTML')
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill
+        import io
+
+        wb = openpyxl.Workbook()
+        header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+
+        # ── شیت کاربران ──
+        ws = wb.active
+        ws.title = 'کاربران'
+        headers = ['آیدی', 'نام', 'شماره دانشجویی', 'گروه', 'ورودی', 'یوزرنیم', 'وضعیت', 'تاریخ ثبت‌نام', 'تعداد پاسخ', 'پاسخ صحیح']
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        users = await db.all_users(approved_only=False)
+        for u in users:
+            ws.append([
+                u.get('user_id', ''), u.get('name', ''), u.get('student_id', '') or '—',
+                u.get('group', ''), u.get('intake', '') or '—', u.get('username', '') or '—',
+                'تأییدشده' if u.get('approved') else 'در انتظار',
+                u.get('registered_at', '')[:10],
+                u.get('total_answers', 0), u.get('correct_answers', 0),
+            ])
+
+        # ── شیت تیکت‌ها ──
+        ws2 = wb.create_sheet('تیکت‌ها')
+        headers2 = ['شماره تیکت', 'کاربر', 'موضوع', 'وضعیت', 'تاریخ ثبت']
+        ws2.append(headers2)
+        for cell in ws2[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        tickets = await db.tickets.find({}).sort('created_at', -1).to_list(2000)
+        for t in tickets:
+            ws2.append([
+                t.get('ticket_id', ''), t.get('user_name', ''), t.get('subject', ''),
+                'باز' if t.get('status') == 'open' else 'بسته',
+                t.get('created_at', '')[:10],
+            ])
+
+        # ── شیت آمار سوالات ──
+        ws3 = wb.create_sheet('بانک سوال')
+        headers3 = ['درس', 'مبحث', 'سختی', 'تعداد پاسخ', 'پاسخ صحیح', 'وضعیت تأیید']
+        ws3.append(headers3)
+        for cell in ws3[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        questions = await db.questions.find({}).to_list(5000)
+        for q in questions:
+            ws3.append([
+                q.get('lesson', ''), q.get('topic', ''), q.get('difficulty', ''),
+                q.get('attempt_count', 0), q.get('correct_count', 0),
+                'تأییدشده' if q.get('approved') else 'در انتظار',
+            ])
+
+        for sheet in wb.worksheets:
+            for col in sheet.columns:
+                max_len = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+                sheet.column_dimensions[col[0].column_letter].width = min(max_len + 3, 35)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        fname = f"humsyar_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        await query.message.reply_document(
+            document=buf, filename=fname,
+            caption=f"📥 <b>خروجی کامل دیتابیس</b>\n👥 {len(users)} کاربر | 🎫 {len(tickets)} تیکت | 🧪 {len(questions)} سوال",
+            parse_mode='HTML'
+        )
+        await query.edit_message_text(
+            "✅ فایل اکسل ارسال شد!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+        )
+    except Exception as e:
+        logger.error(f"_export_excel error: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در ساخت فایل: {e}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+        )
+
+
 async def _show_intakes(query):
     intakes = await db.get_all_intakes()
     keyboard = []
@@ -955,12 +1360,175 @@ async def _show_intakes(query):
 
 
 # ══════════════════════════════════════════════════
+# 🛡 سطوح دسترسی چندگانه ادمین — UI
+# ══════════════════════════════════════════════════
+
+async def _show_roles(query):
+    """لیست نقش‌های فرعی فعلی + دکمه افزودن"""
+    roles = await db.get_all_admin_roles()
+    keyboard = []
+    if not roles:
+        text = (
+            "🛡 <b>سطوح دسترسی ادمین</b>\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "هنوز هیچ نقش فرعی تعریف نشده.\n\n"
+            "💡 شما (مدیر ارشد) همیشه دسترسی کامل دارید.\n"
+            "می‌توانید برای دیگران نقش محدودتر بسازید:\n"
+            "• 🎫 پشتیبان — فقط پاسخ به تیکت\n"
+            "• 🎓 مدیر محتوا — کلی یا محدود به یک ورودی\n"
+            "• 📢 مسئول اطلاعیه — فقط ارسال همگانی"
+        )
+    else:
+        text = "🛡 <b>سطوح دسترسی ادمین</b>\n\n━━━━━━━━━━━━━━━━\n"
+        for r in roles:
+            target_uid = r['_id']
+            u = await db.get_user(target_uid)
+            name = u.get('name', '') if u else f"آیدی {target_uid}"
+            role_label = db.ROLE_LABELS.get(r.get('role', ''), r.get('role', ''))
+            scope = r.get('scope_intake')
+            scope_txt = f" ({scope})" if scope else ""
+            text += f"\n👤 <b>{name}</b>\n   {role_label}{scope_txt}\n"
+            keyboard.append([InlineKeyboardButton(
+                f"🗑 حذف نقش {name}", callback_data=f'admin:role_remove:{target_uid}'
+            )])
+    keyboard.append([InlineKeyboardButton("➕ افزودن نقش جدید", callback_data='admin:role_add_pick')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_role_type_picker(query):
+    """انتخاب نوع نقش قبل از گرفتن آیدی کاربر"""
+    keyboard = [
+        [InlineKeyboardButton("🎫 پشتیبان (فقط تیکت)", callback_data='admin:role_type:support')],
+        [InlineKeyboardButton("🎓 مدیر محتوا (کلی)",   callback_data='admin:role_type:content_admin')],
+        [InlineKeyboardButton("📅 مدیر محتوا (محدود به ورودی)", callback_data='admin:role_type:content_scoped')],
+        [InlineKeyboardButton("📢 مسئول اطلاعیه",        callback_data='admin:role_type:broadcaster')],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:roles')],
+    ]
+    await query.edit_message_text(
+        "🛡 <b>افزودن نقش جدید</b>\n\nنوع نقش را انتخاب کنید:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _show_role_intake_picker(query):
+    """برای content_scoped — انتخاب ورودی که این مدیر فقط به آن دسترسی دارد"""
+    intakes = await db.get_all_intakes()
+    if not intakes:
+        await query.answer("❌ هنوز هیچ ورودی‌ای تعریف نشده! اول از «مدیریت ورودی‌ها» اضافه کنید.", show_alert=True)
+        return
+    keyboard = [[InlineKeyboardButton(i['label'], callback_data=f'admin:role_intake:{i["code"]}')] for i in intakes]
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:role_add_pick')])
+    await query.edit_message_text(
+        "📅 <b>مدیر محتوای محدود</b>\n\nاین مدیر فقط به محتوای کدام ورودی دسترسی داشته باشد؟",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ══════════════════════════════════════════════════
 # هندلرهای متن
 # ══════════════════════════════════════════════════
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     mode = context.user_data.get('mode', '')
     text = update.message.text.strip()
+
+    # FIX جدید: متن دلخواه حالت تعمیر و نگهداری
+    if mode == 'set_maintenance_text':
+        context.user_data['mode'] = ''
+        if text in ('پیشفرض', 'پیش‌فرض', '-'):
+            await db.set_setting('maintenance_text', '')
+            msg = "✅ متن حالت تعمیر به پیش‌فرض بازگشت."
+        else:
+            await db.set_setting('maintenance_text', text)
+            msg = "✅ متن حالت تعمیر ذخیره شد."
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ بازگشت به تنظیمات", callback_data='admin:settings')
+        ]]))
+        return True
+
+    # FIX جدید: تنظیم گروه لاگ — هم آیدی عددی، هم پیام فوروارد‌شده
+    if mode in ('set_log_group_admin', 'set_log_group_content'):
+        key = 'log_group_admin' if mode == 'set_log_group_admin' else 'log_group_content'
+        context.user_data['mode'] = ''
+        if text in ('حذف', '-'):
+            await db.set_setting(key, None)
+            await update.message.reply_text(
+                "✅ تنظیم گروه حذف شد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ بازگشت به تنظیمات", callback_data='admin:settings')]])
+            )
+            return True
+        chat_id = None
+        # حالت ۱: پیام فوروارد‌شده از طرف خودِ گروه (پیام anonymous گروه)
+        fwd = update.message.forward_origin
+        if fwd is not None and hasattr(fwd, 'sender_chat') and fwd.sender_chat is not None:
+            chat_id = fwd.sender_chat.id
+        # حالت ۲ (قابل‌اعتمادترین روش): آیدی عددی منفی مستقیم گروه
+        # — با فوروارد یک پیام به @RawDataBot یا @userinfobot پیدا می‌شود
+        elif text.lstrip('-').isdigit():
+            chat_id = int(text)
+        if not chat_id:
+            await update.message.reply_text(
+                "⚠️ آیدی عددی گروه (با علامت منفی، مثلاً <code>-1001234567890</code>) را بفرستید.\n\n"
+                "💡 برای پیدا کردن آیدی گروه: یک پیام از آن گروه را به @RawDataBot فوروارد کنید "
+                "و مقدار <code>chat.id</code> را از پاسخ آن کپی کنید.",
+                parse_mode='HTML'
+            )
+            return True
+        await db.set_setting(key, chat_id)
+        try:
+            await context.bot.send_message(chat_id, "✅ این گروه به‌عنوان گروه لاگ ربات تنظیم شد.")
+        except Exception:
+            await update.message.reply_text(
+                "⚠️ گروه ذخیره شد، اما ربات نتوانست پیام تستی بفرستد — مطمئن شوید ربات عضو آن گروه است."
+            )
+        await update.message.reply_text(
+            f"✅ آیدی گروه <code>{chat_id}</code> ذخیره شد.", parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ بازگشت به تنظیمات", callback_data='admin:settings')]])
+        )
+        return True
+
+    # FIX جدید: گام نهایی افزودن نقش فرعی ادمین — گرفتن آیدی عددی
+    if mode == 'add_admin_role':
+        if not text.isdigit():
+            await update.message.reply_text(
+                "⚠️ آیدی باید فقط عدد باشد. دوباره وارد کنید یا /cancel بزنید."
+            )
+            return True
+        target_uid   = int(text)
+        role_type    = context.user_data.pop('new_role_type', '')
+        scope_intake = context.user_data.pop('new_role_intake', None)
+        context.user_data['mode'] = ''
+        admin_uid = update.effective_user.id
+        ok = await db.add_admin_role(target_uid, role_type, admin_uid, scope_intake)
+        if not ok:
+            await update.message.reply_text("❌ نوع نقش نامعتبر است.")
+            return True
+        role_label = db.ROLE_LABELS.get(role_type, role_type)
+        scope_txt  = f" — محدود به ورودی {scope_intake}" if scope_intake else ""
+        admin_user = await db.get_user(admin_uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, admin_uid,
+            "افزودن نقش فرعی ادمین", f"آیدی: {target_uid} | نقش: {role_label}{scope_txt}"
+        )
+        try:
+            await context.bot.send_message(
+                target_uid,
+                f"🛡 <b>دسترسی جدید به شما داده شد!</b>\n\nنقش: {role_label}{scope_txt}\n\n"
+                "از دکمه «👨‍⚕️ پنل ادمین» در منوی اصلی استفاده کنید.",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"✅ نقش <b>{role_label}</b>{scope_txt} برای آیدی <code>{target_uid}</code> ثبت شد.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🛡 بازگشت به سطوح دسترسی", callback_data='admin:roles')
+            ]])
+        )
+        return True
 
     if mode == 'search_user':
         users = await db.search_users(text)
