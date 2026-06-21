@@ -66,7 +66,7 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     # ════ منوی اصلی ════
     if action == 'main':
-        await _show_main(query)
+        await _show_main(query, uid)
 
     # ══════════ علوم پایه ══════════
 
@@ -448,7 +448,19 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 #  توابع نمایش
 # ══════════════════════════════════════════════════════════
 
-async def _show_main(query):
+async def _show_main(query, uid: int = None):
+    """
+    FIX جدید: اگر کاربر مدیر محتوای محدود (content_scoped) باشد،
+    یک بنر اطلاعاتی بالای منو نشان می‌دهد که فقط به ورودی خاصی
+    دسترسی دارد — تا سردرگم نشود چرا محتوای ورودی‌های دیگر را نمی‌بیند.
+    """
+    scope_banner = ""
+    if uid is not None:
+        scope_intake = await db.get_scoped_intake(uid)
+        if scope_intake:
+            intakes = await db.get_all_intakes()
+            label = next((i['label'] for i in intakes if i['code'] == scope_intake), scope_intake)
+            scope_banner = f"📅 <b>محدود به ورودی: {label}</b>\n━━━━━━━━━━━━━━━━\n\n"
     keyboard = [
         [InlineKeyboardButton("📊 آمار محتوا",          callback_data='ca:overview')],
         [
@@ -460,9 +472,9 @@ async def _show_main(query):
         [InlineKeyboardButton("❓ سوالات متداول",          callback_data='ca:faq')],
         [InlineKeyboardButton("🔙 بازگشت",               callback_data='dashboard:refresh')],
     ]
+    header = f"🎓 <b>پنل ادمین محتوا</b>\n\n{scope_banner}" if scope_banner else "🎓 <b>پنل ادمین محتوا</b>\n━━━━━━━━━━━━━━━━"
     await query.edit_message_text(
-        "🎓 <b>پنل ادمین محتوا</b>\n━━━━━━━━━━━━━━━━",
-        parse_mode='HTML',
+        header, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -830,6 +842,13 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await db.bs_add_lesson(term, name, teacher)
         _clear(context)
         msg = f"✅ درس «{name}» اضافه شد!" if result else "⚠️ این درس قبلاً وجود دارد."
+        if result:
+            # FIX جدید: لاگ افزودن درس — گروه ادمین محتوا
+            from utils import send_audit_log
+            actor = await db.get_user(uid)
+            actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            await send_audit_log(context.bot, 'content', actor_name, uid,
+                                  "افزودن درس جدید", f"درس: {name} | ترم: {term}")
         await update.message.reply_text(msg, reply_markup=_back_btn("🔙 برگشت", f'ca:term:{idx}'))
 
     elif ca_mode == 'edit_lesson':
@@ -853,6 +872,12 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = ps[1]; teacher = ps[2] if len(ps) > 2 else ''
         await db.bs_add_session(lid, number, topic, teacher)
         _clear(context)
+        # FIX جدید: لاگ افزودن جلسه — گروه ادمین محتوا
+        from utils import send_audit_log
+        actor = await db.get_user(uid)
+        actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+        await send_audit_log(context.bot, 'content', actor_name, uid,
+                              "افزودن جلسه جدید", f"جلسه {number} — {topic}")
         await update.message.reply_text(f"✅ جلسه {number} — «{topic}» اضافه شد!",
             reply_markup=_back_btn("🔙 برگشت", f'ca:lesson:{lid}'))
 
