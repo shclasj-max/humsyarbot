@@ -192,23 +192,27 @@ async def _download_content(query, content_id: str, uid: int):
     parts.append(f"📥 {item.get('downloads', 0)} دانلود")
     caption = '\n'.join(parts)
 
+    # FIX جدید: دکمه گزارش ایراد جزوه زیر فایل ارسالی
+    report_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚠️ گزارش ایراد جزوه", callback_data=f'report:resource:{content_id}')
+    ]])
     try:
         if ctype == 'video':
             await query.message.reply_video(
-                item['file_id'], caption=caption, parse_mode='HTML'
+                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
             )
         elif ctype == 'voice':
             await query.message.reply_voice(
-                item['file_id'], caption=caption, parse_mode='HTML'
+                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
             )
         else:
             await query.message.reply_document(
-                item['file_id'], caption=caption, parse_mode='HTML'
+                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
             )
     except Exception:
         try:
             await query.message.reply_document(
-                item['file_id'], caption=caption, parse_mode='HTML'
+                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
             )
         except Exception:
             await query.answer("❌ خطا در ارسال فایل!", show_alert=True)
