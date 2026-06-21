@@ -21,14 +21,15 @@ from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ConversationHandler,
-    filters, ContextTypes, Application
+    filters, ContextTypes, Application, TypeHandler,
+    ApplicationHandlerStop
 )
 
 # ── ایمپورت ماژول‌ها ──
 from start import (
     start_handler, register_start_callback, step_name_handler,
-    register_intake_callback,
-    REGISTER, STEP_NAME, STEP_GROUP, STEP_INTAKE
+    register_intake_callback, step_student_id_handler,
+    REGISTER, STEP_NAME, STEP_GROUP, STEP_INTAKE, STEP_STUDENT_ID
 )
 from dashboard import dashboard_callback
 from questions import (
@@ -44,7 +45,7 @@ from admin import (
     handle_admin_text, BROADCAST
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
-from utils import cancel_handler, ADMIN_ID
+from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log
 from profile import profile_callback, profile_text_handler, PROFILE_EDIT_WAITING
 from message_router import route_message
 from basic_science import basic_science_callback
@@ -142,6 +143,43 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"daily_question_job error: {e}")
 
 
+async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: گزارش هفتگی خودکار — هر یکشنبه برای ادمین ارشد
+    (و در صورت ست بودن، گروه لاگ ادمین) ارسال می‌شود.
+    """
+    logger.info("📊 اجرای job گزارش هفتگی...")
+    try:
+        s = await db.weekly_report_stats()
+        text = (
+            "📊 <b>گزارش هفتگی ربات</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"👥 کاربران جدید این هفته: <b>{s['new_users']}</b>\n"
+            f"👤 کل کاربران تأییدشده: <b>{s['total_users']}</b>\n"
+            f"🟢 کاربران فعال این هفته: <b>{s['active_users_count']}</b>\n"
+            f"😴 کاربران غیرفعال (۱۴+ روز): <b>{s['inactive_count']}</b>\n\n"
+            f"📚 پرطرفدارترین درس هفته: <b>{s['top_lesson']}</b>\n\n"
+            f"🎫 تیکت باز فعلی: <b>{s['open_tickets']}</b>\n"
+            f"✅ تیکت بسته‌شده این هفته: <b>{s['closed_week']}</b>\n"
+            f"📨 کل تیکت‌های این هفته: <b>{s['total_tickets_week']}</b>\n\n"
+            "<i>گزارش بعدی: یکشنبه آینده 🗓</i>"
+        )
+        # همیشه برای ادمین ارشد
+        try:
+            await context.bot.send_message(ADMIN_ID, text, parse_mode='HTML')
+        except Exception:
+            pass
+        # اگه گروه لاگ ادمین ست شده، آنجا هم بفرست
+        chat_id = await db.get_setting('log_group_admin', None)
+        if chat_id:
+            try:
+                await context.bot.send_message(int(chat_id), text, parse_mode='HTML')
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"weekly_report_job error: {e}")
+
+
 # ══════════════════════════════════════════════════
 #  Error Handler مرکزی
 # ══════════════════════════════════════════════════
@@ -188,6 +226,51 @@ async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return await ca_file_handler(update, context)
 
 
+async def maintenance_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: حالت تعمیر و نگهداری — اجرا می‌شود با group=-1 یعنی
+    قبل از همه‌ی handlerهای دیگر (پیام و callback). اگر maintenance
+    فعال باشد و کاربر ادمین ارشد نباشد، پیام تعمیر نشان داده می‌شود
+    و با ApplicationHandlerStop از اجرای ادامه‌ی handlerها جلوگیری
+    می‌شود — بدون نیاز به لمس کردن ده‌ها تابع callback موجود.
+    """
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None or uid == ADMIN_ID:
+        return  # ادمین ارشد همیشه دسترسی کامل دارد
+
+    if not await is_maintenance_on():
+        return
+
+    msg = await maintenance_message()
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("🔧 ربات در حال بروزرسانی است", show_alert=True)
+        elif update.message:
+            await update.message.reply_text(msg, parse_mode='HTML')
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
+
+
+async def update_last_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: برای گزارش هفتگی نیاز داریم بدانیم آخرین فعالیت هر
+    کاربر کِی بوده. با group=-1 (قبل از همه چیز) فقط یک فیلد آپدیت
+    می‌شود — سبک و بدون اثر جانبی روی منطق دیگر.
+    """
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None:
+        return
+    try:
+        from database import db
+        await db.users.update_one(
+            {'user_id': uid},
+            {'$set': {'last_active': datetime.now().isoformat()}}
+        )
+    except Exception:
+        pass
+
+
 async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
@@ -212,9 +295,24 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') == 'add_intake':
         return await handle_admin_text(update, context)
 
+    # ۴b. FIX جدید: add_admin_role — افزودن نقش فرعی (فقط مدیر ارشد)
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'add_admin_role':
+        return await handle_admin_text(update, context)
+
+    # ۴c. FIX جدید: تنظیمات ربات — متن تعمیر و گروه‌های لاگ (فقط مدیر ارشد)
+    if uid == ADMIN_ID and context.user_data.get('mode') in (
+        'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content'
+    ):
+        return await handle_admin_text(update, context)
+
     # ۵. FIX: qbank_awaiting_desc
     if uid == ADMIN_ID and context.user_data.get('mode') == 'qbank_awaiting_desc':
         return await handle_admin_text(update, context)
+
+    # ۵b. FIX: add_schedule — افزودن برنامه کلاسی/امتحان (باگ: قبلاً هیچ‌جا چک نمی‌شد)
+    if context.user_data.get('mode') == 'add_schedule':
+        from schedule import handle_add_schedule_text
+        return await handle_add_schedule_text(update, context)
 
     # ۶. ca_text_handler
     ca_mode = context.user_data.get('ca_mode', '')
@@ -306,6 +404,9 @@ def build_application() -> Application:
             STEP_INTAKE: [
                 CallbackQueryHandler(register_intake_callback, pattern=r'^register:intake:')
             ],
+            STEP_STUDENT_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, step_student_id_handler),
+            ],
             ANSWERING: [
                 CallbackQueryHandler(handle_question_answer, pattern=r'^answer:')
             ],
@@ -351,6 +452,10 @@ def build_application() -> Application:
         per_message=False,
         conversation_timeout=1800,
     )
+    # ── FIX جدید: maintenance gate + last_active — قبل از همه چیز (group=-1) ──
+    app.add_handler(TypeHandler(Update, maintenance_gate), group=-1)
+    app.add_handler(TypeHandler(Update, update_last_active), group=-1)
+
     app.add_handler(conv)
 
     # ── Callback handlers — ترتیب مهم: specific قبل از general ──
@@ -413,21 +518,35 @@ async def post_init(application: Application):
     await db.ensure_indexes()
     logger.info("✅ ایندکس‌های دیتابیس آماده شدند")
 
-    # یادآوری امتحان — ۰۸:۰۰ تهران (04:30 UTC)
-    application.job_queue.run_daily(
-        exam_reminder_job,
-        time=dtime(hour=4, minute=30, tzinfo=timezone.utc),
-        name='exam_reminder'
-    )
+    # FIX: گارد ایمن — اگر JobQueue نصب نباشد، ربات کرش نکند
+    if application.job_queue is not None:
+        # یادآوری امتحان — ۰۸:۰۰ تهران (04:30 UTC)
+        application.job_queue.run_daily(
+            exam_reminder_job,
+            time=dtime(hour=4, minute=30, tzinfo=timezone.utc),
+            name='exam_reminder'
+        )
 
-    # سوال روزانه — ۰۹:۰۰ تهران (05:30 UTC)
-    application.job_queue.run_daily(
-        daily_question_job,
-        time=dtime(hour=5, minute=30, tzinfo=timezone.utc),
-        name='daily_question'
-    )
+        # سوال روزانه — ۰۹:۰۰ تهران (05:30 UTC)
+        application.job_queue.run_daily(
+            daily_question_job,
+            time=dtime(hour=5, minute=30, tzinfo=timezone.utc),
+            name='daily_question'
+        )
 
-    logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
+        # FIX جدید: گزارش هفتگی — یکشنبه‌ها ۰۹:۳۰ تهران (06:00 UTC)
+        # نکته: در PTB days=(0,) یعنی یکشنبه (0=sunday...6=saturday)
+        application.job_queue.run_daily(
+            weekly_report_job,
+            time=dtime(hour=6, minute=0, tzinfo=timezone.utc),
+            days=(0,),
+            name='weekly_report'
+        )
+
+        logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
+    else:
+        logger.warning("⚠️ JobQueue فعال نیست — یادآوری‌ها و گزارش هفتگی غیرفعال هستند")
+        logger.warning('   نصب با: pip install "python-telegram-bot[job-queue]"')
 
 
 def main():
