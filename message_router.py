@@ -147,11 +147,17 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
             await update.message.reply_text("❌ دسترسی ندارید.")
 
     elif text == "👨‍⚕️ پنل ادمین":
+        # FIX جدید: ادمین ارشد یا هر کاربر با نقش فرعی (support/broadcaster/...)
         if uid == ADMIN_ID:
             from admin import show_admin_main
-            await show_admin_main(update.message)
+            await show_admin_main(update.message, uid)
         else:
-            await update.message.reply_text("❌ دسترسی ندارید.")
+            role_doc = await db.get_admin_role(uid)
+            if role_doc:
+                from admin import show_admin_main
+                await show_admin_main(update.message, uid)
+            else:
+                await update.message.reply_text("❌ دسترسی ندارید.")
 
     elif text == "🔍 جستجو":
         context.user_data['awaiting_search'] = True
