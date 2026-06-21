@@ -10,7 +10,7 @@ import os
 import sys
 import logging
 import asyncio
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -60,6 +60,7 @@ from ticket import (
     ticket_callback, ticket_message_handler,
     TICKET_WAITING, TICKET_REPLY_WAITING
 )
+from reports import report_callback, handle_report_note_text   # FIX جدید
 from database import db
 
 logging.basicConfig(
@@ -82,7 +83,13 @@ if not TOKEN:
 # ══════════════════════════════════════════════════
 
 async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: لاگ کامل وضعیت ارسال در notif_runs برای پایش و retry.
+    ضد-تکرار از قبل با mark_exam_notified/notified_days درست بود — حفظ شد.
+    """
     logger.info("🔔 اجرای job یادآوری امتحان...")
+    run_id = await db.notif_run_start('exam_reminder')
+    total_sent, total_failed, total_targets = 0, 0, 0
     day_labels = {1: "⚠️ فردا امتحان دارید!", 3: "📅 ۳ روز دیگر", 7: "📅 ۷ روز دیگر"}
     try:
         for days, label in day_labels.items():
@@ -95,31 +102,46 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                     f"⏰ {label}\n"
                     f"📅 تاریخ: {exam.get('date', '')}  ساعت {exam.get('time', '')}\n"
                     f"📍 مکان: {exam.get('location', '')}\n"
-                    f"👨‍🏫 استاد: {exam.get('teacher', '')}"
+                    f"👨‍🏫 استاد: {exam.get('teacher', '')}\n\n"
+                    f"<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← یادآوری امتحان</i>"
                 )
                 users = await db.notif_users('exam')
                 sent  = 0
+                total_targets += len(users)
                 for u in users:
                     try:
                         await context.bot.send_message(u['user_id'], msg, parse_mode='HTML')
                         sent += 1
                         await asyncio.sleep(0.05)
                     except Exception:
-                        pass
+                        total_failed += 1
+                total_sent += sent
                 if sent:
                     await db.mark_exam_notified(sid, days)
                     logger.info(f"امتحان {exam.get('lesson')} — {sent} نفر مطلع شدند")
+        await db.notif_run_finish(run_id, total_sent, total_failed, total_targets)
     except Exception as e:
         logger.error(f"exam_reminder_job error: {e}")
+        await db.notif_run_finish(run_id, total_sent, total_failed, total_targets,
+                                   status='error', error=str(e))
 
 
 async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job: سوال روزانه — هر روز ۰۹:۰۰ تهران"""
+    """
+    Job: سوال روزانه — هر روز ۰۹:۰۰ تهران.
+    FIX باگ قبلی: همیشه یک سوال ثابت می‌فرستاد. حالا با چرخش
+    (get_daily_rotation_question) واقعاً هر روز سوال عوض می‌شود.
+    FIX جدید: وضعیت ارسال در notif_runs ثبت می‌شود تا قابل پایش
+    و retry باشد.
+    """
+    run_id = await db.notif_run_start('daily_question')
+    sent, failed = 0, 0
+    failed_ids = []
     try:
-        questions = await db.get_questions(limit=1)
-        if not questions:
+        q = await db.get_daily_rotation_question()
+        if not q:
+            await db.notif_run_finish(run_id, 0, 0, 0, status='skipped', error='no questions')
             return
-        q       = questions[0]
         opts    = q.get('options', [])
         letters = ['🅐', '🅑', '🅒', '🅓']
         opts_text = '\n'.join(
@@ -130,17 +152,128 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
             f"📚 {q.get('lesson', '')} — {q.get('topic', '')}\n\n"
             f"❓ {q.get('question', '')}\n\n"
             f"{opts_text}\n\n"
-            f"<i>برای تمرین بیشتر از بانک سوال استفاده کنید 👇</i>"
+            f"<i>برای تمرین بیشتر از بانک سوال استفاده کنید 👇</i>\n"
+            f"<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← سوال روزانه</i>"
         )
         users = await db.notif_users('daily_question')
         for u in users:
             try:
                 await context.bot.send_message(u['user_id'], text, parse_mode='HTML')
+                sent += 1
                 await asyncio.sleep(0.05)
             except Exception:
-                pass
+                failed += 1
+                failed_ids.append(u['user_id'])
+        await db.notif_run_finish(run_id, sent, failed, len(users))
+        if failed_ids:
+            await db.notif_run_add_failed(run_id, failed_ids)
     except Exception as e:
         logger.error(f"daily_question_job error: {e}")
+        await db.notif_run_finish(run_id, sent, failed, sent + failed, status='error', error=str(e))
+
+
+async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: نوتیف دسته‌ای منابع جدید — این job هر ساعت اجرا می‌شود
+    اما فقط وقتی واقعاً کار می‌کند که از آخرین ارسال، فاصله‌ی تعیین‌شده
+    در تنظیمات (پیش‌فرض ۲۴ ساعت، قابل تغییر به ۴۸/۷۲ از پنل ادمین)
+    گذشته باشد. این از ارسال تکراری/ناقص جلوگیری می‌کند.
+    """
+    try:
+        interval_hours = await db.get_setting('resource_notif_interval_hours', 24)
+        last_sent_str  = await db.get_setting('resource_notif_last_sent', None)
+
+        if last_sent_str:
+            last_sent = datetime.fromisoformat(last_sent_str)
+            elapsed_hours = (datetime.now() - last_sent).total_seconds() / 3600
+            if elapsed_hours < interval_hours:
+                return  # هنوز وقتش نشده
+
+        new_items = await db.get_unnotified_resources()
+        if not new_items:
+            # حتی اگه چیزی نبود، last_sent را آپدیت نمی‌کنیم — منتظر محتوای واقعی می‌مانیم
+            return
+
+        run_id = await db.notif_run_start('new_resources')
+
+        # ساخت خلاصه — حداکثر ۱۰ مورد در پیام، باقی به‌صورت تجمیعی
+        lines = []
+        for item in new_items[:10]:
+            desc = item.get('description', '') or dict(
+                pdf='جزوه', video='ویدیو', test='نمونه سوال', audio='فایل صوتی'
+            ).get(item.get('type', ''), 'فایل')
+            lines.append(f"• {desc}")
+        extra = len(new_items) - 10
+        extra_line = f"\n...و {extra} مورد دیگر" if extra > 0 else ""
+
+        text = (
+            "📚 <b>منابع جدیدی به سامانه اضافه شده‌اند</b>\n\n"
+            + '\n'.join(lines) + extra_line +
+            "\n\nبرای مشاهده وارد بخش «📚 منابع» شوید.\n\n"
+            "<i>⚙️ اگر تمایل به دریافت این اعلان ندارید:\n"
+            "🔔 اعلان‌ها ← منابع جدید ← خاموش</i>"
+        )
+
+        users = await db.notif_users('new_resources')
+        sent, failed, failed_ids = 0, 0, []
+        for u in users:
+            try:
+                await context.bot.send_message(u['user_id'], text, parse_mode='HTML')
+                sent += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                failed += 1
+                failed_ids.append(u['user_id'])
+
+        await db.mark_resources_notified([item['_id'] for item in new_items])
+        await db.set_setting('resource_notif_last_sent', datetime.now().isoformat())
+        await db.notif_run_finish(run_id, sent, failed, len(users))
+        if failed_ids:
+            await db.notif_run_add_failed(run_id, failed_ids)
+        logger.info(f"📚 نوتیف منابع جدید: {len(new_items)} مورد به {sent} نفر ارسال شد")
+    except Exception as e:
+        logger.error(f"new_resources_notif_job error: {e}")
+
+
+async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: بکاپ خودکار روزانه. این job هر ساعت اجرا می‌شود و
+    خودش تشخیص می‌دهد آیا الان همان ساعتی است که ادمین تنظیم کرده
+    (auto_backup_hour، به‌وقت تهران UTC+3:30) — تا بتوان از پنل
+    ادمین ساعت را آزادانه تغییر داد بدون نیاز به ری‌استارت ربات.
+    """
+    try:
+        enabled = await db.get_setting('auto_backup_enabled', False)
+        if not enabled:
+            return
+
+        target_hour = await db.get_setting('auto_backup_hour', 3)
+        now_tehran  = datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)
+        if now_tehran.hour != target_hour:
+            return
+
+        # جلوگیری از اجرای تکراری در همان ساعت (چون job هر ساعت چک می‌شود)
+        last_run = await db.get_setting('auto_backup_last_run', None)
+        if last_run:
+            last_dt = datetime.fromisoformat(last_run)
+            if (datetime.now() - last_dt).total_seconds() < 3600 * 20:
+                return  # کمتر از ۲۰ ساعت از آخرین بکاپ گذشته — رد کن
+
+        from backup import build_full_backup_data, send_backup_to_bot_chat
+        data = await build_full_backup_data()
+        await send_backup_to_bot_chat(context.bot, ADMIN_ID, data, filename='backup_auto')
+        await db.set_setting('auto_backup_last_run', datetime.now().isoformat())
+        logger.info("💾 بکاپ خودکار با موفقیت ارسال شد")
+    except Exception as e:
+        logger.error(f"auto_backup_job error: {e}")
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"⚠️ <b>خطا در بکاپ خودکار</b>\n<code>{str(e)[:300]}</code>",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
 
 
 async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -313,6 +446,20 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get('mode') == 'add_schedule':
         from schedule import handle_add_schedule_text
         return await handle_add_schedule_text(update, context)
+
+    # ۵c. FIX جدید: flex_time_change — اعلام تغییر زمان کلاس منعطف
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'flex_time_change':
+        from schedule import handle_flex_time_change_text
+        return await handle_flex_time_change_text(update, context)
+
+    # ۵d. FIX جدید: ساعت دلخواه بکاپ خودکار
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'set_auto_backup_hour':
+        from backup import handle_auto_backup_hour_text
+        return await handle_auto_backup_hour_text(update, context)
+
+    # ۵e. FIX جدید: توضیح گزارش ایراد (دلیل 'سایر')
+    if context.user_data.get('mode') == 'report_note':
+        return await handle_report_note_text(update, context)
 
     # ۶. ca_text_handler
     ca_mode = context.user_data.get('ca_mode', '')
@@ -487,6 +634,7 @@ def build_application() -> Application:
         (faq_callback,             r'^faq:'),
         (content_admin_callback,   r'^ca:'),
         (ticket_callback,          r'^ticket:'),
+        (report_callback,          r'^report:'),   # FIX جدید
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
@@ -541,6 +689,24 @@ async def post_init(application: Application):
             time=dtime(hour=6, minute=0, tzinfo=timezone.utc),
             days=(0,),
             name='weekly_report'
+        )
+
+        # FIX جدید: نوتیف منابع جدید — هر ساعت چک می‌شود، خودش تشخیص
+        # می‌دهد آیا فاصله‌ی تنظیم‌شده (۲۴/۴۸/۷۲ ساعت) گذشته یا نه
+        application.job_queue.run_repeating(
+            new_resources_notif_job,
+            interval=3600,
+            first=120,
+            name='new_resources_notif'
+        )
+
+        # FIX جدید: بکاپ خودکار — هر ساعت چک می‌شود، فقط در ساعت
+        # تنظیم‌شده (از پنل ادمین) واقعاً بکاپ می‌گیرد
+        application.job_queue.run_repeating(
+            auto_backup_job,
+            interval=3600,
+            first=180,
+            name='auto_backup'
         )
 
         logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
