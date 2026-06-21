@@ -74,9 +74,80 @@ async def backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]))
         context.user_data['backup_mode'] = 'waiting_restore'
 
+    # ══════════════════════════════════════════════
+    # FIX جدید: بکاپ خودکار زمان‌بندی‌شده
+    # ══════════════════════════════════════════════
+    elif action == 'auto_settings':
+        await _show_auto_settings(query)
+
+    elif action == 'auto_toggle':
+        current = await db.get_setting('auto_backup_enabled', False)
+        await db.set_setting('auto_backup_enabled', not current)
+        await query.answer("✅ بکاپ خودکار فعال شد" if not current else "❌ بکاپ خودکار غیرفعال شد", show_alert=True)
+        await _show_auto_settings(query)
+
+    elif action == 'auto_hour':
+        hour = int(parts[2])
+        await db.set_setting('auto_backup_hour', hour)
+        await query.answer(f"✅ ساعت بکاپ خودکار: {hour}:00", show_alert=True)
+        await _show_auto_settings(query)
+
+    elif action == 'auto_hour_custom':
+        context.user_data['mode'] = 'set_auto_backup_hour'
+        await query.edit_message_text(
+            "✏️ <b>ساعت بکاپ خودکار</b>\n\n"
+            "عددی بین ۰ تا ۲۳ بفرستید (به‌وقت تهران):",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='backup:auto_settings')
+            ]])
+        )
+
+
+async def _show_auto_settings(query):
+    """
+    FIX جدید: تنظیمات بکاپ خودکار — روشن/خاموش + انتخاب ساعت اجرا.
+    بکاپ تولیدشده مستقیماً برای ادمین ارشد (ADMIN_ID) ارسال می‌شود.
+    """
+    enabled = await db.get_setting('auto_backup_enabled', False)
+    hour    = await db.get_setting('auto_backup_hour', 3)
+    last_run = await db.get_setting('auto_backup_last_run', None)
+    last_run_label = last_run[:16].replace('T', ' ') if last_run else 'هنوز اجرا نشده'
+
+    status_label = f"✅ فعال — هر روز ساعت {hour}:00" if enabled else "⬜ غیرفعال"
+    toggle_label  = "🔴 غیرفعال کردن" if enabled else "🟢 فعال کردن"
+
+    text = (
+        "⏰ <b>بکاپ خودکار</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"وضعیت: <b>{status_label}</b>\n"
+        f"🕐 آخرین اجرا: <code>{last_run_label}</code>\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "📌 بکاپ کامل هر روز در ساعت تعیین‌شده (به‌وقت تهران) "
+        "خودکار ساخته و برای شما ارسال می‌شود."
+    )
+    keyboard = [
+        [InlineKeyboardButton(toggle_label, callback_data='backup:auto_toggle')],
+        [
+            InlineKeyboardButton("01:00" + (" ✅" if hour == 1 else ""), callback_data='backup:auto_hour:1'),
+            InlineKeyboardButton("02:00" + (" ✅" if hour == 2 else ""), callback_data='backup:auto_hour:2'),
+            InlineKeyboardButton("03:00" + (" ✅" if hour == 3 else ""), callback_data='backup:auto_hour:3'),
+        ],
+        [
+            InlineKeyboardButton("04:00" + (" ✅" if hour == 4 else ""), callback_data='backup:auto_hour:4'),
+            InlineKeyboardButton("05:00" + (" ✅" if hour == 5 else ""), callback_data='backup:auto_hour:5'),
+            InlineKeyboardButton("23:00" + (" ✅" if hour == 23 else ""), callback_data='backup:auto_hour:23'),
+        ],
+        [InlineKeyboardButton("✏️ ساعت دیگر (عدد ۰ تا ۲۳)", callback_data='backup:auto_hour_custom')],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data='backup:menu')],
+    ]
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
 
 async def _show_menu(query):
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
+    auto_on = await db.get_setting('auto_backup_enabled', False)
+    auto_hour = await db.get_setting('auto_backup_hour', 3)
+    auto_label = f"⏰ بکاپ خودکار: {'فعال — ساعت ' + str(auto_hour) + ':00' if auto_on else 'غیرفعال'}"
     kb = [
         [InlineKeyboardButton("💾 پشتیبان کامل (همه بخش‌ها)", callback_data='backup:export_all')],
         [InlineKeyboardButton("👥 فقط کاربران",    callback_data='backup:export_users'),
@@ -84,6 +155,7 @@ async def _show_menu(query):
         [InlineKeyboardButton("📖 رفرنس‌ها",        callback_data='backup:export_refs'),
          InlineKeyboardButton("🧪 بانک سوال",       callback_data='backup:export_qbank')],
         [InlineKeyboardButton("📥 بازیابی از فایل", callback_data='backup:restore_prompt')],
+        [InlineKeyboardButton(auto_label, callback_data='backup:auto_settings')],
         [InlineKeyboardButton("🔙 بازگشت به پنل",   callback_data='admin:main')],
     ]
     await query.edit_message_text(
@@ -102,95 +174,102 @@ async def _show_menu(query):
 #  Export توابع
 # ══════════════════════════════════════════════════
 
+async def build_full_backup_data() -> dict:
+    """
+    FIX جدید: منطق ساخت بکاپ کامل از _export_all جدا شد تا هم از
+    callback پنل ادمین و هم از job بکاپ خودکار قابل استفاده باشد.
+    """
+    data = {
+        'backup_version': '2.0',
+        'created_at':     datetime.now().isoformat(),
+        'sections':       {}
+    }
+
+    # ── کاربران ──
+    users = await db.users.find({}).to_list(10000)
+    data['sections']['users'] = {
+        'description': 'اطلاعات کاربران ثبت‌نام شده',
+        'count':       len(users),
+        'data':        users
+    }
+
+    # ── علوم پایه ──
+    lessons  = await db.bs_lessons.find({}).to_list(1000)
+    sessions = await db.bs_sessions.find({}).to_list(5000)
+    content  = await db.bs_content.find({}).to_list(10000)
+    data['sections']['basic_science'] = {
+        'description': 'علوم پایه — درس‌ها، جلسات و محتوا',
+        'lessons':     {'count': len(lessons),  'data': lessons},
+        'sessions':    {'count': len(sessions), 'data': sessions},
+        'content':     {'count': len(content),  'data': content},
+    }
+
+    # ── رفرنس‌ها ──
+    subjects  = await db.ref_subjects.find({}).to_list(500)
+    books     = await db.ref_books.find({}).to_list(2000)
+    ref_files = await db.ref_files.find({}).to_list(5000)
+    data['sections']['references'] = {
+        'description': 'رفرنس‌های درسی — درس‌ها، کتاب‌ها و فایل‌ها',
+        'subjects':    {'count': len(subjects),  'data': subjects},
+        'books':       {'count': len(books),     'data': books},
+        'files':       {'count': len(ref_files), 'data': ref_files},
+    }
+
+    # ── بانک سوال ──
+    questions  = await db.questions.find({}).to_list(10000)
+    qbank_files= await db.qbank_files.find({}).to_list(1000)
+    data['sections']['qbank'] = {
+        'description': 'بانک سوال — سوالات و فایل‌ها',
+        'questions':   {'count': len(questions),   'data': questions},
+        'files':       {'count': len(qbank_files), 'data': qbank_files},
+    }
+
+    # ── برنامه ──
+    schedules = await db.schedules.find({}).to_list(5000)
+    data['sections']['schedules'] = {
+        'description': 'برنامه کلاس‌ها و امتحانات',
+        'count':       len(schedules),
+        'data':        schedules
+    }
+
+    # ── FAQ ──
+    faqs = await db.faq.find({}).to_list(500)
+    data['sections']['faq'] = {
+        'description': 'سوالات متداول',
+        'count':       len(faqs),
+        'data':        faqs
+    }
+
+    # ── تیکت‌ها ──
+    tickets = await db.tickets.find({}).to_list(5000)
+    data['sections']['tickets'] = {
+        'description': 'تیکت‌های پشتیبانی',
+        'count':       len(tickets),
+        'data':        tickets
+    }
+
+    # آمار خلاصه
+    data['summary'] = {
+        'users':        len(users),
+        'lessons':      len(lessons),
+        'sessions':     len(sessions),
+        'content_files':len(content),
+        'ref_subjects': len(subjects),
+        'ref_books':    len(books),
+        'ref_files':    len(ref_files),
+        'questions':    len(questions),
+        'schedules':    len(schedules),
+        'faqs':         len(faqs),
+        'tickets':      len(tickets),
+    }
+    return data
+
+
 async def _export_all(query, context):
-    """پشتیبان کامل از همه بخش‌ها"""
+    """پشتیبان کامل از همه بخش‌ها — برای دکمه پنل ادمین"""
     try:
-        data = {
-            'backup_version': '2.0',
-            'created_at':     datetime.now().isoformat(),
-            'sections':       {}
-        }
-
-        # ── کاربران ──
-        users = await db.users.find({}).to_list(10000)
-        data['sections']['users'] = {
-            'description': 'اطلاعات کاربران ثبت‌نام شده',
-            'count':       len(users),
-            'data':        users
-        }
-
-        # ── علوم پایه ──
-        lessons  = await db.bs_lessons.find({}).to_list(1000)
-        sessions = await db.bs_sessions.find({}).to_list(5000)
-        content  = await db.bs_content.find({}).to_list(10000)
-        data['sections']['basic_science'] = {
-            'description': 'علوم پایه — درس‌ها، جلسات و محتوا',
-            'lessons':     {'count': len(lessons),  'data': lessons},
-            'sessions':    {'count': len(sessions), 'data': sessions},
-            'content':     {'count': len(content),  'data': content},
-        }
-
-        # ── رفرنس‌ها ──
-        subjects  = await db.ref_subjects.find({}).to_list(500)
-        books     = await db.ref_books.find({}).to_list(2000)
-        ref_files = await db.ref_files.find({}).to_list(5000)
-        data['sections']['references'] = {
-            'description': 'رفرنس‌های درسی — درس‌ها، کتاب‌ها و فایل‌ها',
-            'subjects':    {'count': len(subjects),  'data': subjects},
-            'books':       {'count': len(books),     'data': books},
-            'files':       {'count': len(ref_files), 'data': ref_files},
-        }
-
-        # ── بانک سوال ──
-        questions  = await db.questions.find({}).to_list(10000)
-        qbank_files= await db.qbank_files.find({}).to_list(1000)
-        data['sections']['qbank'] = {
-            'description': 'بانک سوال — سوالات و فایل‌ها',
-            'questions':   {'count': len(questions),   'data': questions},
-            'files':       {'count': len(qbank_files), 'data': qbank_files},
-        }
-
-        # ── برنامه ──
-        schedules = await db.schedules.find({}).to_list(5000)
-        data['sections']['schedules'] = {
-            'description': 'برنامه کلاس‌ها و امتحانات',
-            'count':       len(schedules),
-            'data':        schedules
-        }
-
-        # ── FAQ ──
-        faqs = await db.faq.find({}).to_list(500)
-        data['sections']['faq'] = {
-            'description': 'سوالات متداول',
-            'count':       len(faqs),
-            'data':        faqs
-        }
-
-        # ── تیکت‌ها ──
-        tickets = await db.tickets.find({}).to_list(5000)
-        data['sections']['tickets'] = {
-            'description': 'تیکت‌های پشتیبانی',
-            'count':       len(tickets),
-            'data':        tickets
-        }
-
-        # آمار خلاصه
-        data['summary'] = {
-            'users':        len(users),
-            'lessons':      len(lessons),
-            'sessions':     len(sessions),
-            'content_files':len(content),
-            'ref_subjects': len(subjects),
-            'ref_books':    len(books),
-            'ref_files':    len(ref_files),
-            'questions':    len(questions),
-            'schedules':    len(schedules),
-            'faqs':         len(faqs),
-            'tickets':      len(tickets),
-        }
-
+        data = await build_full_backup_data()
         await _send_json_file(query, data, filename='backup_full')
-
     except Exception as e:
         logger.error(f"Backup error: {e}")
         await query.edit_message_text(
@@ -199,6 +278,38 @@ async def _export_all(query, context):
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 بازگشت", callback_data='backup:menu')
             ]]))
+
+
+async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str = 'backup_auto'):
+    """
+    FIX جدید: ارسال فایل بکاپ مستقیماً با bot.send_document — برای
+    استفاده در job بکاپ خودکار، که query/callback در دسترس نیست.
+    """
+    json_str   = json.dumps(data, ensure_ascii=False, indent=2, cls=_Enc)
+    file_bytes = json_str.encode('utf-8')
+    file_obj   = io.BytesIO(file_bytes)
+    now_str    = datetime.now().strftime('%Y%m%d_%H%M')
+    fname      = f"{filename}_{now_str}.json"
+    file_obj.name = fname
+
+    summary = data.get('summary', {})
+    stats_lines = [
+        f"👥 کاربران: {summary.get('users',0)}",
+        f"📖 درس‌ها: {summary.get('lessons',0)}",
+        f"🧪 سوالات: {summary.get('questions',0)}",
+        f"🎫 تیکت‌ها: {summary.get('tickets',0)}",
+    ]
+    caption = (
+        f"💾 <b>بکاپ خودکار روزانه</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        + '\n'.join(stats_lines) +
+        f"\n\n📦 حجم: {len(file_bytes)//1024} KB"
+    )
+    await bot.send_document(
+        chat_id, document=file_obj, caption=caption,
+        parse_mode='HTML', filename=fname
+    )
 
 
 async def _export_section(query, section: str):
@@ -317,6 +428,24 @@ async def _send_json_file(query, data: dict, filename: str):
 # ══════════════════════════════════════════════════
 #  Restore — بازیابی از فایل
 # ══════════════════════════════════════════════════
+
+async def handle_auto_backup_hour_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FIX جدید: دریافت ساعت دلخواه بکاپ خودکار به‌صورت متنی"""
+    text = update.message.text.strip()
+    context.user_data.pop('mode', None)
+    if not text.isdigit() or not (0 <= int(text) <= 23):
+        await update.message.reply_text("❌ عدد باید بین ۰ تا ۲۳ باشد. دوباره تلاش کنید.")
+        return
+    hour = int(text)
+    await db.set_setting('auto_backup_hour', hour)
+    await update.message.reply_text(
+        f"✅ ساعت بکاپ خودکار روی <b>{hour}:00</b> تنظیم شد.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⏰ بازگشت به تنظیمات بکاپ", callback_data='backup:auto_settings')
+        ]])
+    )
+
 
 async def backup_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت فایل JSON برای بازیابی"""
