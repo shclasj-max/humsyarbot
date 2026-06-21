@@ -89,6 +89,45 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             logger.debug(f"_admin_menu(content_scoped): {e}")
         return
 
+    # FIX جدید: نقش خرخون — فقط دسترسی به بررسی گزارش سوال/جزوه
+    if role == 'reviewer':
+        keyboard = [
+            [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه", callback_data='report:manage:all')],
+        ]
+        text = "🤓 <b>پنل خرخون</b>\n━━━━━━━━━━━━━━━━\nشما به بررسی گزارشات سوال و جزوه دسترسی دارید."
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(reviewer): {e}")
+        return
+
+    # FIX جدید: ادمین ربات (نماینده) — دسترسی به کاربران، برنامه‌ها، اطلاعیه‌ها
+    if role == 'bot_admin':
+        keyboard = [
+            [InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0')],
+            [
+                InlineKeyboardButton("📅 برنامه جدید",  callback_data='schedule:add_type'),
+                InlineKeyboardButton("🗑 حذف برنامه",   callback_data='schedule:del_list'),
+            ],
+            [InlineKeyboardButton("📢 ارسال همگانی",    callback_data='admin:broadcast')],
+        ]
+        text = "👮 <b>پنل ادمین ربات (نماینده)</b>\n━━━━━━━━━━━━━━━━\nدسترسی محدود — بدون تنظیمات حیاتی."
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(bot_admin): {e}")
+        return
+
     # فقط ادمین ارشد به این نقطه می‌رسد — منوی کامل
     keyboard = [
         [InlineKeyboardButton(
@@ -115,7 +154,9 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             InlineKeyboardButton("📅 برنامه جدید",     callback_data='schedule:add_type'),
             InlineKeyboardButton("🗑 حذف برنامه",      callback_data='schedule:del_list'),
         ],
+        [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
         [InlineKeyboardButton("🎫 مدیریت تیکت‌ها",     callback_data='ticket:admin_list')],
+        [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه",  callback_data='report:manage:all')],
         [InlineKeyboardButton("📢 ارسال همگانی",        callback_data='admin:broadcast')],
         [InlineKeyboardButton("💾 پشتیبان‌گیری",        callback_data='backup:menu')],
         [InlineKeyboardButton("📡 وضعیت ربات",            callback_data='admin:bot_status')],
@@ -125,6 +166,9 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
         keyboard.append([
             InlineKeyboardButton("🛡 سطوح دسترسی ادمین", callback_data='admin:roles'),
             InlineKeyboardButton("⚙️ تنظیمات ربات",      callback_data='admin:settings'),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📢 مدیریت اعلان‌ها",   callback_data='admin:notif_manage'),
         ])
         keyboard.append([
             InlineKeyboardButton("📋 لاگ فعالیت",        callback_data='admin:audit_log'),
@@ -150,13 +194,14 @@ async def show_admin_main(message, uid: int = None):
 # حتی پشتیبان/مسئول اطلاعیه/مدیر محتوای محدود هم نمی‌توانند.
 ROOT_ONLY_ACTIONS = {
     'roles', 'role_add', 'role_remove', 'role_set',
-    'role_add_pick', 'role_type', 'role_intake',   # FIX امنیتی: این‌ها هم فقط مدیر ارشد
+    'role_add_pick', 'role_type', 'role_intake',
     'settings', 'toggle_require_sid',
     'toggle_maintenance', 'set_maintenance_text',
     'set_log_group_admin', 'set_log_group_content',
     'export_excel', 'audit_log',
     'confirm_delete_user', 'delete_user',
     'content_admins', 'ca_set', 'ca_remove',
+    'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',  # FIX جدید
 }
 
 
@@ -199,6 +244,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if role == 'broadcaster' and action != 'broadcast':
                 await query.answer(
                     "ℹ️ شما فقط دسترسی ارسال همگانی دارید.",
+                    show_alert=True
+                )
+                return
+            # FIX جدید: نقش خرخون فقط به مدیریت گزارشات دسترسی دارد
+            # (که در namespace 'report:' است، نه 'admin:') — پس هر
+            # اکشن admin: دیگری برایش رد می‌شود.
+            if role == 'reviewer':
+                await query.answer(
+                    "ℹ️ شما دسترسی خرخون دارید — از منوی «⚠️ گزارشات سوال/جزوه» استفاده کنید.",
+                    show_alert=True
+                )
+                return
+            # FIX جدید: ادمین ربات فقط به کاربران، برنامه‌ها، broadcast دسترسی دارد
+            if role == 'bot_admin' and action not in (
+                'users', 'users_filter', 'uf_group', 'uf_intake', 'uf_clear',
+                'user_detail', 'search_user', 'approve', 'reject', 'edit_group',
+                'set_group', 'edit_intake', 'set_intake', 'pending', 'broadcast',
+            ):
+                await query.answer(
+                    "ℹ️ شما دسترسی محدود دارید — کاربران، برنامه‌ها و ارسال همگانی.",
                     show_alert=True
                 )
                 return
@@ -275,6 +340,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == 'audit_log':
         await _show_audit_log(query, 'admin')
+
+    # ══════════════════════════════════════════════
+    # 📢 مدیریت اعلان‌ها — FIX جدید
+    # ══════════════════════════════════════════════
+    elif action == 'notif_manage':
+        await _show_notif_manage(query)
+
+    elif action == 'notif_set_interval':
+        hours = int(parts[2])
+        await db.set_setting('resource_notif_interval_hours', hours)
+        await query.answer(f"✅ فاصله اعلان منابع جدید: هر {hours} ساعت", show_alert=True)
+        await _show_notif_manage(query)
+
+    elif action == 'notif_history':
+        job_name = parts[2] if len(parts) > 2 else None
+        await _show_notif_history(query, job_name)
+
+    elif action == 'notif_retry':
+        run_id = parts[2]
+        await _retry_failed_notif(query, context, run_id)
 
     # ══════════════════════════════════════════════
     # 🛡 سطوح دسترسی چندگانه ادمین (admin_roles)
@@ -1193,6 +1278,97 @@ async def _show_qbank_list(query):
     await query.edit_message_text(
         f"📁 <b>فایل‌های بانک سوال</b> — {len(files)} فایل" if files else "❌ فایلی آپلود نشده.",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_notif_manage(query):
+    """
+    FIX جدید: مدیریت اعلان‌ها از پنل ادمین — تنظیم فاصله زمانی
+    اعلان منابع جدید + دسترسی به تاریخچه ارسال هر job.
+    """
+    interval = await db.get_setting('resource_notif_interval_hours', 24)
+    pending  = await db.get_unnotified_resources()
+
+    text = (
+        "📢 <b>مدیریت اعلان‌ها</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"📚 <b>فاصله اعلان منابع جدید:</b> هر {interval} ساعت\n"
+        f"⏳ منابع در انتظار اعلام: <b>{len(pending)}</b> مورد\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "برای مشاهده تاریخچه ارسال هر دسته از اعلان‌ها، یکی را انتخاب کنید:"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("24 ساعت" + (" ✅" if interval == 24 else ""), callback_data='admin:notif_set_interval:24'),
+            InlineKeyboardButton("48 ساعت" + (" ✅" if interval == 48 else ""), callback_data='admin:notif_set_interval:48'),
+            InlineKeyboardButton("72 ساعت" + (" ✅" if interval == 72 else ""), callback_data='admin:notif_set_interval:72'),
+        ],
+        [InlineKeyboardButton("📚 تاریخچه: منابع جدید",   callback_data='admin:notif_history:new_resources')],
+        [InlineKeyboardButton("📝 تاریخچه: یادآوری امتحان", callback_data='admin:notif_history:exam_reminder')],
+        [InlineKeyboardButton("🧪 تاریخچه: سوال روزانه",   callback_data='admin:notif_history:daily_question')],
+        [InlineKeyboardButton("📋 همه اجراهای اخیر",        callback_data='admin:notif_history')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_notif_history(query, job_name: str = None):
+    """
+    FIX جدید: نمایش تاریخچه اجراهای notif_runs — وضعیت موفق/ناموفق
+    هر اجرا، با دکمه retry برای اجراهایی که شکست داشته‌اند.
+    """
+    runs = await db.get_recent_notif_runs(job_name, limit=10)
+    job_label = {
+        'new_resources': '📚 منابع جدید', 'exam_reminder': '📝 یادآوری امتحان',
+        'daily_question': '🧪 سوال روزانه',
+    }.get(job_name, '📋 همه اعلان‌ها')
+
+    if not runs:
+        text = f"{job_label}\n\nهنوز هیچ اجرایی ثبت نشده."
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data='admin:notif_manage')]]
+    else:
+        lines = [f"{job_label}\n━━━━━━━━━━━━━━━━"]
+        keyboard = []
+        for r in runs:
+            started = r.get('started_at', '')[:16].replace('T', ' ')
+            status  = r.get('status', 'running')
+            icon    = {'completed': '✅', 'error': '❌', 'skipped': '⏭', 'running': '⏳'}.get(status, '❔')
+            sent    = r.get('sent', 0)
+            failed  = r.get('failed', 0)
+            lines.append(
+                f"\n{icon} <code>{started}</code>\n"
+                f"   ✅ موفق: {sent}  |  ❌ ناموفق: {failed}"
+            )
+            if failed > 0:
+                rid = str(r['_id'])
+                keyboard.append([InlineKeyboardButton(
+                    f"🔄 تلاش مجدد — {started}", callback_data=f'admin:notif_retry:{rid}'
+                )])
+        text = '\n'.join(lines)
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:notif_manage')])
+
+    await query.edit_message_text(text[:4000], parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _retry_failed_notif(query, context, run_id: str):
+    """
+    FIX جدید: ارسال مجدد برای کاربرانی که در یک اجرای قبلی fail شدند.
+    """
+    failed_ids = await db.get_failed_notif_targets(run_id)
+    if not failed_ids:
+        await query.answer("✅ موردی برای تلاش مجدد نیست.", show_alert=True)
+        return
+    sent, failed = 0, 0
+    for uid_target in failed_ids:
+        try:
+            await context.bot.send_message(
+                uid_target,
+                "🔔 <b>یادآوری</b>\n\nاین پیام به دلیل خطای موقت دوباره ارسال شد. "
+                "برای جزئیات به بخش‌های مربوطه ربات مراجعه کنید.",
+                parse_mode='HTML'
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+    await query.answer(f"✅ {sent} ارسال موفق، {failed} هنوز ناموفق", show_alert=True)
 
 
 async def _show_settings(query):
