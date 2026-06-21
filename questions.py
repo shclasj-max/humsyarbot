@@ -530,6 +530,9 @@ async def _next_q(query, context, uid):
         keyboard.append([InlineKeyboardButton(
             f"{LETTERS[i]} {opt}", callback_data=f'answer:{qid}:{i}')])
     keyboard.append([
+        InlineKeyboardButton("⚠️ گزارش ایراد سوال", callback_data=f'report:question:{qid}'),
+    ])
+    keyboard.append([
         InlineKeyboardButton("🏠 منو", callback_data='questions:main'),
     ])
 
