@@ -8,13 +8,20 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
+# FIX جدید: گسترش به تمام دسته‌های نوتیف طبق سند ارتقاء
 NOTIF_ITEMS = [
-    ('new_resources',  '📚 منابع جدید',       'وقتی محتوای جدید آپلود شود'),
-    ('schedule',       '📅 تغییر برنامه',       'وقتی کلاس یا امتحانی تغییر کند'),
-    ('exam',           '📝 یادآوری امتحان',     '۷، ۳ و ۱ روز قبل از امتحان'),
-    ('daily_question', '🧪 سوال روزانه',        'هر روز صبح یک سوال تستی'),
+    ('new_resources',  '📚 منابع جدید',         'وقتی محتوای جدید آپلود شود (خلاصه دوره‌ای)'),
+    ('schedule',       '📅 برنامه و تغییر کلاس', 'افزودن کلاس جدید یا تغییر زمان کلاس منعطف'),
+    ('exam',           '📝 یادآوری امتحان',       '۷، ۳ و ۱ روز قبل از امتحان'),
+    ('makeup',         '🔄 کلاس جبرانی',         'وقتی کلاس جبرانی جدید ثبت شود'),
+    ('daily_question', '🧪 سوال روزانه',          'هر روز صبح یک سوال تستی'),
+    ('edu_message',    '🎓 پیام‌های آموزشی',      'نکات و محتوای آموزشی از تیم همیار'),
+    ('general',        '📢 اطلاعیه‌های عمومی',    'اخبار و اطلاعیه‌های کلی ربات'),
 ]
-_DEFAULTS = {'new_resources': True, 'schedule': True, 'exam': True, 'daily_question': False}
+_DEFAULTS = {
+    'new_resources': True, 'schedule': True, 'exam': True, 'makeup': True,
+    'daily_question': False, 'edu_message': True, 'general': True,
+}
 
 
 async def notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
