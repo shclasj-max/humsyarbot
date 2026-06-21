@@ -212,6 +212,27 @@ def _to_jalali(gy: int, gm: int, gd: int) -> tuple:
     return jy, jm + 1, j_day_no + 1
 
 
+def jalali_weekday_index(date_str: str) -> int:
+    """
+    FIX جدید: index روز هفته با شنبه=۰ تا جمعه=۶ — برای ساخت
+    جدول هفتگی برنامه کلاسی (شنبه تا جمعه) لازم است.
+    پایتون weekday() دوشنبه=۰ می‌دهد؛ نگاشت به شنبه=۰:
+    دوشنبه=۰→۲, سه‌شنبه=۱→۳, چهارشنبه=۲→۴, پنج‌شنبه=۳→۵,
+    جمعه=۴→۶, شنبه=۵→۰, یکشنبه=۶→۱
+    """
+    try:
+        from datetime import datetime
+        y, m, d = map(int, date_str.split('-'))
+        py_weekday = datetime(y, m, d).weekday()  # 0=دوشنبه ... 6=یکشنبه
+        mapping = {5: 0, 6: 1, 0: 2, 1: 3, 2: 4, 3: 5, 4: 6}
+        return mapping[py_weekday]
+    except Exception:
+        return 0
+
+
+JALALI_WEEK_SAT_FIRST = ['شنبه', 'یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنج‌شنبه', 'جمعه']
+
+
 def fmt_jalali(date_str: str) -> str:
     """تبدیل YYYY-MM-DD به مثلاً: ۱۵ فروردین ۱۴۰۴ (شنبه)"""
     try:
