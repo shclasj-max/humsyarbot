@@ -51,6 +51,8 @@ class DB:
         self.tickets      = _db['tickets']
         self.intakes      = _db['intakes']
         self.settings     = _db['bot_settings']     # تنظیمات کلی + گروه‌های لاگ + maintenance
+        self.notif_runs   = _db['notif_runs']       # FIX جدید: لاگ وضعیت ارسال نوتیف‌ها
+        self.content_reports = _db['content_reports']  # FIX جدید: گزارش سوال/جزوه
         self.admin_roles  = _db['admin_roles']      # FIX جدید: سطوح دسترسی چندگانه ادمین
         self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
 
@@ -317,8 +319,26 @@ class DB:
             'session_id': session_id, 'type': ctype, 'file_id': file_id,
             'description': description, 'extra_info': extra_info,
             'order': count, 'uploaded_at': datetime.now().isoformat(), 'downloads': 0,
+            'notif_sent': False,   # FIX جدید: برای batch نوتیف منابع جدید
         })
         return r.inserted_id
+
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: نوتیف دسته‌ای منابع جدید (هر N ساعت)
+    # ══════════════════════════════════════════════════
+
+    async def get_unnotified_resources(self) -> list:
+        """محتوای جدیدی که هنوز برای آن نوتیف ارسال نشده"""
+        return await self.bs_content.find({'notif_sent': {'$ne': True}}).to_list(200)
+
+    async def mark_resources_notified(self, content_ids: list):
+        """علامت‌گذاری محتوای ارسال‌شده تا دوباره اعلام نشود"""
+        if not content_ids:
+            return
+        await self.bs_content.update_many(
+            {'_id': {'$in': [ObjectId(c) if isinstance(c, str) else c for c in content_ids]}},
+            {'$set': {'notif_sent': True}}
+        )
 
     async def bs_get_content_item(self, cid: str):
         try:
@@ -629,6 +649,25 @@ class DB:
         except Exception:
             return None
 
+    async def get_daily_rotation_question(self):
+        """
+        FIX جدید — باگ قبلی: daily_question_job همیشه یک سوال ثابت
+        می‌فرستاد (اولین نتیجه بدون sort). حالا بر اساس قدیمی‌ترین
+        last_daily_sent چرخشی انتخاب می‌شود — یعنی واقعاً هر روز سوال
+        عوض می‌شود و یک دور کامل بانک سوال طی می‌شود.
+        """
+        q = await self.questions.find(
+            {'approved': True}
+        ).sort('last_daily_sent', 1).limit(1).to_list(1)
+        if not q:
+            return None
+        chosen = q[0]
+        await self.questions.update_one(
+            {'_id': chosen['_id']},
+            {'$set': {'last_daily_sent': datetime.now().isoformat()}}
+        )
+        return chosen
+
     async def get_questions_for_pdf(self, lesson: str = None, topic: str = None, count: int = 20):
         q = {'approved': True}
         if lesson: q['lesson'] = lesson
@@ -707,14 +746,35 @@ class DB:
 
     async def add_schedule(self, stype: str, lesson: str, teacher: str,
                            date: str, time: str, location: str,
-                           notes: str = '', group: str = 'هر دو', is_weekly: bool = False):
+                           notes: str = '', group: str = 'هر دو', is_weekly: bool = False,
+                           flex_type: str = 'fixed', flex_note: str = ''):
+        """
+        FIX جدید: flex_type — 'fixed' (ثابت) یا 'flexible' (منعطف).
+        برای کلاس منعطف، flex_note آخرین زمان اعلام‌شده را نگه می‌دارد.
+        """
         r = await self.schedules.insert_one({
             'type': stype, 'lesson': lesson, 'teacher': teacher,
             'date': date, 'time': time, 'location': location,
             'notes': notes, 'group': group, 'is_weekly': is_weekly,
+            'flex_type': flex_type, 'flex_note': flex_note,
             'created_at': datetime.now().isoformat(), 'notified_days': [],
         })
         return r.inserted_id
+
+    async def update_schedule_time(self, sid: str, new_date: str, new_time: str, note: str = ''):
+        """
+        FIX جدید: تغییر زمان یک کلاس منعطف — برای اعلام به‌روز شدن زمان
+        برگزاری به دانشجویان استفاده می‌شود.
+        """
+        try:
+            await self.schedules.update_one(
+                {'_id': ObjectId(sid)},
+                {'$set': {'date': new_date, 'time': new_time, 'flex_note': note,
+                          'last_time_change': datetime.now().isoformat()}}
+            )
+            return True
+        except Exception:
+            return False
 
     async def get_schedules(self, stype: str = None, upcoming: bool = True, group: str = None):
         q = {}
@@ -970,6 +1030,8 @@ class DB:
         'content_admin':  '🎓 مدیر محتوا (کلی)',
         'content_scoped': '📅 مدیر محتوا (محدود به ورودی)',
         'broadcaster':    '📢 مسئول اطلاعیه',
+        'reviewer':       '🤓 خرخون (بررسی گزارش سوال/جزوه)',   # FIX جدید
+        'bot_admin':      '👮 ادمین ربات (نماینده)',            # FIX جدید
     }
 
     # ماتریس مجوزها برای هر نقش — استفاده در has_permission
@@ -977,7 +1039,9 @@ class DB:
         'support':        {'tickets'},
         'content_admin':  {'content', 'questions_review'},
         'content_scoped': {'content_scoped', 'questions_review_scoped'},
-        'broadcaster':     {'broadcast'},
+        'broadcaster':    {'broadcast'},
+        'reviewer':       {'reports_review'},                          # FIX جدید
+        'bot_admin':      {'users', 'schedules', 'notifications'},      # FIX جدید
     }
 
     async def add_admin_role(self, uid: int, role: str, added_by: int,
@@ -1118,6 +1182,129 @@ class DB:
             'total_tickets_week': total_tickets_week,
             'inactive_count':     inactive_count,
             'total_users':        await self.users.count_documents({'approved': True}),
+        }
+
+
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: لاگ وضعیت ارسال نوتیف‌ها (notif_runs)
+    #  برای رفع نیاز: «بدون تکرار، بدون نقص، قابل retry،
+    #  وضعیت ارسال در دیتابیس ذخیره شود»
+    # ══════════════════════════════════════════════════
+
+    async def notif_run_start(self, job_name: str) -> str:
+        """ثبت شروع یک اجرای job — برمی‌گرداند run_id برای ادامه ثبت"""
+        r = await self.notif_runs.insert_one({
+            'job_name':  job_name,
+            'started_at': datetime.now().isoformat(),
+            'status':    'running',
+            'sent':      0,
+            'failed':    0,
+            'total':     0,
+            'finished_at': None,
+        })
+        return str(r.inserted_id)
+
+    async def notif_run_finish(self, run_id: str, sent: int, failed: int, total: int,
+                                status: str = 'completed', error: str = ''):
+        try:
+            await self.notif_runs.update_one(
+                {'_id': ObjectId(run_id)},
+                {'$set': {
+                    'sent': sent, 'failed': failed, 'total': total,
+                    'status': status, 'error': error,
+                    'finished_at': datetime.now().isoformat(),
+                }}
+            )
+        except Exception:
+            pass
+
+    async def get_recent_notif_runs(self, job_name: str = None, limit: int = 15) -> list:
+        q = {'job_name': job_name} if job_name else {}
+        return await self.notif_runs.find(q).sort('started_at', -1).to_list(limit)
+
+    async def get_failed_notif_targets(self, run_id: str) -> list:
+        """کاربرانی که ارسال برایشان fail شده — برای retry دستی"""
+        doc = await self.notif_runs.find_one({'_id': ObjectId(run_id)})
+        return doc.get('failed_user_ids', []) if doc else []
+
+    async def notif_run_add_failed(self, run_id: str, user_ids: list):
+        try:
+            await self.notif_runs.update_one(
+                {'_id': ObjectId(run_id)},
+                {'$set': {'failed_user_ids': user_ids}}
+            )
+        except Exception:
+            pass
+
+
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: سیستم گزارش ایراد سوال/جزوه (content_reports)
+    # ══════════════════════════════════════════════════
+
+    REPORT_REASONS = {
+        'wrong_answer':  'پاسخ اشتباه',
+        'wrong_option':  'گزینه اشتباه',
+        'incomplete':    'متن ناقص',
+        'broken_file':   'فایل خراب',
+        'outdated':      'محتوای قدیمی',
+        'other':         'سایر',
+    }
+
+    async def create_content_report(self, target_type: str, target_id: str,
+                                     reporter_id: int, reporter_name: str,
+                                     reason: str, note: str = '',
+                                     designer_id: int = None) -> int:
+        """
+        ثبت گزارش جدید — target_type: 'question' یا 'resource'.
+        designer_id: آیدی طراح سوال (اگه target سوال باشد) برای اطلاع‌رسانی مستقیم.
+        """
+        count = await self.content_reports.count_documents({})
+        report_id = count + 1
+        await self.content_reports.insert_one({
+            'report_id':    report_id,
+            'target_type':  target_type,
+            'target_id':    target_id,
+            'reporter_id':  reporter_id,
+            'reporter_name': reporter_name,
+            'reason':       reason,
+            'note':         note,
+            'designer_id':  designer_id,
+            'status':       'new',   # new, reviewing, resolved, rejected
+            'created_at':   datetime.now().isoformat(),
+            'resolved_at':  None,
+            'resolved_by':  None,
+        })
+        return report_id
+
+    async def get_content_report(self, report_id: int):
+        return await self.content_reports.find_one({'report_id': report_id})
+
+    async def get_content_reports(self, status: str = None, limit: int = 50) -> list:
+        q = {'status': status} if status else {}
+        return await self.content_reports.find(q).sort('created_at', -1).to_list(limit)
+
+    async def update_report_status(self, report_id: int, status: str, resolved_by: int = None):
+        update_data = {'status': status}
+        if status in ('resolved', 'rejected'):
+            update_data['resolved_at'] = datetime.now().isoformat()
+            update_data['resolved_by'] = resolved_by
+        await self.content_reports.update_one(
+            {'report_id': report_id}, {'$set': update_data}
+        )
+
+    async def get_reviewers(self) -> list:
+        """همه کاربرانی که نقش reviewer (خرخون) دارند"""
+        docs = await self.admin_roles.find({'role': 'reviewer'}).to_list(100)
+        return [d['_id'] for d in docs]
+
+    async def content_reports_stats(self) -> dict:
+        new_count       = await self.content_reports.count_documents({'status': 'new'})
+        reviewing_count = await self.content_reports.count_documents({'status': 'reviewing'})
+        resolved_count  = await self.content_reports.count_documents({'status': 'resolved'})
+        rejected_count  = await self.content_reports.count_documents({'status': 'rejected'})
+        return {
+            'new': new_count, 'reviewing': reviewing_count,
+            'resolved': resolved_count, 'rejected': rejected_count,
         }
 
 
