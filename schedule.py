@@ -260,8 +260,20 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == 'del' and uid == ADMIN_ID:
         sid = parts[2]
+        # FIX جدید: گرفتن اطلاعات قبل از حذف برای ثبت در لاگ
+        deleted_item = await db.schedules.find_one({'_id': ObjectId(sid)})
         await db.delete_schedule(sid)
         await query.answer("🗑 برنامه حذف شد!", show_alert=True)
+        if deleted_item:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+            type_fa = TYPE_NAMES.get(deleted_item.get('type',''), '')
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                f"حذف {type_fa}", module='Schedules', severity='WARNING',
+                target_id=sid,
+                details=f"{deleted_item.get('lesson','')} — {fmt_jalali(deleted_item.get('date',''))}"
+            )
         await _show_delete_list(query)
 
     # ══════════════════════════════════════════════
@@ -533,9 +545,13 @@ async def handle_flex_time_change_text(update: Update, context: ContextTypes.DEF
     admin_uid  = update.effective_user.id
     admin_user = await db.get_user(admin_uid)
     actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+    old_jalali = fmt_jalali(schedule_doc.get('date', ''))
     await send_audit_log(
         context.bot, 'admin', actor_name, admin_uid,
-        "تغییر زمان کلاس منعطف", f"{lesson} → {jalali_display} {new_time}"
+        "تغییر زمان کلاس", module='Schedules', severity='INFO', target_id=sid,
+        before={'زمان': f"{old_jalali} {schedule_doc.get('time','')}"},
+        after={'زمان': f"{jalali_display} {new_time}"},
+        details=f"درس: {lesson}"
     )
 
     await update.message.reply_text(
@@ -678,7 +694,8 @@ async def _finalize_schedule_add(update_or_query, context):
     actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
     await send_audit_log(
         bot_obj, 'admin', actor_name, admin_uid,
-        f"افزودن {type_fa}", f"{p['lesson']} — {jalali_display} {p['time']}"
+        f"ایجاد {type_fa} جدید", module='Schedules', severity='INFO',
+        details=f"{p['lesson']} — {jalali_display} {p['time']}"
     )
 
     for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type'):
