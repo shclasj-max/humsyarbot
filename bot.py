@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ConversationHandler,
@@ -278,11 +278,17 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    FIX جدید: گزارش هفتگی خودکار — هر یکشنبه برای ادمین ارشد
-    (و در صورت ست بودن، گروه لاگ ادمین) ارسال می‌شود.
+    FIX باگ مهم: گزارش هفتگی دیگر به پیوی شخصی ادمین ارشد ارسال
+    نمی‌شود — طبق درخواست صریح، فقط به گروه لاگ ادمین می‌رود.
+    اگر گروه تنظیم نشده باشد، گزارش فقط در لاگ سرور ثبت می‌شود
+    (و ارسالی به هیچ‌جا صورت نمی‌گیرد).
     """
     logger.info("📊 اجرای job گزارش هفتگی...")
     try:
+        chat_id = await db.get_setting('log_group_admin', None)
+        if not chat_id:
+            logger.info("گزارش هفتگی: گروه لاگ ادمین تنظیم نشده — ارسالی صورت نگرفت.")
+            return
         s = await db.weekly_report_stats()
         text = (
             "📊 <b>گزارش هفتگی ربات</b>\n"
@@ -297,18 +303,7 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
             f"📨 کل تیکت‌های این هفته: <b>{s['total_tickets_week']}</b>\n\n"
             "<i>گزارش بعدی: یکشنبه آینده 🗓</i>"
         )
-        # همیشه برای ادمین ارشد
-        try:
-            await context.bot.send_message(ADMIN_ID, text, parse_mode='HTML')
-        except Exception:
-            pass
-        # اگه گروه لاگ ادمین ست شده، آنجا هم بفرست
-        chat_id = await db.get_setting('log_group_admin', None)
-        if chat_id:
-            try:
-                await context.bot.send_message(int(chat_id), text, parse_mode='HTML')
-            except Exception:
-                pass
+        await context.bot.send_message(int(chat_id), text, parse_mode='HTML')
     except Exception as e:
         logger.error(f"weekly_report_job error: {e}")
 
@@ -385,6 +380,91 @@ async def maintenance_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
+async def channel_lock_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: قفل اجباری عضویت کانال. اگر ادمین یک یا چند کانال را
+    در تنظیمات اضافه کرده باشد، هر کاربر عادی (غیر از ادمین ارشد و
+    نقش‌های فرعی ادمین) باید عضو همه آن‌ها باشد تا بتواند از ربات
+    استفاده کند. با group=-1 یعنی قبل از maintenance_gate نیست —
+    اجرا می‌شود بعد از آن، چون اگر maintenance فعال باشد آن پیام
+    اولویت دارد (maintenance_gate با ApplicationHandlerStop متوقف
+    می‌کند و این تابع اصلاً اجرا نمی‌شود).
+    """
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None or uid == ADMIN_ID:
+        return
+
+    # دکمه «بررسی مجدد عضویت» با callback خاص — نباید مسدود شود
+    if update.callback_query and update.callback_query.data == 'channel_lock:check':
+        return
+
+    channels = await db.get_required_channels()
+    if not channels:
+        return
+
+    # نقش‌های فرعی ادمین هم معاف هستند
+    role_doc = await db.get_admin_role(uid)
+    if role_doc:
+        return
+
+    not_joined = []
+    for ch in channels:
+        try:
+            member = await context.bot.get_chat_member(ch['id'], uid)
+            if member.status in ('left', 'kicked'):
+                not_joined.append(ch)
+        except Exception:
+            # اگر ربات نتواند وضعیت را چک کند (مثلاً ادمین کانال نیست)
+            # برای امنیت، آن کانال را به‌عنوان عضو‌نشده در نظر می‌گیریم
+            not_joined.append(ch)
+
+    if not not_joined:
+        return
+
+    keyboard = []
+    for ch in not_joined:
+        if ch.get('invite_link'):
+            keyboard.append([InlineKeyboardButton(f"📢 عضویت در {ch['title']}", url=ch['invite_link'])])
+    keyboard.append([InlineKeyboardButton("✅ عضو شدم، بررسی کن", callback_data='channel_lock:check')])
+
+    text = (
+        "🔒 <b>عضویت در کانال الزامی است</b>\n\n"
+        "برای استفاده از ربات، ابتدا باید در کانال(های) زیر عضو شوید:\n\n"
+        + '\n'.join(f"• {ch['title']}" for ch in not_joined)
+    )
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("🔒 ابتدا باید عضو کانال شوید", show_alert=True)
+        elif update.message:
+            await update.message.reply_text(text, parse_mode='HTML',
+                                             reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
+
+
+async def channel_lock_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دکمه «عضو شدم، بررسی کن» — چک مجدد و عبور در صورت موفقیت"""
+    query = update.callback_query
+    uid   = update.effective_user.id
+    channels = await db.get_required_channels()
+    still_not_joined = []
+    for ch in channels:
+        try:
+            member = await context.bot.get_chat_member(ch['id'], uid)
+            if member.status in ('left', 'kicked'):
+                still_not_joined.append(ch)
+        except Exception:
+            still_not_joined.append(ch)
+
+    if still_not_joined:
+        await query.answer("❌ هنوز عضو همه کانال‌ها نشده‌اید!", show_alert=True)
+        return
+
+    await query.answer("✅ عضویت تأیید شد!", show_alert=True)
+    await query.edit_message_text("✅ عضویت شما تأیید شد. لطفاً /start را بزنید.")
+
+
 async def update_last_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     FIX جدید: برای گزارش هفتگی نیاز داریم بدانیم آخرین فعالیت هر
@@ -404,8 +484,35 @@ async def update_last_active(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
 
+# FIX باگ: این modeها وقتی کاربر دکمه‌ی اصلی منو را می‌زند (یعنی
+# قصد خروج از فلوی نیمه‌کاره را دارد) باید پاک شوند — وگرنه پیام
+# بعدی او در هر بخش دیگری از ربات به اشتباه به همین mode می‌رسد.
+INTERRUPTIBLE_SIMPLE_MODES = {
+    'search_user', 'edit_user', 'add_intake', 'add_admin_role',
+    'qbank_awaiting_desc', 'add_schedule', 'flex_time_change',
+    'set_auto_backup_hour', 'report_note', 'ticket_search',
+    'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
+    'add_required_channel',
+}
+MENU_BUTTON_TEXTS = {
+    '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
+    '📅 برنامه', '👤 پروفایل', '🔔 اعلان‌ها', '🎫 پشتیبانی',
+    '🎓 پنل محتوا', '👨\u200d⚕️ پنل ادمین',
+}
+
+
 async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # FIX باگ لغو رول/گزارش/و غیره گیر کردن: اگر کاربر دکمه منو زده
+    # و در یکی از modeهای ساده گیر بود، آن mode را پاک کن و رد شو
+    # تا روتر اصلی پیام را عادی پردازش کند.
+    msg_text = update.message.text.strip() if update.message and update.message.text else ''
+    if msg_text in MENU_BUTTON_TEXTS and context.user_data.get('mode') in INTERRUPTIBLE_SIMPLE_MODES:
+        for k in ('mode', 'new_role_type', 'new_role_intake', 'flex_change_sid',
+                  'report_target_type', 'report_target_id', 'report_reason'):
+            context.user_data.pop(k, None)
+        # ادامه نده — اجازه بده همین تابع پایین‌تر پیام دکمه را عادی مسیر کند
 
     # ۱. FIX: broadcast — باید اول از همه چک بشه
     if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
@@ -460,6 +567,10 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ۵e. FIX جدید: توضیح گزارش ایراد (دلیل 'سایر')
     if context.user_data.get('mode') == 'report_note':
         return await handle_report_note_text(update, context)
+
+    # ۵f. FIX جدید: افزودن کانال اجباری
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'add_required_channel':
+        return await handle_admin_text(update, context)
 
     # ۶. ca_text_handler
     ca_mode = context.user_data.get('ca_mode', '')
@@ -600,7 +711,9 @@ def build_application() -> Application:
         conversation_timeout=1800,
     )
     # ── FIX جدید: maintenance gate + last_active — قبل از همه چیز (group=-1) ──
+    # ترتیب مهم است: ابتدا maintenance (اولویت بالاتر)، سپس قفل کانال
     app.add_handler(TypeHandler(Update, maintenance_gate), group=-1)
+    app.add_handler(TypeHandler(Update, channel_lock_gate), group=-1)
     app.add_handler(TypeHandler(Update, update_last_active), group=-1)
 
     app.add_handler(conv)
@@ -635,6 +748,7 @@ def build_application() -> Application:
         (content_admin_callback,   r'^ca:'),
         (ticket_callback,          r'^ticket:'),
         (report_callback,          r'^report:'),   # FIX جدید
+        (channel_lock_check_callback, r'^channel_lock:check'),   # FIX جدید
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
