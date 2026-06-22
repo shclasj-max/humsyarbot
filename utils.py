@@ -314,29 +314,51 @@ async def broadcast_message(bot, users: List[dict], text: str,
 # ══════════════════════════════════════════════════
 
 async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
-                          action: str, details: str = '') -> None:
+                          action: str, module: str = '', details: str = '',
+                          severity: str = 'INFO', actor_role: str = '',
+                          target_id: str = '', before: dict = None, after: dict = None) -> None:
     """
-    ثبت یک عمل حساس در دیتابیس + ارسال آن به گروه تلگرامی مربوطه.
-    category: 'admin' (پنل ادمین ارشد) یا 'content' (پنل محتوا)
-    اگه گروه مربوطه در تنظیمات ست نشده باشد، فقط در دیتابیس ثبت می‌شود
-    و ارسالی صورت نمی‌گیرد (بدون خطا).
+    FIX جدید — ثبت ساختاریافته یک عمل حساس + ارسال آن **فقط** به گروه
+    تلگرامی مربوطه (هرگز به پیوی شخصی ادمین ارشد، طبق درخواست صریح).
+    category: 'admin' یا 'content' — مشخص می‌کند کدام گروه لاگ ببیند.
+    severity: INFO (سبز) / WARNING (زرد) / HIGH (نارنجی) / CRITICAL (قرمز)
+    before/after: تغییرات دقیق فیلد، مثلاً {'field':'وضعیت','value':'بسته'}
+    اگر گروه تنظیم نشده باشد، فقط در دیتابیس ثبت می‌شود (بدون ارسال،
+    بدون خطا) — این یعنی لاگ هرگز برای ادمین ارشد پیوی نمی‌رود.
     """
     from database import db
-    await db.log_action(actor_id, actor_name, action, details, category)
+    await db.log_action(
+        actor_id, actor_name, actor_role, action, module, category,
+        severity, target_id, before, after, details
+    )
 
     group_key  = 'log_group_admin' if category == 'admin' else 'log_group_content'
     chat_id    = await db.get_setting(group_key, None)
     if not chat_id:
         return
 
-    icon = '🛡' if category == 'admin' else '🎓'
-    text = (
-        f"{icon} <b>لاگ فعالیت</b>\n"
-        f"👤 <b>{actor_name}</b> (<code>{actor_id}</code>)\n"
-        f"⚡ {action}"
-    )
-    if details:
-        text += f"\n📝 {details}"
+    severity_icon = {
+        'INFO': '🟢', 'WARNING': '🟡', 'HIGH': '🟠', 'CRITICAL': '🔴',
+    }.get(severity, '🟢')
+    cat_icon = '🛡' if category == 'admin' else '🎓'
+
+    text_parts = [
+        f"{cat_icon} {severity_icon} <b>{action}</b>",
+        f"👤 {actor_name}" + (f" ({actor_role})" if actor_role else ""),
+    ]
+    if module:
+        text_parts.append(f"📂 ماژول: {module}")
+    if target_id:
+        text_parts.append(f"🎯 هدف: <code>{target_id}</code>")
+    if before and after:
+        for key in after:
+            old_val = before.get(key, '—')
+            new_val = after.get(key, '—')
+            text_parts.append(f"   {key}: <s>{old_val}</s> → <b>{new_val}</b>")
+    elif details:
+        text_parts.append(f"📝 {details}")
+
+    text = '\n'.join(text_parts)
 
     try:
         await bot.send_message(int(chat_id), text, parse_mode='HTML')
