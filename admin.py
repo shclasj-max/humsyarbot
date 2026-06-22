@@ -201,7 +201,8 @@ ROOT_ONLY_ACTIONS = {
     'export_excel', 'audit_log',
     'confirm_delete_user', 'delete_user',
     'content_admins', 'ca_set', 'ca_remove',
-    'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',  # FIX جدید
+    'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',
+    'channel_lock', 'channel_lock_add', 'channel_lock_remove',  # FIX جدید
 }
 
 
@@ -291,7 +292,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ شماره دانشجویی اکنون اجباری است" if new_val else "✅ شماره دانشجویی اکنون اختیاری است", show_alert=True)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
-        await send_audit_log(context.bot, 'admin', actor_name, uid, "تغییر تنظیم: اجباری‌بودن شماره دانشجویی", f"وضعیت جدید: {'فعال' if new_val else 'غیرفعال'}")
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "تغییر تنظیمات ثبت‌نام", module='Settings', severity='HIGH',
+            before={'شماره دانشجویی': 'اختیاری' if new_val else 'اجباری'},
+            after={'شماره دانشجویی': 'اجباری' if new_val else 'اختیاری'}
+        )
         await _show_settings(query)
 
     elif action == 'toggle_maintenance':
@@ -301,7 +307,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🔧 حالت تعمیر فعال شد" if new_val else "✅ حالت تعمیر غیرفعال شد", show_alert=True)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
-        await send_audit_log(context.bot, 'admin', actor_name, uid, "تغییر تنظیم: حالت تعمیر و نگهداری", f"وضعیت جدید: {'فعال' if new_val else 'غیرفعال'}")
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "فعال‌شدن حالت تعمیر" if new_val else "غیرفعال‌شدن حالت تعمیر",
+            module='Settings', severity='CRITICAL',
+            before={'وضعیت': 'غیرفعال' if new_val else 'فعال'},
+            after={'وضعیت': 'فعال' if new_val else 'غیرفعال'}
+        )
         await _show_settings(query)
 
     elif action == 'set_maintenance_text':
@@ -338,8 +350,38 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'export_excel':
         await _export_excel(query, context)
 
+    elif action == 'channel_lock':
+        await _show_channel_lock(query)
+
+    elif action == 'channel_lock_add':
+        context.user_data['mode'] = 'add_required_channel'
+        await query.edit_message_text(
+            "🔒 <b>افزودن کانال اجباری</b>\n\n"
+            "آیدی عددی کانال (با علامت منفی، مثل <code>-1001234567890</code>) "
+            "و سپس نام کانال را با کاما جدا کنید:\n\n"
+            "📌 مثال:\n<code>-1001234567890, کانال اطلاع‌رسانی همیار</code>\n\n"
+            "<i>⚠️ ربات باید ادمین آن کانال باشد تا بتواند عضویت را چک کند.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data='admin:channel_lock')
+            ]])
+        )
+
+    elif action == 'channel_lock_remove':
+        ch_id = parts[2]
+        await db.remove_required_channel(ch_id)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "حذف کانال اجباری", module='Settings', severity='HIGH', target_id=ch_id
+        )
+        await query.answer("✅ کانال حذف شد!", show_alert=True)
+        await _show_channel_lock(query)
+
     elif action == 'audit_log':
-        await _show_audit_log(query, 'admin')
+        sev = parts[2] if len(parts) > 2 and parts[2] != 'all' else None
+        await _show_audit_log(query, 'admin', sev)
 
     # ══════════════════════════════════════════════
     # 📢 مدیریت اعلان‌ها — FIX جدید
@@ -365,6 +407,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🛡 سطوح دسترسی چندگانه ادمین (admin_roles)
     # ══════════════════════════════════════════════
     elif action == 'roles':
+        # FIX باگ: پاک‌سازی state نیمه‌کاره افزودن نقش — وگرنه بعد از
+        # لغو، mode='add_admin_role' باقی می‌ماند و پیام بعدی کاربر
+        # در هر بخش دیگری از ربات به اشتباه به‌عنوان آیدی پارس می‌شود.
+        for k in ('mode', 'new_role_type', 'new_role_intake'):
+            context.user_data.pop(k, None)
         await _show_roles(query)
 
     elif action == 'role_add_pick':
@@ -406,8 +453,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.remove_admin_role(target_uid)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
-        await send_audit_log(context.bot, 'admin', actor_name, uid,
-                              "حذف نقش فرعی ادمین", f"آیدی: {target_uid}")
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "حذف رول از ادمین", module='Roles', severity='HIGH',
+            target_id=str(target_uid)
+        )
         await query.answer("✅ نقش حذف شد!", show_alert=True)
         await _show_roles(query)
 
@@ -490,16 +540,37 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_user_detail(query, context, target_uid)
     elif action == 'suspend':
         target_uid = int(parts[2])
+        target_user = await db.get_user(target_uid)
+        target_name = target_user.get('name', '') if target_user else ''
         await db.update_user(target_uid, {'approved': False})
         await safe_send(context.bot, target_uid, "⚠️ دسترسی شما موقتاً تعلیق شد.")
         await query.answer("🚫 تعلیق شد!", show_alert=True)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "مسدودسازی کاربر", module='Users', severity='WARNING',
+            target_id=str(target_uid), details=f"نام: {target_name}"
+        )
         await _show_users_list(query, 0)
     elif action == 'approve':
         target_uid = int(parts[2])
+        prev_user = await db.get_user(target_uid)
+        # FIX جدید: تشخیص ثبت‌نام تازه (هنوز approved نبوده) از رفع تعلیق
+        was_already_registered = bool(prev_user and prev_user.get('registered_at'))
+        is_unban = was_already_registered and prev_user.get('approved') is False
         await db.update_user(target_uid, {'approved': True})
         user = await db.get_user(target_uid)
         await safe_send(context.bot, target_uid, "✅ <b>دسترسی شما تأیید شد!</b>", parse_mode='HTML', reply_markup=get_keyboard_for_uid(user, target_uid))
         await query.answer("✅ تأیید شد!", show_alert=True)
+        if is_unban:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                "رفع مسدودسازی کاربر", module='Users', severity='WARNING',
+                target_id=str(target_uid)
+            )
         await _show_pending(query)
     elif action == 'reject':
         target_uid = int(parts[2])
@@ -529,7 +600,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "حذف کامل کاربر", f"کاربر: {name} (آیدی: {target_uid})"
+            "حذف کاربر", module='Users', severity='WARNING',
+            target_id=str(target_uid), details=f"نام: {name}"
         )
         await _show_users_list(query, 0)
     elif action == 'pending':
@@ -642,18 +714,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'pending_q':
         await _pending_questions(query)
     elif action == 'approve_q':
-        await db.approve_question(parts[2])
+        qid = parts[2]
+        await db.approve_question(qid)
         await query.answer("✅ تأیید شد!")
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
-        await send_audit_log(context.bot, 'admin', actor_name, uid, "تأیید سوال دانشجو")
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "تأیید سوال", module='Questions', severity='INFO', target_id=qid
+        )
         await _pending_questions(query)
     elif action == 'reject_q':
-        await db.delete_question(parts[2])
+        qid = parts[2]
+        await db.delete_question(qid)
         await query.answer("🗑 رد شد!")
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
-        await send_audit_log(context.bot, 'admin', actor_name, uid, "رد و حذف سوال دانشجو")
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "رد و حذف سوال", module='Questions', severity='WARNING', target_id=qid
+        )
         await _pending_questions(query)
 
     # ══════════════════════════════════════════════
@@ -892,7 +972,8 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
     actor_name = actor_user.get('name', 'مدیر') if actor_user else 'مدیر'
     await send_audit_log(
         context.bot, 'admin', actor_name, actor_id,
-        "ارسال همگانی", f"هدف: {target} | موفق: {sent} | ناموفق: {failed}"
+        "ارسال همگانی", module='Notifications', severity='WARNING',
+        details=f"هدف: {target} | موفق: {sent} نفر | ناموفق: {failed} نفر"
     )
     await query.edit_message_text(
         f"📢 <b>ارسال همگانی تمام شد</b>\n\n━━━━━━━━━━━━━━━━\n"
@@ -1371,6 +1452,30 @@ async def _retry_failed_notif(query, context, run_id: str):
     await query.answer(f"✅ {sent} ارسال موفق، {failed} هنوز ناموفق", show_alert=True)
 
 
+async def _show_channel_lock(query):
+    """
+    FIX جدید: مدیریت قفل اجباری عضویت کانال — لیست کانال‌های فعلی
+    + دکمه افزودن/حذف. اگر هیچ کانالی نباشد، قفل عملاً غیرفعال است.
+    """
+    channels = await db.get_required_channels()
+    text = (
+        "🔒 <b>قفل اجباری عضویت کانال</b>\n━━━━━━━━━━━━━━━━\n\n"
+        + (
+            f"📌 {len(channels)} کانال فعال — کاربران عادی باید عضو همه آن‌ها باشند:\n\n"
+            if channels else
+            "⬜ هیچ کانالی تنظیم نشده — قفل غیرفعال است.\n\n"
+        )
+    )
+    keyboard = []
+    for ch in channels:
+        keyboard.append([InlineKeyboardButton(
+            f"🗑 {ch['title']}", callback_data=f'admin:channel_lock_remove:{ch["id"]}'
+        )])
+    keyboard.append([InlineKeyboardButton("➕ افزودن کانال جدید", callback_data='admin:channel_lock_add')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به تنظیمات", callback_data='admin:settings')])
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def _show_settings(query):
     """
     FIX جدید: صفحه تنظیمات کلی ربات — شامل اجباری‌بودن شماره
@@ -1397,33 +1502,72 @@ async def _show_settings(query):
         f"🛡 گروه لاگ پنل ادمین: {admin_grp_txt}\n"
         f"🎓 گروه لاگ پنل محتوا: {content_grp_txt}\n"
     )
+    channels = await db.get_required_channels()
+    channel_label = f"🔒 قفل کانال: {len(channels)} کانال فعال" if channels else "🔓 قفل کانال: غیرفعال"
+
     keyboard = [
         [InlineKeyboardButton(sid_toggle, callback_data='admin:toggle_require_sid')],
         [InlineKeyboardButton(maint_toggle, callback_data='admin:toggle_maintenance')],
         [InlineKeyboardButton("✏️ متن حالت تعمیر", callback_data='admin:set_maintenance_text')],
         [InlineKeyboardButton("🛡 تنظیم گروه لاگ ادمین", callback_data='admin:set_log_group_admin')],
         [InlineKeyboardButton("🎓 تنظیم گروه لاگ محتوا", callback_data='admin:set_log_group_content')],
+        [InlineKeyboardButton(channel_label, callback_data='admin:channel_lock')],
         [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
     ]
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-async def _show_audit_log(query, category: str):
-    """نمایش آخرین ۲۰ لاگ فعالیت حساس داخل خود ربات (علاوه بر ارسال به گروه)"""
-    logs = await db.get_recent_logs(category, limit=20)
+async def _show_audit_log(query, category: str, min_severity: str = None):
+    """
+    FIX جدید: نمایش لاگ فعالیت با ساختار کامل — severity icon، ماژول،
+    و تغییرات before/after به‌صورت خوانا. دکمه‌های فیلتر سطح اهمیت
+    اضافه شده تا طبق درخواست بشود فقط WARNING به بالا دید.
+    """
+    logs = await db.get_recent_logs(category, min_severity, limit=25)
+    sev_icon = {'INFO': '🟢', 'WARNING': '🟡', 'HIGH': '🟠', 'CRITICAL': '🔴'}
+
     if not logs:
-        text = "📋 <b>لاگ فعالیت</b>\n\nهنوز هیچ فعالیتی ثبت نشده."
+        text = "📋 <b>لاگ فعالیت</b>\n\nهیچ موردی با این فیلتر یافت نشد."
     else:
-        lines = ["📋 <b>۲۰ فعالیت اخیر</b>\n━━━━━━━━━━━━━━━━"]
+        lines = ["📋 <b>لاگ فعالیت</b>\n━━━━━━━━━━━━━━━━"]
         for log in logs:
             at = log.get('at', '')[:16].replace('T', ' ')
-            lines.append(f"\n🕐 {at}\n👤 {log.get('actor_name','')} — {log.get('action','')}")
-            if log.get('details'):
+            icon = sev_icon.get(log.get('severity', 'INFO'), '🟢')
+            module = log.get('module', '')
+            module_tag = f" [{module}]" if module else ""
+            lines.append(f"\n{icon} <code>{at}</code>{module_tag}")
+            lines.append(f"👤 {log.get('actor_name','')} — <b>{log.get('action','')}</b>")
+            before = log.get('before', {})
+            after  = log.get('after', {})
+            if before and after:
+                for key in after:
+                    old_v = before.get(key, '—')
+                    new_v = after.get(key, '—')
+                    lines.append(f"   {key}: <s>{old_v}</s> → {new_v}")
+            elif log.get('details'):
                 lines.append(f"   📝 {log['details']}")
         text = '\n'.join(lines)
+
+    filter_label = {
+        None: "همه سطوح", 'WARNING': "🟡 WARNING به بالا",
+        'HIGH': "🟠 HIGH به بالا", 'CRITICAL': "🔴 فقط CRITICAL",
+    }.get(min_severity, "همه سطوح")
+    text = f"🔽 فیلتر: {filter_label}\n\n" + text
+
+    keyboard = [
+        [
+            InlineKeyboardButton("همه" + (" ✅" if not min_severity else ""), callback_data='admin:audit_log:all'),
+            InlineKeyboardButton("🟡 WARNING+" + (" ✅" if min_severity == 'WARNING' else ""), callback_data='admin:audit_log:WARNING'),
+        ],
+        [
+            InlineKeyboardButton("🟠 HIGH+" + (" ✅" if min_severity == 'HIGH' else ""), callback_data='admin:audit_log:HIGH'),
+            InlineKeyboardButton("🔴 CRITICAL" + (" ✅" if min_severity == 'CRITICAL' else ""), callback_data='admin:audit_log:CRITICAL'),
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
     await query.edit_message_text(
         text[:4000], parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -1610,6 +1754,37 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = update.message.text.strip()
 
     # FIX جدید: متن دلخواه حالت تعمیر و نگهداری
+    if mode == 'add_required_channel':
+        context.user_data['mode'] = ''
+        parts_txt = [p.strip() for p in text.split(',', 1)]
+        if len(parts_txt) < 2 or not parts_txt[0].lstrip('-').isdigit():
+            await update.message.reply_text(
+                "❌ فرمت اشتباه!\nمثال: <code>-1001234567890, نام کانال</code>",
+                parse_mode='HTML'
+            )
+            return True
+        ch_id, ch_title = parts_txt[0], parts_txt[1]
+        ok = await db.add_required_channel(ch_id, ch_title)
+        if ok:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                "افزودن کانال اجباری", module='Settings', severity='HIGH',
+                target_id=ch_id, details=f"نام: {ch_title}"
+            )
+            await update.message.reply_text(
+                f"✅ کانال <b>{ch_title}</b> اضافه شد.\n\n"
+                "⚠️ مطمئن شوید ربات در این کانال ادمین است.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔒 بازگشت به مدیریت کانال", callback_data='admin:channel_lock')
+                ]])
+            )
+        else:
+            await update.message.reply_text("⚠️ این کانال قبلاً اضافه شده.")
+        return True
+
     if mode == 'set_maintenance_text':
         context.user_data['mode'] = ''
         if text in ('پیشفرض', 'پیش‌فرض', '-'):
@@ -1686,7 +1861,8 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
         await send_audit_log(
             context.bot, 'admin', actor_name, admin_uid,
-            "افزودن نقش فرعی ادمین", f"آیدی: {target_uid} | نقش: {role_label}{scope_txt}"
+            "انتساب رول به کاربر", module='Roles', severity='HIGH',
+            target_id=str(target_uid), details=f"نقش: {role_label}{scope_txt}"
         )
         try:
             await context.bot.send_message(
