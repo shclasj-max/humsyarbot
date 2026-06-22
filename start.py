@@ -279,6 +279,8 @@ async def _finish_registration(update, context, uid, name, group, intake, userna
             reply_markup=admin_keyboard())
         await _send_dashboard_by_id(context, uid)
     else:
+        # طبق درخواست صریح: درخواست ثبت‌نام جدید همیشه به پیوی شخصی
+        # ادمین ارشد می‌رود (نه فقط گروه) — چون اقدام فوری لازم دارد.
         try:
             await context.bot.send_message(
                 ADMIN_ID,
@@ -296,6 +298,15 @@ async def _finish_registration(update, context, uid, name, group, intake, userna
             )
         except Exception as e:
             logger.warning(f"Cannot notify admin: {e}")
+
+        # FIX جدید: ثبت در Audit Log گروه ادمین هم (severity پایین —
+        # رویداد روزمره است، اما باید در تاریخچه باشد)
+        from utils import send_audit_log
+        await send_audit_log(
+            context.bot, 'admin', name, uid,
+            "ثبت‌نام کاربر جدید", module='Users', severity='INFO', actor_role='student',
+            details=f"گروه: {group} | ورودی: {intake_label}"
+        )
 
         await query.edit_message_text(
             f"🎉 <b>ثبت‌نام با موفقیت انجام شد!</b>\n\n"
