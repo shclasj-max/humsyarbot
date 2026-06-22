@@ -712,9 +712,14 @@ class DB:
             except Exception: pass
         await self.log(uid, 'answer', {'qid': qid, 'correct': is_correct})
 
-    async def get_lessons(self):
-        """دروس بانک سوال از bs_lessons (پنل محتوا) — سینک کامل"""
-        lessons = await self.bs_lessons.find({}).sort([('term', 1), ('order', 1)]).to_list(500)
+    async def get_lessons(self, term: str = None):
+        """
+        دروس بانک سوال از bs_lessons (پنل محتوا) — سینک کامل.
+        FIX جدید: پارامتر term اختیاری — برای دسته‌بندی ترم به ترم
+        در بانک سوال (مثل بخش منابع علوم پایه)، نه نمایش تخت همه‌چی.
+        """
+        q = {'term': term} if term else {}
+        lessons = await self.bs_lessons.find(q).sort([('term', 1), ('order', 1)]).to_list(500)
         seen, names = set(), []
         for l in lessons:
             n = l.get('name', '').strip()
@@ -1100,23 +1105,53 @@ class DB:
     #  لاگ فعالیت حساس (audit_logs)
     # ══════════════════════════════════════════════════
 
-    async def log_action(self, actor_id: int, actor_name: str, action: str,
-                          details: str = '', category: str = 'admin') -> None:
+    # FIX جدید: سطوح اهمیت لاگ — برای فیلتر کردن نویز از سیگنال
+    SEVERITY_LEVELS = {
+        'INFO':     '🟢 INFO',
+        'WARNING':  '🟡 WARNING',
+        'HIGH':     '🟠 HIGH',
+        'CRITICAL': '🔴 CRITICAL',
+    }
+
+    async def log_action(self, actor_id: int, actor_name: str, actor_role: str,
+                          action: str, module: str, category: str = 'admin',
+                          severity: str = 'INFO', target_id: str = '',
+                          before: dict = None, after: dict = None,
+                          details: str = '') -> None:
         """
-        ثبت یک عمل حساس. category: 'admin' یا 'content'
-        تا بدانیم به کدام گروه تلگرام باید ارسال شود.
+        FIX جدید — ساختار کامل Audit Log طبق استاندارد حرفه‌ای:
+        زمان، شناسه/نام/رول ادمین، نوع عملیات، ماژول، هدف،
+        تغییرات قبل/بعد (در صورت وجود)، و severity.
+
+        category: 'admin' یا 'content' — کدام گروه تلگرام لاگ را ببیند.
+        severity: INFO / WARNING / HIGH / CRITICAL
+        before/after: dict ساده مثل {'field': 'status', 'value': 'open'}
+        برای نگه‌داشتن مقدار قبل و بعد تغییر — نه کل سند.
         """
         await self.audit_logs.insert_one({
             'actor_id':   actor_id,
             'actor_name': actor_name,
+            'actor_role': actor_role,
             'action':     action,
-            'details':    details,
+            'module':     module,
             'category':   category,
+            'severity':   severity,
+            'target_id':  target_id,
+            'before':     before or {},
+            'after':      after or {},
+            'details':    details,
             'at':         datetime.now().isoformat(),
         })
 
-    async def get_recent_logs(self, category: str = None, limit: int = 30) -> list:
-        q = {'category': category} if category else {}
+    async def get_recent_logs(self, category: str = None, min_severity: str = None,
+                               limit: int = 30) -> list:
+        q = {}
+        if category:
+            q['category'] = category
+        if min_severity:
+            order = ['INFO', 'WARNING', 'HIGH', 'CRITICAL']
+            idx = order.index(min_severity) if min_severity in order else 0
+            q['severity'] = {'$in': order[idx:]}
         return await self.audit_logs.find(q).sort('at', -1).to_list(limit)
 
     # ══════════════════════════════════════════════════
@@ -1306,6 +1341,29 @@ class DB:
             'new': new_count, 'reviewing': reviewing_count,
             'resolved': resolved_count, 'rejected': rejected_count,
         }
+
+
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: قفل اجباری عضویت کانال (Force Subscribe)
+    # ══════════════════════════════════════════════════
+
+    async def get_required_channels(self) -> list:
+        """لیست کانال‌هایی که عضویت در آن‌ها برای استفاده از ربات اجباری است"""
+        doc = await self.settings.find_one({'_id': 'global'})
+        return (doc or {}).get('required_channels', [])
+
+    async def add_required_channel(self, channel_id: str, channel_title: str, invite_link: str = ''):
+        channels = await self.get_required_channels()
+        if any(c['id'] == channel_id for c in channels):
+            return False
+        channels.append({'id': channel_id, 'title': channel_title, 'invite_link': invite_link})
+        await self.set_setting('required_channels', channels)
+        return True
+
+    async def remove_required_channel(self, channel_id: str):
+        channels = await self.get_required_channels()
+        channels = [c for c in channels if c['id'] != channel_id]
+        await self.set_setting('required_channels', channels)
 
 
 db = DB()
