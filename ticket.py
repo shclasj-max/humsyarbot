@@ -11,7 +11,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes
 from database import db
-from utils import fmt_jalali
+from utils import fmt_jalali, send_audit_log
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -188,6 +188,13 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid    = int(parts[2])
         ticket = await db.ticket_get(tid)
         await db.ticket_close(tid)
+        # FIX جدید: لاگ بستن تیکت
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "بستن تیکت", module='Tickets', severity='INFO', target_id=str(tid)
+        )
         if ticket:
             try:
                 await context.bot.send_message(
