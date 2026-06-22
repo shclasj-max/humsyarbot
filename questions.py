@@ -77,7 +77,11 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # ── بانک فایل ──
     elif action == 'file_bank':
-        await _fb_lessons(query, context)
+        await _fb_term_select(query, context)
+
+    elif action == 'fb_term':
+        term_idx = int(parts[2])
+        await _fb_lessons(query, context, term_idx)
 
     elif action == 'fb_lesson':
         idx     = int(parts[2])
@@ -141,7 +145,7 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _practice_menu(query)
 
     elif action == 'free':
-        await _lesson_select(query, context, 'free')
+        await _term_select(query, context, 'free')
 
     elif action == 'weak':
         context.user_data['quiz'] = {'mode': 'weak', 'answered': [], 'correct': 0, 'total': 999}
@@ -152,7 +156,15 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _next_q(query, context, uid)
 
     elif action == 'exam':
-        await _lesson_select(query, context, 'exam')
+        await _term_select(query, context, 'exam')
+
+    elif action == 'sel_term':
+        mode = parts[2]; term_idx = int(parts[3])
+        await _lesson_select(query, context, mode, term_idx)
+
+    elif action == 'sel_term_back':
+        mode = parts[2]
+        await _term_select(query, context, mode)
 
     elif action == 'sel_lesson':
         mode    = parts[2]; idx = int(parts[3])
@@ -597,14 +609,32 @@ async def handle_question_answer(update: Update, context: ContextTypes.DEFAULT_T
 #  بانک فایل
 # ══════════════════════════════════════════════════════════
 
-async def _fb_lessons(query, context):
-    lessons = await db.get_lessons()
+async def _fb_term_select(query, context):
+    """FIX جدید: لایه انتخاب ترم برای بانک فایل — مثل منابع علوم پایه"""
+    from utils import TERMS
+    keyboard = []
+    for i in range(0, len(TERMS), 2):
+        row = [InlineKeyboardButton(f"📘 {TERMS[i]}", callback_data=f'questions:fb_term:{i}')]
+        if i+1 < len(TERMS):
+            row.append(InlineKeyboardButton(f"📘 {TERMS[i+1]}", callback_data=f'questions:fb_term:{i+1}'))
+        keyboard.append(row)
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
+    await query.edit_message_text("📁 <b>بانک فایل سوالات</b>\n\nترم را انتخاب کنید:",
+                                  parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _fb_lessons(query, context, term_idx: int = None):
+    from utils import TERMS
+    term = TERMS[term_idx] if term_idx is not None and term_idx < len(TERMS) else None
+    context.user_data['fb_term_idx'] = term_idx
+    lessons = await db.get_lessons(term=term)
+    back_cb = 'questions:file_bank' if term_idx is not None else 'questions:main'
     if not lessons:
         await query.edit_message_text(
-            "📁 <b>بانک فایل</b>\n\n❌ هنوز فایلی آپلود نشده.",
+            f"📁 <b>بانک فایل</b>\n\n❌ هنوز فایلی برای {term or 'این بخش'} آپلود نشده.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
-                _back("🔙 بازگشت", "questions:main")
+                _back("🔙 بازگشت", back_cb)
             ])); return
     context.user_data['_fb_lessons'] = lessons
     keyboard = []
@@ -613,18 +643,22 @@ async def _fb_lessons(query, context):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:fb_lesson:{i+1}'))
         keyboard.append(row)
-    keyboard.append(_back("🔙 بازگشت", "questions:main"))
-    await query.edit_message_text("📁 <b>بانک فایل سوالات</b>\n\nدرس را انتخاب کنید:",
+    keyboard.append(_back("🔙 بازگشت", back_cb))
+    term_label = f" — {term}" if term else ""
+    await query.edit_message_text(f"📁 <b>بانک فایل سوالات{term_label}</b>\n\nدرس را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _fb_topics(query, context, lesson):
     topics = await db.get_topics(lesson)
     context.user_data['_fb_topics'] = topics
+    # FIX جدید: بازگشت به لیست درس‌های همان ترم، نه به لیست ترم‌ها
+    term_idx = context.user_data.get('fb_term_idx')
+    back_cb  = f'questions:fb_term:{term_idx}' if term_idx is not None else 'questions:file_bank'
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:fb_topic:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:fb_topic:all')])
-    keyboard.append(_back("🔙 بازگشت", "questions:file_bank"))
+    keyboard.append(_back("🔙 بازگشت", back_cb))
     await query.edit_message_text(f"📁 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -766,12 +800,38 @@ async def _generate_pdf(query, context, uid, lesson, topic, count):
 #  انتخاب درس/مبحث برای تمرین
 # ══════════════════════════════════════════════════════════
 
-async def _lesson_select(query, context, mode):
-    lessons = await db.get_lessons()
+async def _term_select(query, context, mode):
+    """
+    FIX جدید: لایه‌ی انتخاب ترم قبل از درس — مثل بخش منابع علوم پایه.
+    قبلاً همه دروس همه ترم‌ها یکجا و تخت نشان داده می‌شد که گیج‌کننده
+    و طولانی بود؛ حالا اول ترم، بعد فقط دروس همان ترم.
+    """
+    from utils import TERMS
+    keyboard = []
+    for i in range(0, len(TERMS), 2):
+        row = [InlineKeyboardButton(f"📘 {TERMS[i]}", callback_data=f'questions:sel_term:{mode}:{i}')]
+        if i+1 < len(TERMS):
+            row.append(InlineKeyboardButton(f"📘 {TERMS[i+1]}", callback_data=f'questions:sel_term:{mode}:{i+1}'))
+        keyboard.append(row)
+    keyboard.append(_back("🔙 بازگشت", "questions:practice"))
+    label = "شبیه‌سازی امتحان" if mode == 'exam' else "تمرین آزاد"
+    await query.edit_message_text(
+        f"📚 <b>{label}</b>\n\nترم را انتخاب کنید:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _lesson_select(query, context, mode, term_idx: int = None):
+    from utils import TERMS
+    term = TERMS[term_idx] if term_idx is not None and term_idx < len(TERMS) else None
+    context.user_data['sel_term_idx'] = term_idx
+    lessons = await db.get_lessons(term=term)
+    back_cb = f'questions:sel_term_back:{mode}' if term_idx is not None else 'questions:practice'
     if not lessons:
-        await query.edit_message_text("❌ هنوز سوالی موجود نیست.",
+        await query.edit_message_text(
+            f"❌ هنوز درسی برای {term or 'این بخش'} ثبت نشده.",
             reply_markup=InlineKeyboardMarkup([
-                _back("🔙 بازگشت", "questions:practice")
+                _back("🔙 بازگشت", back_cb)
             ])); return
     context.user_data['_lessons'] = lessons
     keyboard = []
@@ -780,9 +840,10 @@ async def _lesson_select(query, context, mode):
         if i+1 < len(lessons):
             row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:sel_lesson:{mode}:{i+1}'))
         keyboard.append(row)
-    keyboard.append(_back("🔙 بازگشت", "questions:practice"))
+    keyboard.append(_back("🔙 بازگشت", back_cb))
     label = "شبیه‌سازی امتحان" if mode == 'exam' else "تمرین آزاد"
-    await query.edit_message_text(f"📚 <b>{label}</b>\n\nدرس را انتخاب کنید:",
+    term_label = f" — {term}" if term else ""
+    await query.edit_message_text(f"📚 <b>{label}{term_label}</b>\n\nدرس را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
