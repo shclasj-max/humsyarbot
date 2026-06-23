@@ -62,12 +62,30 @@ async def _main_stats(query, uid: int):
 
 
 async def _weekly(query, uid: int):
+    """
+    FIX باگ مهم: progress_bar(pct, length, fill, empty) انتظار
+    pct در بازه ۰-۱۰۰ دارد، اما اینجا count خام (نه درصد) پاس
+    داده می‌شد و عدد ۱۰ به‌جای آرگومان length در جای fill (که
+    باید رشته باشد) می‌نشست — همین باعث خطای int+str می‌شد.
+    حالا درصد واقعی نسبت به max_val محاسبه و پاس داده می‌شود؛
+    و مقادیر غیرعددی هم با int() ایمن می‌شوند (طبق پیشنهاد سند).
+    """
     data    = await db.weekly_activity(uid)
+    # FIX: تبدیل ایمن به int برای جلوگیری از خطای نوع داده
+    safe_data = []
+    for date_str, count in data:
+        try:
+            safe_data.append((date_str, int(count)))
+        except (TypeError, ValueError):
+            safe_data.append((date_str, 0))
+    data = safe_data
+
     max_val = max((d[1] for d in data), default=1) or 1
     lines   = ["📅 <b>فعالیت ۷ روز گذشته</b>\n"]
     total   = 0
     for date_str, count in data:
-        bar    = progress_bar(count, max_val, 10)
+        pct    = (count / max_val) * 100 if max_val else 0
+        bar    = progress_bar(pct, 10)
         marker = "◀" if count == max_val and count > 0 else ""
         lines.append(f"<code>{date_str}</code>: {bar} <b>{count}</b> {marker}")
         total += count
