@@ -96,6 +96,9 @@ class DB:
 
     async def create_user(self, uid: int, name: str, student_id: str,
                           group: str, username: str = None, intake: str = ''):
+        # FIX طبق سند: مقادیر پیش‌فرض اعلان‌ها از تنظیمات پنل ادمین
+        # خوانده می‌شود — قبلاً هاردکد بود و فقط ۴ نوع را داشت
+        notif_defaults = await self.get_notif_defaults()
         await self.users.insert_one({
             'user_id':    uid,
             'name':       name,
@@ -106,12 +109,7 @@ class DB:
             'registered_at': datetime.now().isoformat(),
             'approved':   False,
             'role':       'student',
-            'notification_settings': {
-                'new_resources':  True,
-                'schedule':       True,
-                'exam':           True,
-                'daily_question': False,
-            },
+            'notification_settings': dict(notif_defaults),
             'total_answers':   0,
             'correct_answers': 0,
             'weak_topics':     [],
@@ -345,6 +343,28 @@ class DB:
             return await self.bs_content.find_one({'_id': ObjectId(cid)})
         except Exception:
             return None
+
+    async def bs_get_content_full_path(self, cid: str) -> dict:
+        """
+        FIX جدید: زنجیره کامل یک فایل محتوا — درس، ترم، مبحث، استاد.
+        برای گزارش ایراد دقیق و نوتیف منابع جدید استفاده می‌شود.
+        """
+        item = await self.bs_get_content_item(cid)
+        if not item:
+            return {}
+        session = await self.bs_get_session(item.get('session_id', ''))
+        lesson  = await self.bs_get_lesson(session.get('lesson_id', '')) if session else None
+        return {
+            'content':     item,
+            'session':     session or {},
+            'lesson':      lesson or {},
+            'lesson_name': lesson.get('name', '') if lesson else '',
+            'term':        lesson.get('term', '') if lesson else '',
+            'topic':       session.get('topic', '') if session else '',
+            'teacher':     session.get('teacher', '') or (lesson.get('teacher', '') if lesson else ''),
+            'content_type': item.get('type', ''),
+            'description':  item.get('description', ''),
+        }
 
     async def bs_delete_content(self, cid: str):
         try:
@@ -1364,6 +1384,34 @@ class DB:
         channels = await self.get_required_channels()
         channels = [c for c in channels if c['id'] != channel_id]
         await self.set_setting('required_channels', channels)
+
+
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: تنظیمات پیش‌فرض اعلان‌ها برای کاربران جدید
+    # ══════════════════════════════════════════════════
+
+    DEFAULT_NOTIF_FALLBACK = {
+        'new_resources': True, 'schedule': True, 'exam': True, 'makeup': True,
+        'daily_question': False, 'edu_message': True, 'general': True,
+    }
+
+    async def get_notif_defaults(self) -> dict:
+        """
+        مقادیر پیش‌فرض فعلی اعلان‌ها — قابل تغییر از پنل ادمین.
+        کاربران تازه ثبت‌نام‌شده همین مقادیر را به ارث می‌برند.
+        """
+        saved = await self.get_setting('notif_defaults', None)
+        if saved is None:
+            return dict(self.DEFAULT_NOTIF_FALLBACK)
+        # ترکیب با fallback برای کلیدهای جدیدی که ممکن است بعداً اضافه شوند
+        merged = dict(self.DEFAULT_NOTIF_FALLBACK)
+        merged.update(saved)
+        return merged
+
+    async def set_notif_default(self, ntype: str, value: bool):
+        defaults = await self.get_notif_defaults()
+        defaults[ntype] = value
+        await self.set_setting('notif_defaults', defaults)
 
 
 db = DB()
