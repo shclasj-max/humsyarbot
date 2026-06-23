@@ -202,6 +202,7 @@ ROOT_ONLY_ACTIONS = {
     'confirm_delete_user', 'delete_user',
     'content_admins', 'ca_set', 'ca_remove',
     'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',
+    'notif_defaults', 'notif_default_toggle',
     'channel_lock', 'channel_lock_add', 'channel_lock_remove',  # FIX جدید
 }
 
@@ -402,6 +403,24 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'notif_retry':
         run_id = parts[2]
         await _retry_failed_notif(query, context, run_id)
+
+    elif action == 'notif_defaults':
+        await _show_notif_defaults(query)
+
+    elif action == 'notif_default_toggle':
+        ntype = parts[2]
+        defaults = await db.get_notif_defaults()
+        new_val  = not defaults.get(ntype, True)
+        await db.set_notif_default(ntype, new_val)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "تغییر تنظیمات اعلان‌ها", module='Settings', severity='INFO',
+            details=f"پیش‌فرض {ntype}: {'روشن' if new_val else 'خاموش'}"
+        )
+        await query.answer("✅ بروزرسانی شد", show_alert=True)
+        await _show_notif_defaults(query)
 
     # ══════════════════════════════════════════════
     # 🛡 سطوح دسترسی چندگانه ادمین (admin_roles)
@@ -1382,12 +1401,38 @@ async def _show_notif_manage(query):
             InlineKeyboardButton("48 ساعت" + (" ✅" if interval == 48 else ""), callback_data='admin:notif_set_interval:48'),
             InlineKeyboardButton("72 ساعت" + (" ✅" if interval == 72 else ""), callback_data='admin:notif_set_interval:72'),
         ],
+        [InlineKeyboardButton("⚙️ وضعیت پیش‌فرض اعلان‌ها (کاربر جدید)", callback_data='admin:notif_defaults')],
         [InlineKeyboardButton("📚 تاریخچه: منابع جدید",   callback_data='admin:notif_history:new_resources')],
         [InlineKeyboardButton("📝 تاریخچه: یادآوری امتحان", callback_data='admin:notif_history:exam_reminder')],
         [InlineKeyboardButton("🧪 تاریخچه: سوال روزانه",   callback_data='admin:notif_history:daily_question')],
         [InlineKeyboardButton("📋 همه اجراهای اخیر",        callback_data='admin:notif_history')],
         [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
     ]
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_notif_defaults(query):
+    """
+    FIX طبق سند: تعیین وضعیت پیش‌فرض (روشن/خاموش) هر دسته اعلان
+    برای کاربران تازه ثبت‌نام‌شده — قابل تغییر، بدون اثر روی
+    کاربران فعلی که خودشان تنظیم کرده‌اند.
+    """
+    from notifications import NOTIF_ITEMS
+    defaults = await db.get_notif_defaults()
+    text = (
+        "⚙️ <b>وضعیت پیش‌فرض اعلان‌ها</b>\n━━━━━━━━━━━━━━━━\n\n"
+        "این تنظیمات فقط روی <b>کاربران جدید</b> اعمال می‌شود؛ "
+        "کاربران فعلی همان انتخاب خودشان را دارند."
+    )
+    keyboard = []
+    for key, label, _ in NOTIF_ITEMS:
+        is_on = defaults.get(key, True)
+        icon  = "🔔" if is_on else "🔕"
+        keyboard.append([InlineKeyboardButton(
+            f"{icon} {label} — {'روشن' if is_on else 'خاموش'}",
+            callback_data=f'admin:notif_default_toggle:{key}'
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:notif_manage')])
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
