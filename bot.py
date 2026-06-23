@@ -196,23 +196,52 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
 
         run_id = await db.notif_run_start('new_resources')
 
-        # ساخت خلاصه — حداکثر ۱۰ مورد در پیام، باقی به‌صورت تجمیعی
-        lines = []
-        for item in new_items[:10]:
-            desc = item.get('description', '') or dict(
-                pdf='جزوه', video='ویدیو', test='نمونه سوال', audio='فایل صوتی'
-            ).get(item.get('type', ''), 'فایل')
-            lines.append(f"• {desc}")
-        extra = len(new_items) - 10
-        extra_line = f"\n...و {extra} مورد دیگر" if extra > 0 else ""
+        # FIX طبق سند: گروه‌بندی بر اساس درس + نمایش نوع/مبحث/استاد —
+        # قبلاً فقط لیست تخت نام فایل‌ها بود که ارزش کمی داشت.
+        type_fa = {
+            'pdf': 'PDF', 'video': 'Video', 'voice': 'Voice',
+            'pptx': 'PowerPoint', 'test': 'نمونه سوال', 'audio': 'Voice',
+        }
+        by_lesson: dict = {}
+        lesson_order: list = []
+        for item in new_items:
+            path = await db.bs_get_content_full_path(str(item['_id']))
+            lesson_name = path.get('lesson_name', '') or 'سایر'
+            if lesson_name not in by_lesson:
+                by_lesson[lesson_name] = []
+                lesson_order.append(lesson_name)
+            ctype = type_fa.get(path.get('content_type', ''), path.get('content_type', '') or 'فایل')
+            desc  = path.get('description', '') or path.get('topic', '') or 'بدون عنوان'
+            by_lesson[lesson_name].append(f"• {ctype}: {desc}")
+
+        MAX_LESSONS_SHOWN = 4
+        MAX_ITEMS_PER_LESSON = 3
+        blocks = []
+        shown_count = 0
+        for lesson_name in lesson_order[:MAX_LESSONS_SHOWN]:
+            items = by_lesson[lesson_name]
+            block_lines = [f"📘 <b>{lesson_name}</b>"] + items[:MAX_ITEMS_PER_LESSON]
+            extra_in_lesson = len(items) - MAX_ITEMS_PER_LESSON
+            if extra_in_lesson > 0:
+                block_lines.append(f"  ...و {extra_in_lesson} مورد دیگر")
+            blocks.append('\n'.join(block_lines))
+            shown_count += len(items)
+
+        remaining_lessons = len(lesson_order) - MAX_LESSONS_SHOWN
+        remaining_items   = len(new_items) - shown_count
+        tail = ""
+        if remaining_lessons > 0:
+            tail = f"\n\n📦 و {remaining_items} مورد دیگر در {remaining_lessons} درس دیگر"
 
         text = (
-            "📚 <b>منابع جدیدی به سامانه اضافه شده‌اند</b>\n\n"
-            + '\n'.join(lines) + extra_line +
-            "\n\nبرای مشاهده وارد بخش «📚 منابع» شوید.\n\n"
-            "<i>⚙️ اگر تمایل به دریافت این اعلان ندارید:\n"
-            "🔔 اعلان‌ها ← منابع جدید ← خاموش</i>"
+            "📚 <b>منابع جدیدی اضافه شده‌اند</b>\n\n"
+            + '\n\n'.join(blocks) + tail +
+            "\n\n📚 برای مشاهده کامل: بخش «منابع»\n\n"
+            "<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← منابع جدید</i>"
         )
+
+        if len(text) > 3800:
+            text = text[:3700] + "\n\n<i>... برای مشاهده کامل وارد بخش «منابع» شوید</i>"
 
         users = await db.notif_users('new_resources')
         sent, failed, failed_ids = 0, 0, []
@@ -513,6 +542,31 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                   'report_target_type', 'report_target_id', 'report_reason'):
             context.user_data.pop(k, None)
         # ادامه نده — اجازه بده همین تابع پایین‌تر پیام دکمه را عادی مسیر کند
+
+    # FIX باگ مهم: 'NoneType' object has no attribute 'text' —
+    # وقتی mode فعال است (منتظر یک ورودی متنی) ولی کاربر media
+    # (عکس/فایل/استیکر/ویس) بدون متن می‌فرستد، update.message.text
+    # می‌شود None و توابع پایین‌دستی با .strip() کرش می‌کنند.
+    # broadcast و چند mode خاص که خودشان از فایل/عکس پشتیبانی
+    # می‌کنند (مثل آپلود فایل بانک سوال) از این گارد معاف هستند.
+    active_mode    = context.user_data.get('mode', '')
+    active_ca_mode = context.user_data.get('ca_mode', '')
+    active_ticket_mode = context.user_data.get('ticket_mode', '')
+    MEDIA_ALLOWED_MODES = {
+        'broadcast', 'qbank_awaiting_desc', 'waiting_description',
+        'waiting_ref_description', 'creating_question',
+        'waiting_file', 'waiting_ref_file',  # ca_mode هایی که فایل می‌گیرند
+    }
+    any_active_mode = active_mode or active_ca_mode or active_ticket_mode
+    is_media_allowed = (
+        active_mode in MEDIA_ALLOWED_MODES or active_ca_mode in MEDIA_ALLOWED_MODES
+    )
+    if (any_active_mode and not is_media_allowed
+            and update.message is not None and not update.message.text):
+        await update.message.reply_text(
+            "⚠️ لطفاً پاسخ خود را به‌صورت متن ارسال کنید."
+        )
+        return
 
     # ۱. FIX: broadcast — باید اول از همه چک بشه
     if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
