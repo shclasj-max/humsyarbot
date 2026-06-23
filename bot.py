@@ -391,6 +391,12 @@ async def maintenance_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     و با ApplicationHandlerStop از اجرای ادامه‌ی handlerها جلوگیری
     می‌شود — بدون نیاز به لمس کردن ده‌ها تابع callback موجود.
     """
+    # FIX باگ مهم: این گیت فقط باید روی پیوی خصوصی اثر کند —
+    # وگرنه پیام «ربات در حال بروزرسانی است» در گروه‌های لاگ
+    # (ادمین/محتوا) هم به اعضای آن گروه نمایش داده می‌شد.
+    if update.effective_chat is None or update.effective_chat.type != 'private':
+        return
+
     uid = update.effective_user.id if update.effective_user else None
     if uid is None or uid == ADMIN_ID:
         return  # ادمین ارشد همیشه دسترسی کامل دارد
@@ -419,6 +425,10 @@ async def channel_lock_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     اولویت دارد (maintenance_gate با ApplicationHandlerStop متوقف
     می‌کند و این تابع اصلاً اجرا نمی‌شود).
     """
+    # FIX باگ مهم: همین مشکل maintenance_gate — فقط پیوی خصوصی
+    if update.effective_chat is None or update.effective_chat.type != 'private':
+        return
+
     uid = update.effective_user.id if update.effective_user else None
     if uid is None or uid == ADMIN_ID:
         return
@@ -496,10 +506,13 @@ async def channel_lock_check_callback(update: Update, context: ContextTypes.DEFA
 
 async def update_last_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    FIX جدید: برای گزارش هفتگی نیاز داریم بدانیم آخرین فعالیت هر
-    کاربر کِی بوده. با group=-1 (قبل از همه چیز) فقط یک فیلد آپدیت
-    می‌شود — سبک و بدون اثر جانبی روی منطق دیگر.
+    برای گزارش هفتگی نیاز داریم بدانیم آخرین فعالیت هر کاربر کِی
+    بوده. فقط در پیوی خصوصی معنی دارد — فعالیت یک کاربر در گروه
+    لاگ ربات (که اصلاً عضو معمولی ربات نیست) را نباید به‌عنوان
+    «فعالیت در ربات» ثبت کرد.
     """
+    if update.effective_chat is None or update.effective_chat.type != 'private':
+        return
     uid = update.effective_user.id if update.effective_user else None
     if uid is None:
         return
@@ -695,7 +708,10 @@ def build_application() -> Application:
     # NOTE: BROADCAST از اینجا حذف شد — در unified_text_handler مدیریت میشه
     conv = ConversationHandler(
         entry_points=[
-            CommandHandler('start', start_handler),
+            # FIX باگ مهم: /start و همه‌ی mode‌های گفتگو فقط در پیوی
+            # خصوصی فعال باشند — وگرنه ربات روی پیام‌های گروه‌های لاگ
+            # (ادمین/محتوا) هم واکنش می‌داد و می‌گفت «/start بزنید».
+            CommandHandler('start', start_handler, filters=filters.ChatType.PRIVATE),
             CallbackQueryHandler(questions_callback,      pattern=r'^questions:cr_topic:'),
             CallbackQueryHandler(content_admin_callback,  pattern=r'^ca:'),
         ],
@@ -704,7 +720,7 @@ def build_application() -> Application:
                 CallbackQueryHandler(register_start_callback, pattern=r'^register:')
             ],
             STEP_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, step_name_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, step_name_handler),
                 CallbackQueryHandler(register_start_callback, pattern=r'^register:cancel'),
             ],
             STEP_GROUP: [
@@ -717,48 +733,49 @@ def build_application() -> Application:
                 CallbackQueryHandler(register_intake_callback, pattern=r'^register:intake:')
             ],
             STEP_STUDENT_ID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, step_student_id_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, step_student_id_handler),
             ],
             ANSWERING: [
                 CallbackQueryHandler(handle_question_answer, pattern=r'^answer:')
             ],
             CREATING_Q: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_create_question_steps),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_create_question_steps),
                 CallbackQueryHandler(handle_difficulty_choice, pattern=r'^qd:'),
                 CallbackQueryHandler(questions_callback, pattern=r'^questions:'),
             ],
             CA_WAITING_FILE: [
                 MessageHandler(
-                    filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE,
+                    (filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE)
+                    & filters.ChatType.PRIVATE,
                     ca_file_handler
                 ),
                 CallbackQueryHandler(content_admin_callback, pattern=r'^ca:'),
-                CommandHandler('cancel', cancel_handler),
+                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
             ],
             CA_WAITING_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ca_text_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ca_text_handler),
                 CallbackQueryHandler(content_admin_callback, pattern=r'^ca:'),
-                CommandHandler('cancel', cancel_handler),
+                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
             ],
             PROFILE_EDIT_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_text_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, profile_text_handler),
                 CallbackQueryHandler(profile_callback, pattern=r'^profile:'),
-                CommandHandler('cancel', cancel_handler),
+                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
             ],
             TICKET_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_message_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ticket_message_handler),
                 CallbackQueryHandler(ticket_callback, pattern=r'^ticket:'),
-                CommandHandler('cancel', cancel_handler),
+                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
             ],
             TICKET_REPLY_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_message_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ticket_message_handler),
                 CallbackQueryHandler(ticket_callback, pattern=r'^ticket:'),
-                CommandHandler('cancel', cancel_handler),
+                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
             ],
         },
         fallbacks=[
-            CommandHandler('start', start_handler),
-            CommandHandler('cancel', cancel_handler),
+            CommandHandler('start', start_handler, filters=filters.ChatType.PRIVATE),
+            CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
         ],
         allow_reentry=True,
         per_message=False,
@@ -808,15 +825,20 @@ def build_application() -> Application:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
 
     # ── File handler — همه انواع فایل ──
+    # FIX باگ مهم: فقط در پیوی خصوصی فعال باشد — وگرنه فایل‌هایی
+    # که در گروه‌های لاگ (ادمین/محتوا) فرستاده شوند هم پردازش می‌شدند.
     app.add_handler(MessageHandler(
-        filters.Document.ALL | filters.VIDEO | filters.AUDIO |
-        filters.VOICE | filters.PHOTO,
+        (filters.Document.ALL | filters.VIDEO | filters.AUDIO |
+         filters.VOICE | filters.PHOTO) & filters.ChatType.PRIVATE,
         unified_file_handler
     ))
 
     # ── Text handler ──
+    # FIX باگ اصلی گزارش‌شده: این handler عمومی هیچ فیلتر چت نداشت،
+    # پس روی هر پیام متنی در گروه‌های لاگ هم اجرا می‌شد و از طریق
+    # route_message پاسخ «/start بزنید» می‌فرستاد. حالا فقط پیوی.
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
         unified_text_handler
     ))
 
