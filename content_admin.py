@@ -275,8 +275,21 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             ]))
 
     elif action == 'confirm_del_content':
-        cid = parts[2]; await db.bs_delete_content(cid)
+        cid = parts[2]
+        # FIX طبق سند: حذف منابع/جزوات قبلاً اصلاً لاگ نمی‌شد
+        item_before = await db.bs_get_content_item(cid)
+        await db.bs_delete_content(cid)
         sid = context.user_data.get('ca_session_id','')
+        if item_before:
+            from utils import send_audit_log
+            actor = await db.get_user(uid)
+            actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            type_fa = dict(CONTENT_TYPES).get(item_before.get('type', ''), 'فایل')
+            await send_audit_log(
+                context.bot, 'content', actor_name, uid,
+                f"حذف {type_fa}", module='Content', severity='WARNING',
+                target_id=cid, details=item_before.get('description', '')[:60]
+            )
         await query.edit_message_text("✅ محتوا حذف شد.",
             reply_markup=_back_btn("🔙 بازگشت", f'ca:session:{sid}'))
 
