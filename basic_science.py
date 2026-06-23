@@ -192,9 +192,10 @@ async def _download_content(query, content_id: str, uid: int):
     parts.append(f"📥 {item.get('downloads', 0)} دانلود")
     caption = '\n'.join(parts)
 
-    # FIX جدید: دکمه گزارش ایراد جزوه زیر فایل ارسالی
+    # FIX طبق سند: متن دکمه باید عمومی باشد چون فایل می‌تواند
+    # PDF/ویدیو/ویس/پاورپوینت باشد — نه فقط «جزوه»
     report_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("⚠️ گزارش ایراد جزوه", callback_data=f'report:resource:{content_id}')
+        InlineKeyboardButton("⚠️ گزارش ایراد", callback_data=f'report:resource:{content_id}')
     ]])
     try:
         if ctype == 'video':
