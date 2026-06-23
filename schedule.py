@@ -144,8 +144,9 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == 'main':
         await _schedule_main(query, user_group)
 
-    elif action == 'weekly_chart':
-        await _show_weekly_chart(query, user_group)
+    elif action == 'group_view':
+        group_filter = parts[2] if len(parts) > 2 and parts[2] else user_group
+        await _show_group_schedule(query, group_filter)
 
     # ══════════════════════════════════════════════
     # FIX جدید: فلوی پیش‌نمایش قبل از ثبت برنامه
@@ -193,6 +194,11 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'type':
         stype        = parts[2] if len(parts) > 2 else 'class'
         group_filter = parts[3] if len(parts) > 3 else user_group
+        # FIX سازگاری به‌عقب: اگه کسی هنوز callback قدیمی type:class داشت
+        # (مثلاً از پیام‌های قدیمی)، به همان صفحه یکپارچه هدایت شود
+        if stype == 'class':
+            await _show_group_schedule(query, group_filter)
+            return
         items        = await db.get_schedules(stype=stype, group=group_filter or None)
         title        = TYPE_NAMES.get(stype, stype)
         if group_filter:
@@ -304,20 +310,23 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════
 
 async def _schedule_main(query, user_group: str):
+    """
+    FIX طبق سند: «لیست کلاس‌ها» و «جدول هفتگی» قبلاً دو صفحه جدا
+    برای یک داده بودند — گیج‌کننده و تکراری. حالا فقط یک دکمه
+    «📊 برنامه کلاسی» وجود دارد که به _show_group_schedule می‌رود؛
+    آن تابع همه‌چیز (جدول هفته + امتحانات مرتبط) را یکجا نشان می‌دهد.
+    """
     g = user_group or ''
-    g_label = f" گروه {g}" if g else ""
+    g_label = f" — گروه {g}" if g else ""
     keyboard = [
-        [InlineKeyboardButton("📊 جدول هفتگی کلاس‌ها", callback_data='schedule:weekly_chart')],
+        [InlineKeyboardButton(f"📊 برنامه کلاسی{g_label}", callback_data=f'schedule:group_view:{g}')],
+        [InlineKeyboardButton("📝 امتحانات",      callback_data=f'schedule:type:exam:{g}')],
         [
-            InlineKeyboardButton(f"📖 لیست کلاس‌ها{g_label}", callback_data=f'schedule:type:class:{g}'),
-            InlineKeyboardButton("📝 امتحانات",           callback_data=f'schedule:type:exam:{g}'),
+            InlineKeyboardButton("🔄 جبرانی",        callback_data=f'schedule:type:makeup:{g}'),
+            InlineKeyboardButton("⏳ امتحانات نزدیک", callback_data='schedule:upcoming'),
         ],
-        [
-            InlineKeyboardButton("🔄 جبرانی",             callback_data=f'schedule:type:makeup:{g}'),
-            InlineKeyboardButton("⏳ امتحانات نزدیک",      callback_data='schedule:upcoming'),
-        ],
-        [InlineKeyboardButton("👥 تغییر گروه نمایش",     callback_data='schedule:group_sel:class')],
-        [InlineKeyboardButton("🔙 بازگشت",                callback_data='dashboard:refresh')],
+        [InlineKeyboardButton("👥 تغییر گروه نمایش", callback_data='schedule:group_sel:class')],
+        [InlineKeyboardButton("🔙 بازگشت",           callback_data='dashboard:refresh')],
     ]
     await query.edit_message_text(
         f"📅 <b>برنامه و امتحانات</b>\n"
@@ -327,17 +336,17 @@ async def _schedule_main(query, user_group: str):
     )
 
 
-async def _show_weekly_chart(query, user_group: str):
+async def _show_group_schedule(query, user_group: str):
     """
-    FIX جدید: نمایش برنامه کلاسی هفته جاری به‌صورت جدول شنبه تا جمعه.
-    کلاس‌های منعطف (flex_type='flexible') با برچسب «زمان متغیر» و
-    آخرین زمان اعلام‌شده نشان داده می‌شوند.
+    FIX طبق سند: منبع واحد برنامه گروه — جدول هفته (شنبه تا جمعه)
+    + برجسته‌سازی روز جاری + کلاس‌های منعطف مشخص + امتحانات مرتبط
+    همان گروه، همه در یک صفحه. دیگر صفحه‌ی جدا «جدول هفتگی» وجود ندارد.
     """
     from datetime import datetime, timedelta
     today = datetime.now()
-    # شروع هفته جاری از شنبه (نزدیک‌ترین شنبه قبل یا امروز)
     py_wd = today.weekday()  # 0=دوشنبه...6=یکشنبه
     days_since_sat = {5: 0, 6: 1, 0: 2, 1: 3, 2: 4, 3: 5, 4: 6}[py_wd]
+    today_idx  = days_since_sat  # ایندکس امروز در هفته شنبه‌محور (۰=شنبه)
     week_start = today - timedelta(days=days_since_sat)
     week_end   = week_start + timedelta(days=6)
 
@@ -347,21 +356,24 @@ async def _show_weekly_chart(query, user_group: str):
     all_classes = await db.get_schedules(stype='class', upcoming=False, group=user_group or None)
     week_classes = [c for c in all_classes if start_str <= c.get('date', '') <= end_str]
 
-    # گروه‌بندی بر اساس روز هفته (۰=شنبه ... ۶=جمعه)
     by_day = {i: [] for i in range(7)}
     for c in week_classes:
         idx = jalali_weekday_index(c.get('date', ''))
         by_day[idx].append(c)
 
+    g_label = f" — گروه {user_group}" if user_group else ""
     lines = [
-        "📊 <b>جدول هفتگی کلاس‌ها</b>",
+        f"📊 <b>برنامه کلاسی{g_label}</b>",
         f"🗓 {fmt_jalali(start_str).split('(')[0].strip()} تا {fmt_jalali(end_str).split('(')[0].strip()}",
         "━━━━━━━━━━━━━━━━",
     ]
     has_any = False
     for i, day_name in enumerate(JALALI_WEEK_SAT_FIRST):
         items = sorted(by_day[i], key=lambda x: x.get('time', ''))
-        lines.append(f"\n📅 <b>{day_name}</b>")
+        # FIX: برجسته‌سازی روز جاری
+        is_today = (i == today_idx)
+        day_header = f"👉 <b>{day_name} (امروز)</b>" if is_today else f"📅 <b>{day_name}</b>"
+        lines.append(f"\n{day_header}")
         if not items:
             lines.append("   <i>کلاسی ندارید</i>")
             continue
@@ -382,9 +394,19 @@ async def _show_weekly_chart(query, user_group: str):
     if not has_any:
         lines.append("\n<i>هیچ کلاسی برای این هفته ثبت نشده است.</i>")
 
+    # FIX طبق سند: امتحانات مرتبط همین گروه هم در همان صفحه
+    exams = await db.upcoming_exams(14)
+    group_exams = [e for e in exams if e.get('group', 'هر دو') in ('هر دو', user_group, '')]
+    if group_exams:
+        lines.append("\n━━━━━━━━━━━━━━━━")
+        lines.append("📝 <b>امتحانات نزدیک</b>")
+        for e in group_exams[:5]:
+            jalali = fmt_jalali(e.get('date', ''))
+            lines.append(f"   • {e.get('lesson','')} — {jalali} {e.get('time','')}")
+
     text = '\n'.join(lines)
     if len(text) > 4000:
-        text = text[:3900] + "\n\n<i>... برای دیدن کامل، از لیست کلاس‌ها استفاده کنید</i>"
+        text = text[:3900] + "\n\n<i>... برای جزئیات کامل با ادمین هماهنگ کنید</i>"
 
     await query.edit_message_text(
         text, parse_mode='HTML',
@@ -566,19 +588,23 @@ async def handle_flex_time_change_text(update: Update, context: ContextTypes.DEF
 
 
 async def show_schedule_main(message: Message, uid: int, user: dict):
+    """
+    FIX باگ مهم: این تابع یک کپی موازی و قدیمی از _schedule_main بود
+    که هنوز دکمه‌های «کلاس‌ها» و «جدول هفتگی» را جدا نشان می‌داد —
+    دقیقاً همان منشاء تناقضی که کاربر گزارش داد. حالا دقیقاً همان
+    منوی یکپارچه‌ی _schedule_main را می‌سازد (یک دکمه «برنامه کلاسی»).
+    """
     user_group = user.get('group', '') if user else ''
     g = user_group or ''
-    g_label = f" گروه {g}" if g else ""
+    g_label = f" — گروه {g}" if g else ""
     keyboard = [
+        [InlineKeyboardButton(f"📊 برنامه کلاسی{g_label}", callback_data=f'schedule:group_view:{g}')],
+        [InlineKeyboardButton("📝 امتحانات",      callback_data=f'schedule:type:exam:{g}')],
         [
-            InlineKeyboardButton(f"📖 کلاس‌ها{g_label}", callback_data=f'schedule:type:class:{g}'),
-            InlineKeyboardButton("📝 امتحانات",           callback_data=f'schedule:type:exam:{g}'),
+            InlineKeyboardButton("🔄 جبرانی",        callback_data=f'schedule:type:makeup:{g}'),
+            InlineKeyboardButton("⏳ امتحانات نزدیک", callback_data='schedule:upcoming'),
         ],
-        [
-            InlineKeyboardButton("🔄 جبرانی",             callback_data=f'schedule:type:makeup:{g}'),
-            InlineKeyboardButton("⏳ امتحانات نزدیک",      callback_data='schedule:upcoming'),
-        ],
-        [InlineKeyboardButton("👥 تغییر گروه نمایش",     callback_data='schedule:group_sel:class')],
+        [InlineKeyboardButton("👥 تغییر گروه نمایش", callback_data='schedule:group_sel:class')],
     ]
     await message.reply_text(
         f"📅 <b>برنامه و امتحانات</b>\n"
