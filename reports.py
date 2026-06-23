@@ -46,6 +46,14 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts  = query.data.split(':')
     action = parts[1] if len(parts) > 1 else ''
 
+    # FIX امنیتی: دکمه‌های مدیریتی (manage/view/status) داخل پیام‌های
+    # گروه لاگ محتوا فرستاده می‌شوند — هر عضو آن گروه نباید بتواند
+    # با زدن دکمه، گزارش‌ها را مدیریت کند؛ فقط ادمین محتوا/ارشد.
+    MANAGEMENT_ACTIONS = {'manage', 'view', 'status'}
+    if action in MANAGEMENT_ACTIONS and not await db.is_content_admin(uid):
+        await query.answer("❌ شما دسترسی مدیریت گزارشات را ندارید.", show_alert=True)
+        return
+
     if action in ('question', 'resource'):
         target_type = action
         target_id   = parts[2]
