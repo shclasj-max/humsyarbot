@@ -14,6 +14,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from database import db
+from utils import send_audit_log
 
 logger     = logging.getLogger(__name__)
 ADMIN_ID   = int(os.getenv('ADMIN_ID', '0'))
@@ -273,8 +274,18 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == 'ca_q_del':
         qid = parts[2] if len(parts) > 2 else ''
         if await db.is_content_admin(uid):
+            # FIX طبق سند: حذف سوال در پنل محتوا قبلاً اصلاً لاگ نمی‌شد
+            q_doc = await db.get_question_by_id(qid)
             await db.delete_question(qid)
             await query.answer("🗑 سوال حذف شد!", show_alert=True)
+            actor = await db.get_user(uid)
+            actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            await send_audit_log(
+                context.bot, 'content', actor_name, uid,
+                "حذف سوال", module='Questions', severity='WARNING',
+                target_id=qid,
+                details=(q_doc.get('question', '')[:60] if q_doc else '')
+            )
             await _ca_question_list(query, uid, context)
 
     elif action == 'ca_q_approve':
@@ -282,6 +293,12 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if await db.is_content_admin(uid):
             await db.approve_question(qid)
             await query.answer("✅ تأیید شد!", show_alert=True)
+            actor = await db.get_user(uid)
+            actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            await send_audit_log(
+                context.bot, 'content', actor_name, uid,
+                "تأیید سوال", module='Questions', severity='INFO', target_id=qid
+            )
             await _ca_question_list(query, uid, context)
 
     elif action == 'ca_q_filter':
