@@ -18,6 +18,9 @@ NOTIF_ITEMS = [
     ('edu_message',    '🎓 پیام‌های آموزشی',      'نکات و محتوای آموزشی از تیم همیار'),
     ('general',        '📢 اطلاعیه‌های عمومی',    'اخبار و اطلاعیه‌های کلی ربات'),
 ]
+# FIX طبق سند: مقادیر پیش‌فرض دیگر هاردکد نیستند — از db.get_notif_defaults()
+# خوانده می‌شوند که از پنل ادمین قابل تغییر است. این دیکشنری فقط
+# fallback اضطراری است برای زمانی که دیتابیس در دسترس نباشد.
 _DEFAULTS = {
     'new_resources': True, 'schedule': True, 'exam': True, 'makeup': True,
     'daily_question': False, 'edu_message': True, 'general': True,
@@ -38,7 +41,8 @@ async def notifications_callback(update: Update, context: ContextTypes.DEFAULT_T
         ntype   = parts[2]
         user    = await db.get_user(uid)
         s       = user.get('notification_settings', {}) if user else {}
-        current = s.get(ntype, _DEFAULTS.get(ntype, True))
+        defaults = await db.get_notif_defaults()
+        current = s.get(ntype, defaults.get(ntype, True))
         await db.update_user(uid, {f'notification_settings.{ntype}': not current})
         status  = "✅ فعال" if not current else "❌ غیرفعال"
         await query.answer(f"{status} شد")
@@ -60,13 +64,14 @@ async def notifications_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def _show_settings(query_or_msg, uid: int, edit: bool = True):
     user = await db.get_user(uid)
     s    = user.get('notification_settings', {}) if user else {}
-    active = sum(1 for k, _, _ in NOTIF_ITEMS if s.get(k, _DEFAULTS.get(k, True)))
+    defaults = await db.get_notif_defaults()
+    active = sum(1 for k, _, _ in NOTIF_ITEMS if s.get(k, defaults.get(k, True)))
 
     keyboard = []
     lines    = [f"🔔 <b>تنظیمات اعلان‌ها</b>", f"فعال: {active} از {len(NOTIF_ITEMS)}", "━━━━━━━━━━━━━━━━\n"]
 
     for key, label, desc in NOTIF_ITEMS:
-        is_on  = s.get(key, _DEFAULTS.get(key, True))
+        is_on  = s.get(key, defaults.get(key, True))
         icon   = "🔔" if is_on else "🔕"
         status = "روشن" if is_on else "خاموش"
         keyboard.append([InlineKeyboardButton(
