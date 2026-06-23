@@ -113,20 +113,21 @@ async def build_dashboard_text(uid: int) -> tuple:
 
 
 async def _build_leaderboard_text(uid: int) -> tuple:
+    """
+    FIX طبق سند: طراحی قبلی شلوغ بود (گروه + ورودی + جزئیات زیاد
+    در هر سطر). حالا مینیمال — فقط نام، کسر صحیح/کل، درصد.
+    """
     leaders = await db.get_leaderboard(10)
     lines   = ["🏆 <b>جدول برترین‌ها</b>\n━━━━━━━━━━━━━━━━\n"]
-    medals  = ['🥇', '🥈', '🥉'] + ['🎖'] * 7
+    medals  = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
     for i, u in enumerate(leaders):
         name    = u.get('name', 'کاربر')
-        correct = u.get('correct_answers', 0)
-        total   = u.get('total_answers', 0)
-        pct     = round(correct / total * 100, 1) if total > 0 else 0
-        marker  = " ← شما" if u.get('user_id') == uid else ""
-        intake  = f" | {u.get('intake','')}" if u.get('intake') else ""
-        lines.append(
-            f"{medals[i]} <b>{name}</b> — گروه {u.get('group', '')}{intake}\n"
-            f"   ✅ {correct} صحیح از {total}  |  📈 {pct}%{marker}"
-        )
+        correct = int(u.get('correct_answers', 0) or 0)
+        total   = int(u.get('total_answers', 0) or 0)
+        pct     = round(correct / total * 100) if total > 0 else 0
+        marker  = " 👈" if u.get('user_id') == uid else ""
+        lines.append(f"{medals[i]} <b>{name}</b>{marker}")
+        lines.append(f"     {correct}/{total} صحیح  •  {pct}%\n")
     text = '\n'.join(lines)
     kb   = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔙 بازگشت", callback_data='dashboard:refresh')
