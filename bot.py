@@ -341,7 +341,36 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
 #  Error Handler مرکزی
 # ══════════════════════════════════════════════════
 
+# FIX باگ: این خطاها کاملاً طبیعی و بی‌خطر هستند — رفتار عادی
+# کاربران (کلیک روی دکمه قدیمی، زدن دکمه‌ای که چیزی تغییر نمی‌دهد)
+# نه نشانه‌ی یک مشکل واقعی. بدون این فیلتر، هر کدام پیوی شخصی
+# ادمین ارشد را شلوغ می‌کرد و خطاهای واقعی در میانشان گم می‌شدند.
+SILENT_ERRORS = (
+    'Query is too old',
+    'query id is invalid',
+    'Message is not modified',
+    'MESSAGE_ID_INVALID',
+    'message to edit not found',
+    'message to delete not found',
+    "Message can't be deleted",
+    'Have no rights to send a message',
+)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err_str = str(context.error)
+
+    # خطای بی‌خطر — فقط در لاگ سرور، بدون پیوی به ادمین
+    if any(e in err_str for e in SILENT_ERRORS):
+        logger.warning(f"⚠️ Silent error (نادیده گرفته شد): {err_str[:150]}")
+        if isinstance(update, Update) and update.callback_query:
+            try:
+                await update.callback_query.answer()
+            except Exception:
+                pass
+        return
+
+    # از اینجا به بعد فقط خطاهای واقعی — همان‌طور که بود
     logger.error(f"Exception: {context.error}", exc_info=context.error)
     if ADMIN_ID:
         try:
@@ -351,7 +380,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
                 uid_info = f"\n👤 کاربر: {u.full_name} | آیدی: {u.id}"
             err_text = (
                 f"⚠️ <b>خطای ربات</b>{uid_info}\n"
-                f"<code>{str(context.error)[:300]}</code>"
+                f"<code>{err_str[:300]}</code>"
             )
             await context.bot.send_message(ADMIN_ID, err_text, parse_mode='HTML')
         except Exception:
