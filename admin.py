@@ -1133,8 +1133,15 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
 # ══════════════════════════════════════════════════
 
 async def _show_bot_status(query, context):
+    """
+    FIX جدید: مانیتورینگ واقعی سلامت سیستم با psutil — مصرف RAM/CPU
+    پروسه و کانتینر، uptime واقعی، تعداد کاربران آنلاین تقریبی.
+    روی Railway این اعداد مربوط به همان کانتینر ربات است (نه کل
+    سرور فیزیکی) — دقیقاً همان چیزی که برای پایش خود ربات لازم است.
+    """
     import time
     from datetime import datetime
+
     db_status = "disconnected"
     db_ping   = "—"
     try:
@@ -1144,6 +1151,7 @@ async def _show_bot_status(query, context):
         db_status = "✅ متصل"
     except Exception as e:
         db_status = f"❌ خطا: {str(e)[:30]}"
+
     jobs_info = []
     try:
         if context.application.job_queue:
@@ -1154,6 +1162,65 @@ async def _show_bot_status(query, context):
     except Exception:
         pass
     jobs_text = "\n".join(jobs_info) if jobs_info else "  —"
+
+    # FIX جدید: متریک‌های واقعی سیستم با psutil
+    sys_lines = []
+    try:
+        import psutil, os
+        proc = psutil.Process(os.getpid())
+
+        # حافظه پروسه ربات (مهم‌ترین عدد — واقعاً ربات چقدر مصرف می‌کند)
+        mem_mb = proc.memory_info().rss / 1024 / 1024
+
+        # حافظه کل کانتینر
+        vm = psutil.virtual_memory()
+        vm_used_mb  = vm.used / 1024 / 1024
+        vm_total_mb = vm.total / 1024 / 1024
+
+        # CPU (۰.۳ ثانیه نمونه‌گیری — سریع و کافی برای یک عدد لحظه‌ای)
+        cpu_pct = psutil.cpu_percent(interval=0.3)
+
+        # uptime واقعی پروسه ربات (نه زمان سرور)
+        uptime_sec = time.time() - proc.create_time()
+        h, rem = divmod(int(uptime_sec), 3600)
+        m, s_  = divmod(rem, 60)
+        uptime_str = f"{h} ساعت {m} دقیقه" if h else f"{m} دقیقه {s_} ثانیه"
+
+        # رنگ‌بندی هشدار بر اساس فشار منابع
+        ram_icon = "🟢" if vm.percent < 70 else "🟡" if vm.percent < 90 else "🔴"
+        cpu_icon = "🟢" if cpu_pct < 70 else "🟡" if cpu_pct < 90 else "🔴"
+
+        sys_lines = [
+            "",
+            "━━━━━━━━━━━━━━━━",
+            "🖥 <b>سلامت سیستم</b>",
+            "",
+            f"{ram_icon} <b>RAM کانتینر:</b> {vm_used_mb:.0f} / {vm_total_mb:.0f} MB  ({vm.percent}%)",
+            f"   └ مصرف خود ربات: {mem_mb:.1f} MB",
+            f"{cpu_icon} <b>CPU:</b> {cpu_pct}%",
+            f"⏱ <b>مدت کارکرد ربات:</b> {uptime_str}",
+        ]
+    except ImportError:
+        sys_lines = [
+            "",
+            "━━━━━━━━━━━━━━━━",
+            "🖥 <b>سلامت سیستم:</b> ⚠️ psutil نصب نیست",
+        ]
+    except Exception as e:
+        sys_lines = [
+            "",
+            "━━━━━━━━━━━━━━━━",
+            f"🖥 <b>سلامت سیستم:</b> ⚠️ خطا در خوانش ({str(e)[:40]})",
+        ]
+
+    # FIX جدید: کاربران آنلاین تقریبی (فعالیت در ۳۰ دقیقه و امروز)
+    try:
+        online_30m = await db.count_active_users(30)
+        active_today = await db.count_active_users_today()
+        online_line = f"🟢 آنلاین (۳۰ دقیقه اخیر): <b>{online_30m}</b>  |  فعال امروز: <b>{active_today}</b>"
+    except Exception:
+        online_line = "🟢 آنلاین: داده در دسترس نیست"
+
     s = await db.global_stats()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines_t = [
@@ -1165,10 +1232,12 @@ async def _show_bot_status(query, context):
         "",
         "⏰ <b>Job های فعال:</b>",
         jobs_text,
+    ] + sys_lines + [
         "",
         "━━━━━━━━━━━━━━━━",
         "📊 <b>آمار کلی</b>",
         "",
+        online_line,
         f"👥 کاربران تأیید: <b>{s['users']}</b>",
         f"⏳ منتظر تأیید: <b>{s['pending']}</b>",
         f"🧪 سوال تأییدشده: <b>{s['questions']}</b>",
