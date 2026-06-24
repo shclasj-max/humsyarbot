@@ -1414,4 +1414,20 @@ class DB:
         await self.set_setting('notif_defaults', defaults)
 
 
+    async def count_active_users(self, minutes: int = 30) -> int:
+        """
+        FIX جدید: تعداد کاربرانی که در N دقیقه اخیر فعالیتی داشته‌اند —
+        برای نمایش «کاربران آنلاین تقریبی» در وضعیت ربات استفاده می‌شود.
+        """
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()
+        return await self.users.count_documents({'last_active': {'$gte': cutoff}})
+
+    async def count_active_users_today(self) -> int:
+        """تعداد کاربرانی که امروز حداقل یک‌بار فعالیت داشته‌اند"""
+        from datetime import datetime
+        today_start = datetime.now().strftime('%Y-%m-%dT00:00:00')
+        return await self.users.count_documents({'last_active': {'$gte': today_start}})
+
+
 db = DB()
