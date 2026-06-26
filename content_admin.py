@@ -151,10 +151,13 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         from utils import send_audit_log
         actor = await db.get_user(uid)
         actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'content', actor_name, uid,
-            "حذف درس", module='Content', severity='WARNING',
-            target_id=lid, details=f"درس: {name}"
+            "حذف درس", module='Content', severity='HIGH',
+            actor_role=actor_role,
+            target_id=lid, target_type='lesson', target_label=name,
+            tags=['حذف_درس']
         )
         await query.edit_message_text(f"✅ درس «{name}» حذف شد.",
             reply_markup=_back_btn("🔙 بازگشت", f'ca:term:{idx}'))
@@ -219,10 +222,13 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         from utils import send_audit_log
         actor = await db.get_user(uid)
         actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'content', actor_name, uid,
-            "حذف جلسه", module='Content', severity='WARNING',
-            target_id=sid, details=f"جلسه: {session_label}"
+            "حذف جلسه", module='Content', severity='HIGH',
+            actor_role=actor_role,
+            target_id=sid, target_type='session', target_label=session_label,
+            tags=['حذف_جلسه']
         )
         await query.edit_message_text("✅ جلسه حذف شد.",
             reply_markup=_back_btn("🔙 بازگشت", f'ca:lesson:{lid}'))
@@ -284,11 +290,15 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             from utils import send_audit_log
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
             type_fa = dict(CONTENT_TYPES).get(item_before.get('type', ''), 'فایل')
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
-                f"حذف {type_fa}", module='Content', severity='WARNING',
-                target_id=cid, details=item_before.get('description', '')[:60]
+                f"حذف {type_fa}", module='Content', severity='HIGH',
+                actor_role=actor_role,
+                target_id=cid, target_type='content',
+                target_label=item_before.get('description', '')[:60] or type_fa,
+                tags=['حذف_محتوا']
             )
         await query.edit_message_text("✅ محتوا حذف شد.",
             reply_markup=_back_btn("🔙 بازگشت", f'ca:session:{sid}'))
@@ -878,10 +888,13 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from utils import send_audit_log
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
                 "ایجاد درس جدید", module='Content', severity='INFO',
-                details=f"درس: {name} | ترم: {term}"
+                actor_role=actor_role,
+                target_type='lesson', target_label=name,
+                details=f"ترم: {term}", tags=['ایجاد_درس']
             )
         await update.message.reply_text(msg, reply_markup=_back_btn("🔙 برگشت", f'ca:term:{idx}'))
 
@@ -896,10 +909,15 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from utils import send_audit_log
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
-                "ویرایش درس", module='Content', severity='INFO',
-                target_id=lid, before={field: old_value}, after={field: text}
+                "ویرایش درس", module='Content', severity='WARNING',
+                actor_role=actor_role,
+                target_id=lid, target_type='lesson',
+                target_label=old_lesson.get('name', '') if old_lesson else '',
+                before={field: old_value}, after={field: text},
+                tags=['ویرایش_درس']
             )
         await update.message.reply_text("✅ ذخیره شد." if ok else "❌ خطا.",
             reply_markup=_back_btn("🔙 برگشت", f'ca:lesson:{lid}'))
@@ -921,10 +939,13 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from utils import send_audit_log
         actor = await db.get_user(uid)
         actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'content', actor_name, uid,
             "ایجاد جلسه جدید", module='Content', severity='INFO',
-            details=f"جلسه {number} — {topic}"
+            actor_role=actor_role,
+            target_type='session', target_label=f"جلسه {number} — {topic}",
+            tags=['ایجاد_جلسه']
         )
         await update.message.reply_text(f"✅ جلسه {number} — «{topic}» اضافه شد!",
             reply_markup=_back_btn("🔙 برگشت", f'ca:lesson:{lid}'))
@@ -940,10 +961,15 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from utils import send_audit_log
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
+            session_label_for_log = f"جلسه {old_session.get('number','')} — {old_session.get('topic','')}" if old_session else sid
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
-                "ویرایش جلسه", module='Content', severity='INFO',
-                target_id=sid, before={field: old_value}, after={field: val}
+                "ویرایش جلسه", module='Content', severity='WARNING',
+                actor_role=actor_role,
+                target_id=sid, target_type='session', target_label=session_label_for_log,
+                before={field: old_value}, after={field: val},
+                tags=['ویرایش_جلسه']
             )
         await update.message.reply_text("✅ جلسه ویرایش شد." if ok else "❌ خطا.",
             reply_markup=_back_btn("🔙 برگشت", f'ca:session:{sid}'))
