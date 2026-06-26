@@ -90,14 +90,24 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'status':
         rid    = int(parts[2])
         status = parts[3]
+        old_report = await db.get_content_report(rid)
+        old_status_fa = {'new': 'جدید', 'reviewing': 'در حال بررسی',
+                         'resolved': 'رفع شد', 'rejected': 'رد شد'}.get(
+            old_report.get('status', '') if old_report else '', 'نامشخص')
         await db.update_report_status(rid, status, uid)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+        actor_role = await db.get_actor_role_label(uid)
         status_fa  = {'reviewing': 'در حال بررسی', 'resolved': 'رفع شد', 'rejected': 'رد شد'}.get(status, status)
+        # FIX طبق سند: رد گزارش/رفع گزارش = HIGH (نتیجه‌گیری مدیریتی مهم)
+        sev = 'HIGH' if status in ('resolved', 'rejected') else 'INFO'
         await send_audit_log(
             context.bot, 'content', actor_name, uid,
-            "بررسی گزارش محتوا", module='Reports', severity='INFO',
-            target_id=str(rid), after={'وضعیت': status_fa}
+            "بررسی گزارش محتوا", module='Reports', severity=sev,
+            actor_role=actor_role,
+            target_id=str(rid), target_type='report',
+            before={'وضعیت': old_status_fa}, after={'وضعیت': status_fa},
+            tags=['بررسی_گزارش']
         )
         await query.answer(f"✅ وضعیت: {status_fa}", show_alert=True)
         await _show_report_detail(query, rid)
@@ -199,11 +209,16 @@ async def _finalize_report(update_or_query, context, reason: str, note: str):
         InlineKeyboardButton("🔍 بررسی گزارش", callback_data=f'report:view:{report_id}')
     ]])
 
-    # FIX جدید: ثبت در Audit Log گروه محتوا — قبلاً اصلاً ثبت نمی‌شد
+    # FIX جدید: ثبت در Audit Log گروه محتوا — قبلاً اصلاً ثبت نمی‌شد.
+    # نکته: انجام‌دهنده اینجا یک دانشجو است، نه ادمین — نقش او
+    # 'دانشجو' ثبت می‌شود تا با اعمال مدیریتی اشتباه گرفته نشود.
     await send_audit_log(
         context.bot, 'content', reporter_name, uid,
         "ثبت گزارش ایراد محتوا", module='Reports', severity='INFO',
-        target_id=target_id, details=f"{target_label}: {title} | علت: {reason_fa}"
+        actor_role='دانشجو',
+        target_id=target_id, target_type=target_type, target_label=title,
+        details=f"علت: {reason_fa}" + (f" | {note}" if note else ""),
+        tags=['ثبت_گزارش']
     )
 
     # ── ارسال همزمان به همه ذی‌نفعان ──
