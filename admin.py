@@ -293,11 +293,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ شماره دانشجویی اکنون اجباری است" if new_val else "✅ شماره دانشجویی اکنون اختیاری است", show_alert=True)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
             "تغییر تنظیمات ثبت‌نام", module='Settings', severity='HIGH',
+            actor_role=actor_role,
             before={'شماره دانشجویی': 'اختیاری' if new_val else 'اجباری'},
-            after={'شماره دانشجویی': 'اجباری' if new_val else 'اختیاری'}
+            after={'شماره دانشجویی': 'اجباری' if new_val else 'اختیاری'},
+            tags=['تنظیمات_ثبت_نام']
         )
         await _show_settings(query)
 
@@ -308,12 +311,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🔧 حالت تعمیر فعال شد" if new_val else "✅ حالت تعمیر غیرفعال شد", show_alert=True)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
             "فعال‌شدن حالت تعمیر" if new_val else "غیرفعال‌شدن حالت تعمیر",
             module='Settings', severity='CRITICAL',
+            actor_role=actor_role,
             before={'وضعیت': 'غیرفعال' if new_val else 'فعال'},
-            after={'وضعیت': 'فعال' if new_val else 'غیرفعال'}
+            after={'وضعیت': 'فعال' if new_val else 'غیرفعال'},
+            tags=['حالت_تعمیر']
         )
         await _show_settings(query)
 
@@ -373,9 +379,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.remove_required_channel(ch_id)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "حذف کانال اجباری", module='Settings', severity='HIGH', target_id=ch_id
+            "حذف کانال اجباری", module='Settings', severity='HIGH',
+            actor_role=actor_role, target_id=ch_id, target_type='channel',
+            tags=['کانال_اجباری']
         )
         await query.answer("✅ کانال حذف شد!", show_alert=True)
         await _show_channel_lock(query)
@@ -414,10 +423,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.set_notif_default(ntype, new_val)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "تغییر تنظیمات اعلان‌ها", module='Settings', severity='INFO',
-            details=f"پیش‌فرض {ntype}: {'روشن' if new_val else 'خاموش'}"
+            "تغییر تنظیمات اعلان‌ها", module='Settings', severity='WARNING',
+            actor_role=actor_role,
+            details=f"پیش‌فرض {ntype}: {'روشن' if new_val else 'خاموش'}",
+            tags=['تنظیمات_اعلان']
         )
         await query.answer("✅ بروزرسانی شد", show_alert=True)
         await _show_notif_defaults(query)
@@ -472,10 +484,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.remove_admin_role(target_uid)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        target_user_doc = await db.get_user(target_uid)
+        target_label = target_user_doc.get('name', '') if target_user_doc else ''
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "حذف رول از ادمین", module='Roles', severity='HIGH',
-            target_id=str(target_uid)
+            "حذف رول از ادمین", module='Roles', severity='CRITICAL',
+            actor_role=actor_role,
+            target_id=str(target_uid), target_type='user', target_label=target_label,
+            tags=['نقش_ها']
         )
         await query.answer("✅ نقش حذف شد!", show_alert=True)
         await _show_roles(query)
@@ -566,10 +583,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 تعلیق شد!", show_alert=True)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "مسدودسازی کاربر", module='Users', severity='WARNING',
-            target_id=str(target_uid), details=f"نام: {target_name}"
+            "مسدودسازی کاربر", module='Users', severity='HIGH',
+            actor_role=actor_role,
+            target_id=str(target_uid), target_type='user', target_label=target_name,
+            tags=['مسدودسازی']
         )
         await _show_users_list(query, 0)
     elif action == 'approve':
@@ -585,10 +605,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_unban:
             admin_user = await db.get_user(uid)
             actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'admin', actor_name, uid,
                 "رفع مسدودسازی کاربر", module='Users', severity='WARNING',
-                target_id=str(target_uid)
+                actor_role=actor_role,
+                target_id=str(target_uid), target_type='user',
+                target_label=prev_user.get('name', '') if prev_user else '',
+                tags=['رفع_مسدودسازی']
             )
         await _show_pending(query)
     elif action == 'reject':
@@ -617,10 +641,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # FIX جدید: لاگ عمل حساس — گروه ادمین
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "حذف کاربر", module='Users', severity='WARNING',
-            target_id=str(target_uid), details=f"نام: {name}"
+            "حذف کاربر", module='Users', severity='HIGH',
+            actor_role=actor_role,
+            target_id=str(target_uid), target_type='user', target_label=name,
+            tags=['حذف_کاربر']
         )
         await _show_users_list(query, 0)
     elif action == 'pending':
@@ -734,24 +761,36 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _pending_questions(query)
     elif action == 'approve_q':
         qid = parts[2]
+        q_doc_for_log = await db.get_question_by_id(qid)
         await db.approve_question(qid)
         await query.answer("✅ تأیید شد!")
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "تأیید سوال", module='Questions', severity='INFO', target_id=qid
+            "تأیید سوال", module='Questions', severity='INFO',
+            actor_role=actor_role, target_id=qid, target_type='question',
+            target_label=(q_doc_for_log.get('question', '')[:60] if q_doc_for_log else ''),
+            tags=['تایید_سوال']
         )
         await _pending_questions(query)
     elif action == 'reject_q':
         qid = parts[2]
+        # FIX مهم: سوال باید قبل از حذف واکشی شود تا متن آن برای
+        # target_label در لاگ موجود باشد — بعد از حذف دیگر در دسترس نیست
+        q_doc_for_log = await db.get_question_by_id(qid)
         await db.delete_question(qid)
         await query.answer("🗑 رد شد!")
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر') if admin_user else 'مدیر'
+        actor_role = await db.get_actor_role_label(uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "رد و حذف سوال", module='Questions', severity='WARNING', target_id=qid
+            "رد و حذف سوال", module='Questions', severity='HIGH',
+            actor_role=actor_role, target_id=qid, target_type='question',
+            target_label=(q_doc_for_log.get('question', '')[:60] if q_doc_for_log else ''),
+            tags=['رد_سوال']
         )
         await _pending_questions(query)
 
@@ -985,14 +1024,19 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
     users_list = await _get_target_users(target)
     sent, failed = await _do_broadcast_send(context.bot, users_list, msg_data)
     _broadcast_clear(context)
-    # FIX جدید: لاگ broadcast — گروه ادمین
+    # FIX طبق سند: ارسال همگانی سراسری = CRITICAL (نه WARNING)،
+    # چون اگر اشتباه به همه فرستاده شود باید فوری و برجسته معلوم باشد.
     actor_id   = query.from_user.id
     actor_user = await db.get_user(actor_id)
     actor_name = actor_user.get('name', 'مدیر') if actor_user else 'مدیر'
+    actor_role = await db.get_actor_role_label(actor_id)
     await send_audit_log(
         context.bot, 'admin', actor_name, actor_id,
-        "ارسال همگانی", module='Notifications', severity='WARNING',
-        details=f"هدف: {target} | موفق: {sent} نفر | ناموفق: {failed} نفر"
+        "ارسال همگانی", module='Notifications', severity='CRITICAL',
+        actor_role=actor_role,
+        target_type='broadcast', target_label=f"هدف: {target}",
+        details=f"موفق: {sent} نفر | ناموفق: {failed} نفر",
+        tags=['ارسال_همگانی']
     )
     await query.edit_message_text(
         f"📢 <b>ارسال همگانی تمام شد</b>\n\n━━━━━━━━━━━━━━━━\n"
@@ -1631,13 +1675,13 @@ async def _show_settings(query):
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-async def _show_audit_log(query, category: str, min_severity: str = None):
+async def _show_audit_log(query, category: str, min_severity: str = None, module: str = None):
     """
-    FIX جدید: نمایش لاگ فعالیت با ساختار کامل — severity icon، ماژول،
-    و تغییرات before/after به‌صورت خوانا. دکمه‌های فیلتر سطح اهمیت
-    اضافه شده تا طبق درخواست بشود فقط WARNING به بالا دید.
+    FIX بازطراحی کامل طبق سند جدید Audit Log — نمایش هر لاگ با ساختار
+    actor{name,role}/target{label}/changes/تگ‌ها، هماهنگ با مدل داده
+    جدید database.py. در کمتر از ۵ ثانیه باید همه‌چیز معلوم باشد.
     """
-    logs = await db.get_recent_logs(category, min_severity, limit=25)
+    logs = await db.get_recent_logs(category, min_severity, module, limit=20)
     sev_icon = {'INFO': '🟢', 'WARNING': '🟡', 'HIGH': '🟠', 'CRITICAL': '🔴'}
 
     if not logs:
@@ -1645,19 +1689,28 @@ async def _show_audit_log(query, category: str, min_severity: str = None):
     else:
         lines = ["📋 <b>لاگ فعالیت</b>\n━━━━━━━━━━━━━━━━"]
         for log in logs:
-            at = log.get('at', '')[:16].replace('T', ' ')
+            ts = log.get('timestamp', '')[:16].replace('T', ' ')
             icon = sev_icon.get(log.get('severity', 'INFO'), '🟢')
-            module = log.get('module', '')
-            module_tag = f" [{module}]" if module else ""
-            lines.append(f"\n{icon} <code>{at}</code>{module_tag}")
-            lines.append(f"👤 {log.get('actor_name','')} — <b>{log.get('action','')}</b>")
-            before = log.get('before', {})
-            after  = log.get('after', {})
-            if before and after:
-                for key in after:
-                    old_v = before.get(key, '—')
-                    new_v = after.get(key, '—')
-                    lines.append(f"   {key}: <s>{old_v}</s> → {new_v}")
+            module_en = log.get('module', '')
+            module_fa = db.MODULE_LABELS_FA.get(module_en, module_en)
+            module_tag = f" [{module_fa}]" if module_fa else ""
+
+            actor = log.get('actor', {})
+            actor_name = actor.get('name', '') if isinstance(actor, dict) else log.get('actor_name', '')
+            actor_role = actor.get('role', '') if isinstance(actor, dict) else log.get('actor_role', '')
+
+            target = log.get('target', {})
+            target_label = target.get('label', '') if isinstance(target, dict) else ''
+
+            lines.append(f"\n{icon} <code>{ts}</code>{module_tag}")
+            lines.append(f"👤 {actor_name} ({actor_role}) — <b>{log.get('action','')}</b>")
+            if target_label:
+                lines.append(f"🎯 {target_label}")
+
+            changes = log.get('changes', [])
+            if changes:
+                for ch in changes:
+                    lines.append(f"   {ch.get('field','')}: {ch.get('before','—')} ← {ch.get('after','—')}")
             elif log.get('details'):
                 lines.append(f"   📝 {log['details']}")
         text = '\n'.join(lines)
@@ -1761,6 +1814,18 @@ async def _export_excel(query, context):
             document=buf, filename=fname,
             caption=f"📥 <b>خروجی کامل دیتابیس</b>\n👥 {len(users)} کاربر | 🎫 {len(tickets)} تیکت | 🧪 {len(questions)} سوال",
             parse_mode='HTML'
+        )
+        # FIX جدید طبق سند: خروجی گرفتن دیتابیس شامل اطلاعات حساس
+        # کاربران است — باید ثبت شود که کِی و توسط کدام مدیر دانلود شد.
+        admin_user_doc = await db.get_user(uid)
+        actor_name = admin_user_doc.get('name', 'مدیر ارشد') if admin_user_doc else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "خروجی اکسل دیتابیس", module='Backup', severity='HIGH',
+            actor_role=actor_role,
+            details=f"{len(users)} کاربر | {len(tickets)} تیکت | {len(questions)} سوال",
+            tags=['خروجی_اکسل']
         )
         await query.edit_message_text(
             "✅ فایل اکسل ارسال شد!",
@@ -1882,10 +1947,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if ok:
             admin_user = await db.get_user(uid)
             actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'admin', actor_name, uid,
                 "افزودن کانال اجباری", module='Settings', severity='HIGH',
-                target_id=ch_id, details=f"نام: {ch_title}"
+                actor_role=actor_role,
+                target_id=ch_id, target_type='channel', target_label=ch_title,
+                tags=['کانال_اجباری']
             )
             await update.message.reply_text(
                 f"✅ کانال <b>{ch_title}</b> اضافه شد.\n\n"
@@ -1973,10 +2041,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         scope_txt  = f" — محدود به ورودی {scope_intake}" if scope_intake else ""
         admin_user = await db.get_user(admin_uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        target_user_for_log = await db.get_user(target_uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, admin_uid,
-            "انتساب رول به کاربر", module='Roles', severity='HIGH',
-            target_id=str(target_uid), details=f"نقش: {role_label}{scope_txt}"
+            "انتساب رول به کاربر", module='Roles', severity='CRITICAL',
+            actor_role=actor_role,
+            target_id=str(target_uid), target_type='user',
+            target_label=target_user_for_log.get('name', '') if target_user_for_log else '',
+            details=f"نقش: {role_label}{scope_txt}",
+            tags=['انتساب_نقش']
         )
         try:
             await context.bot.send_message(
