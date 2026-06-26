@@ -304,8 +304,10 @@ async def _finish_registration(update, context, uid, name, group, intake, userna
         from utils import send_audit_log
         await send_audit_log(
             context.bot, 'admin', name, uid,
-            "ثبت‌نام کاربر جدید", module='Users', severity='INFO', actor_role='student',
-            details=f"گروه: {group} | ورودی: {intake_label}"
+            "ثبت‌نام کاربر جدید", module='Users', severity='INFO',
+            actor_role='دانشجو', target_type='user', target_label=name,
+            details=f"گروه: {group} | ورودی: {intake_label}",
+            tags=['ثبت_نام']
         )
 
         await query.edit_message_text(
