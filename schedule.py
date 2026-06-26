@@ -273,12 +273,15 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if deleted_item:
             admin_user = await db.get_user(uid)
             actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+            actor_role = await db.get_actor_role_label(uid)
             type_fa = TYPE_NAMES.get(deleted_item.get('type',''), '')
             await send_audit_log(
                 context.bot, 'admin', actor_name, uid,
-                f"حذف {type_fa}", module='Schedules', severity='WARNING',
-                target_id=sid,
-                details=f"{deleted_item.get('lesson','')} — {fmt_jalali(deleted_item.get('date',''))}"
+                f"حذف {type_fa}", module='Schedules', severity='HIGH',
+                actor_role=actor_role,
+                target_id=sid, target_type='schedule',
+                target_label=f"{deleted_item.get('lesson','')} — {fmt_jalali(deleted_item.get('date',''))}",
+                tags=['حذف_برنامه']
             )
         await _show_delete_list(query)
 
@@ -567,13 +570,16 @@ async def handle_flex_time_change_text(update: Update, context: ContextTypes.DEF
     admin_uid  = update.effective_user.id
     admin_user = await db.get_user(admin_uid)
     actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+    actor_role = await db.get_actor_role_label(admin_uid)
     old_jalali = fmt_jalali(schedule_doc.get('date', ''))
     await send_audit_log(
         context.bot, 'admin', actor_name, admin_uid,
-        "تغییر زمان کلاس", module='Schedules', severity='INFO', target_id=sid,
+        "تغییر زمان کلاس", module='Schedules', severity='WARNING',
+        actor_role=actor_role,
+        target_id=sid, target_type='schedule', target_label=lesson,
         before={'زمان': f"{old_jalali} {schedule_doc.get('time','')}"},
         after={'زمان': f"{jalali_display} {new_time}"},
-        details=f"درس: {lesson}"
+        tags=['تغییر_زمان_کلاس']
     )
 
     await update.message.reply_text(
@@ -718,10 +724,14 @@ async def _finalize_schedule_add(update_or_query, context):
     admin_uid = update_or_query.from_user.id if hasattr(update_or_query, 'from_user') else update_or_query.effective_user.id
     admin_user = await db.get_user(admin_uid)
     actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+    actor_role = await db.get_actor_role_label(admin_uid)
     await send_audit_log(
         bot_obj, 'admin', actor_name, admin_uid,
         f"ایجاد {type_fa} جدید", module='Schedules', severity='INFO',
-        details=f"{p['lesson']} — {jalali_display} {p['time']}"
+        actor_role=actor_role,
+        target_type='schedule', target_label=p['lesson'],
+        details=f"{jalali_display} {p['time']}",
+        tags=['ایجاد_برنامه']
     )
 
     for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type'):
