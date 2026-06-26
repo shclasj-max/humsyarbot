@@ -564,6 +564,21 @@ async def backup_confirm_restore(update: Update, context: ContextTypes.DEFAULT_T
         for k, v in restored.items():
             result_lines.append(f"{labels.get(k, k)}: {v} رکورد")
 
+        # FIX جدید طبق سند: بازیابی بکاپ = CRITICAL — این عمل می‌تواند
+        # کل دیتابیس را بازنویسی کند، باید بسیار برجسته و قابل ردیابی باشد.
+        from utils import send_audit_log
+        admin_user_doc = await db.get_user(uid)
+        actor_name = admin_user_doc.get('name', 'ادمین') if admin_user_doc else 'ادمین'
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "بازیابی بکاپ", module='Backup', severity='CRITICAL',
+            actor_role=actor_role,
+            target_type='backup', target_label=section,
+            details=' | '.join(result_lines),
+            tags=['بازیابی_بکاپ']
+        )
+
         await query.edit_message_text(
             f"✅ <b>بازیابی با موفقیت انجام شد!</b>\n"
             f"━━━━━━━━━━━━━━━━\n\n"
@@ -575,6 +590,15 @@ async def backup_confirm_restore(update: Update, context: ContextTypes.DEFAULT_T
 
     except Exception as e:
         logger.error(f"Restore error: {e}")
+        try:
+            from utils import send_audit_log
+            await send_audit_log(
+                context.bot, 'admin', 'ادمین', uid,
+                "خطا در بازیابی بکاپ", module='Backup', severity='CRITICAL',
+                details=str(e)[:200], tags=['خطای_بازیابی']
+            )
+        except Exception:
+            pass
         await query.edit_message_text(
             f"❌ خطا در بازیابی:\n<code>{e}</code>",
             parse_mode='HTML',
