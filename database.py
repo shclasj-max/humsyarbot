@@ -900,6 +900,16 @@ class DB:
             {'$set': {'status': 'closed', 'closed_at': datetime.now().isoformat()}}
         )
 
+    async def ticket_reopen(self, ticket_id: int):
+        """
+        FIX جدید طبق سند: بازگشایی تیکت — قبلاً این قابلیت اصلاً
+        وجود نداشت و دانشجو مجبور بود تیکت جدید بسازد.
+        """
+        await self.tickets.update_one(
+            {'ticket_id': ticket_id},
+            {'$set': {'status': 'open'}, '$unset': {'closed_at': ''}}
+        )
+
     # ══════════════════════════════════════════════════
     #  آمار
     # ══════════════════════════════════════════════════
@@ -1133,38 +1143,84 @@ class DB:
         'CRITICAL': '🔴 CRITICAL',
     }
 
+    # ══════════════════════════════════════════════════
+    #  بازطراحی کامل Audit Log — مدل داده غنی
+    # ══════════════════════════════════════════════════
+    #
+    # طبق استاندارد جدید، هر لاگ شامل:
+    #   id, timestamp, severity, module, action,
+    #   actor{id,name,role}, target{type,id,label},
+    #   details, changes[before/after], metadata, correlation_id, tags
+    #
+    # ماژول‌ها همیشه به انگلیسی در کد ذخیره می‌شوند (پایدار برای
+    # کوئری/فیلتر) و فقط هنگام نمایش به فارسی ترجمه می‌شوند.
+
+    MODULE_LABELS_FA = {
+        'Users':         'کاربران',
+        'Roles':         'نقش‌ها',
+        'Settings':      'تنظیمات',
+        'Questions':     'سوالات',
+        'Content':       'محتوا',
+        'Schedules':     'برنامه کلاسی',
+        'Tickets':       'تیکت‌ها',
+        'Reports':       'گزارش‌ها',
+        'Notifications': 'اعلان‌ها',
+        'Backup':        'بکاپ',
+        'System':        'سیستم',
+        'Auth':          'ورود/خروج',
+    }
+
     async def log_action(self, actor_id: int, actor_name: str, actor_role: str,
                           action: str, module: str, category: str = 'admin',
                           severity: str = 'INFO', target_id: str = '',
+                          target_type: str = '', target_label: str = '',
                           before: dict = None, after: dict = None,
-                          details: str = '') -> None:
+                          details: str = '', tags: list = None,
+                          correlation_id: str = None) -> str:
         """
-        FIX جدید — ساختار کامل Audit Log طبق استاندارد حرفه‌ای:
-        زمان، شناسه/نام/رول ادمین، نوع عملیات، ماژول، هدف،
-        تغییرات قبل/بعد (در صورت وجود)، و severity.
+        FIX بازطراحی کامل — مدل داده غنی طبق سند:
+        actor شامل نقش، target شامل برچسب قابل‌فهم (نه فقط ObjectId خام)،
+        changes به‌صورت فهرست فیلد:قبل:بعد، correlation_id برای ردیابی
+        عملیات چندمرحله‌ای (مثلاً ارسال همگانی)، و tags برای جستجو.
 
-        category: 'admin' یا 'content' — کدام گروه تلگرام لاگ را ببیند.
-        severity: INFO / WARNING / HIGH / CRITICAL
-        before/after: dict ساده مثل {'field': 'status', 'value': 'open'}
-        برای نگه‌داشتن مقدار قبل و بعد تغییر — نه کل سند.
+        target_label: نام/عنوان قابل‌فهم هدف (مثلاً نام کاربر یا متن سوال)
+        — این چیزی است که در پیام لاگ به‌جای ObjectId خام نشان داده می‌شود.
         """
-        await self.audit_logs.insert_one({
-            'actor_id':   actor_id,
-            'actor_name': actor_name,
-            'actor_role': actor_role,
-            'action':     action,
-            'module':     module,
-            'category':   category,
-            'severity':   severity,
-            'target_id':  target_id,
-            'before':     before or {},
-            'after':      after or {},
-            'details':    details,
-            'at':         datetime.now().isoformat(),
-        })
+        changes = []
+        if before and after:
+            for key in after:
+                changes.append({
+                    'field': key,
+                    'before': before.get(key, '—'),
+                    'after':  after.get(key, '—'),
+                })
+
+        doc = {
+            'timestamp':      datetime.now().isoformat(),
+            'severity':       severity,
+            'module':         module,
+            'category':       category,
+            'action':         action,
+            'actor': {
+                'id':   actor_id,
+                'name': actor_name,
+                'role': actor_role or 'نامشخص',
+            },
+            'target': {
+                'type':  target_type,
+                'id':    target_id,
+                'label': target_label,
+            },
+            'details':        details,
+            'changes':        changes,
+            'tags':           tags or [],
+            'correlation_id': correlation_id,
+        }
+        r = await self.audit_logs.insert_one(doc)
+        return str(r.inserted_id)
 
     async def get_recent_logs(self, category: str = None, min_severity: str = None,
-                               limit: int = 30) -> list:
+                               module: str = None, limit: int = 30) -> list:
         q = {}
         if category:
             q['category'] = category
@@ -1172,7 +1228,41 @@ class DB:
             order = ['INFO', 'WARNING', 'HIGH', 'CRITICAL']
             idx = order.index(min_severity) if min_severity in order else 0
             q['severity'] = {'$in': order[idx:]}
-        return await self.audit_logs.find(q).sort('at', -1).to_list(limit)
+        if module:
+            q['module'] = module
+        return await self.audit_logs.find(q).sort('timestamp', -1).to_list(limit)
+
+    async def get_actor_role_label(self, uid: int) -> str:
+        """
+        FIX طبق سند: در ۹۶٪ لاگ‌های قبلی نقش فرستنده مشخص نبود.
+        این متد یک‌جا و یکدست نقش واقعی هر کاربر را برمی‌گرداند —
+        مدیر ارشد، یا یکی از نقش‌های فرعی، بدون ایموجی (برای متن لاگ).
+        """
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return 'مدیر ارشد'
+        role_doc = await self.get_admin_role(uid)
+        if role_doc:
+            label = self.ROLE_LABELS.get(role_doc.get('role', ''), '')
+            # حذف ایموجی و پرانتز برای متن لاگ تمیز
+            import re
+            clean = re.sub(r'^[^\w\u0600-\u06FF]+', '', label).strip()
+            return clean or role_doc.get('role', 'نامشخص')
+        user = await self.get_user(uid)
+        if user and user.get('role') == 'content_admin':
+            return 'مدیر محتوا'
+        return 'دانشجو'
+
+    async def get_logs_by_correlation(self, correlation_id: str) -> list:
+        """همه‌ی لاگ‌های یک عملیات چندمرحله‌ای (مثل شروع/پیشرفت/پایان broadcast)"""
+        return await self.audit_logs.find(
+            {'correlation_id': correlation_id}
+        ).sort('timestamp', 1).to_list(100)
+
+    async def search_logs_by_tag(self, tag: str, limit: int = 30) -> list:
+        """جستجوی لاگ بر اساس تگ — مثلاً 'کاربران' یا 'حذف'"""
+        return await self.audit_logs.find(
+            {'tags': tag}
+        ).sort('timestamp', -1).to_list(limit)
 
     # ══════════════════════════════════════════════════
     #  گزارش هفتگی/ماهانه خودکار
