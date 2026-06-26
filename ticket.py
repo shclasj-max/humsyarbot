@@ -188,12 +188,18 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid    = int(parts[2])
         ticket = await db.ticket_get(tid)
         await db.ticket_close(tid)
-        # FIX جدید: لاگ بستن تیکت
+        # FIX طبق سند: بستن تیکت = HIGH (تصمیم نهایی پشتیبانی)،
+        # و target_label موضوع/کاربر تیکت را نشان می‌دهد، نه فقط شماره
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+        actor_role = await db.get_actor_role_label(uid)
+        ticket_label = f"{ticket.get('subject','')} — {ticket.get('user_name','')}" if ticket else f"تیکت #{tid}"
         await send_audit_log(
             context.bot, 'admin', actor_name, uid,
-            "بستن تیکت", module='Tickets', severity='INFO', target_id=str(tid)
+            "بستن تیکت", module='Tickets', severity='HIGH',
+            actor_role=actor_role,
+            target_id=str(tid), target_type='ticket', target_label=ticket_label,
+            tags=['بستن_تیکت']
         )
         if ticket:
             try:
@@ -212,6 +218,41 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await query.edit_message_text(
             f"✅ تیکت #{tid} بسته شد.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')
+            ]])
+        )
+
+    elif action == 'admin_reopen' and uid == ADMIN_ID:
+        # FIX جدید طبق سند: بازگشایی تیکت — قابلیت کاملاً جدید
+        tid    = int(parts[2])
+        ticket = await db.ticket_get(tid)
+        await db.ticket_reopen(tid)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+        actor_role = await db.get_actor_role_label(uid)
+        ticket_label = f"{ticket.get('subject','')} — {ticket.get('user_name','')}" if ticket else f"تیکت #{tid}"
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "بازگشایی تیکت", module='Tickets', severity='WARNING',
+            actor_role=actor_role,
+            target_id=str(tid), target_type='ticket', target_label=ticket_label,
+            before={'وضعیت': 'بسته شده'}, after={'وضعیت': 'باز'},
+            tags=['بازگشایی_تیکت']
+        )
+        if ticket:
+            try:
+                await context.bot.send_message(
+                    ticket['user_id'],
+                    f"🔓 <b>تیکت #{tid} مجدداً باز شد</b>\n\n"
+                    f"📋 {ticket.get('subject','')}\n\n"
+                    "می‌توانید ادامه گفتگو را ارسال کنید.",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+        await query.edit_message_text(
+            f"🔓 تیکت #{tid} بازگشایی شد.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')
             ]])
@@ -592,6 +633,9 @@ async def _show_ticket_detail(query, ticket: dict, is_admin: bool):
         if status == 'open':
             keyboard.append([InlineKeyboardButton("✏️ پاسخ جدید", callback_data=f'ticket:admin_reply:{tid}')])
             keyboard.append([InlineKeyboardButton("🔒 بستن تیکت",  callback_data=f'ticket:admin_close:{tid}')])
+        else:
+            # FIX جدید طبق سند: بازگشایی تیکت بسته‌شده
+            keyboard.append([InlineKeyboardButton("🔓 بازگشایی تیکت", callback_data=f'ticket:admin_reopen:{tid}')])
         keyboard.append([InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')])
     else:
         if status == 'open':
