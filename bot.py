@@ -289,10 +289,21 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
                 return  # کمتر از ۲۰ ساعت از آخرین بکاپ گذشته — رد کن
 
         from backup import build_full_backup_data, send_backup_to_bot_chat
+        from utils import send_audit_log
         data = await build_full_backup_data()
         await send_backup_to_bot_chat(context.bot, ADMIN_ID, data, filename='backup_auto')
         await db.set_setting('auto_backup_last_run', datetime.now().isoformat())
         logger.info("💾 بکاپ خودکار با موفقیت ارسال شد")
+        # FIX جدید طبق سند: بکاپ‌گیری باید لاگ شود — این یک job
+        # سیستمی است (نه عمل یک ادمین خاص)، پس actor خود ربات است.
+        summary = data.get('summary', {})
+        await send_audit_log(
+            context.bot, 'admin', 'سیستم (Job خودکار)', 0,
+            "بکاپ‌گیری خودکار", module='Backup', severity='WARNING',
+            actor_role='سیستم',
+            details=f"کاربران: {summary.get('users',0)} | سوالات: {summary.get('questions',0)}",
+            tags=['بکاپ_خودکار']
+        )
     except Exception as e:
         logger.error(f"auto_backup_job error: {e}")
         try:
@@ -300,6 +311,14 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
                 ADMIN_ID,
                 f"⚠️ <b>خطا در بکاپ خودکار</b>\n<code>{str(e)[:300]}</code>",
                 parse_mode='HTML'
+            )
+            # FIX جدید: خطای بکاپ هم باید در Audit Log ثبت شود — CRITICAL
+            from utils import send_audit_log
+            await send_audit_log(
+                context.bot, 'admin', 'سیستم (Job خودکار)', 0,
+                "خطا در بکاپ خودکار", module='Backup', severity='CRITICAL',
+                actor_role='سیستم', details=str(e)[:200],
+                tags=['خطای_بکاپ']
             )
         except Exception:
             pass
