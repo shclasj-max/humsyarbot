@@ -280,24 +280,32 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("🗑 سوال حذف شد!", show_alert=True)
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
-                "حذف سوال", module='Questions', severity='WARNING',
-                target_id=qid,
-                details=(q_doc.get('question', '')[:60] if q_doc else '')
+                "حذف سوال", module='Questions', severity='HIGH',
+                actor_role=actor_role,
+                target_id=qid, target_type='question',
+                target_label=(q_doc.get('question', '')[:60] if q_doc else ''),
+                tags=['حذف_سوال']
             )
             await _ca_question_list(query, uid, context)
 
     elif action == 'ca_q_approve':
         qid = parts[2] if len(parts) > 2 else ''
         if await db.is_content_admin(uid):
+            q_doc_approve = await db.get_question_by_id(qid)
             await db.approve_question(qid)
             await query.answer("✅ تأیید شد!", show_alert=True)
             actor = await db.get_user(uid)
             actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+            actor_role = await db.get_actor_role_label(uid)
             await send_audit_log(
                 context.bot, 'content', actor_name, uid,
-                "تأیید سوال", module='Questions', severity='INFO', target_id=qid
+                "تأیید سوال", module='Questions', severity='INFO',
+                actor_role=actor_role, target_id=qid, target_type='question',
+                target_label=(q_doc_approve.get('question', '')[:60] if q_doc_approve else ''),
+                tags=['تایید_سوال']
             )
             await _ca_question_list(query, uid, context)
 
