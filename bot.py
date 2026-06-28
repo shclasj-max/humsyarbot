@@ -658,6 +658,7 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') in (
         'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
         'set_poll_channel',
+        'poll_question', 'poll_option',
     ):
         return await handle_admin_text(update, context)
 
