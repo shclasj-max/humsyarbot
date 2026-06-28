@@ -1,6 +1,8 @@
 """
 👨‍⚕️ پنل ادمین — نسخه کامل و حرفه‌ای
   ✅ broadcast پیشرفته: preview + تأیید + ارسال به گروه خاص + ارسال زماندار
+  ✅ نظرسنجی (Poll) در کانال: ادمین سوال + گزینه‌ها رو وارد می‌کنه،
+     ربات poll native تلگرام رو در کانال ارسال می‌کنه — نتایج real-time
   ✅ فیکس باگ duplicate key در restore بکاپ
   ✅ فیکس سرچ کاربران
   ✅ pagination و filter کاربران
@@ -20,6 +22,14 @@ from utils import main_keyboard, content_admin_keyboard, admin_keyboard, safe_se
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 BROADCAST = 5   # نگه داشته شده برای سازگاری با bot.py
+
+# ── شناسه کانالی که poll در آن ارسال می‌شود ──
+# مقدار را در .env بگذار: POLL_CHANNEL_ID=-100xxxxxxxxxx
+POLL_CHANNEL_ID = os.getenv('POLL_CHANNEL_ID', '')
+
+# state های داخلی poll (در user_data ذخیره می‌شوند)
+_POLL_MODE_QUESTION = 'poll_q'
+_POLL_MODE_OPTIONS  = 'poll_opts'
 
 
 async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
@@ -54,6 +64,7 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
     if role == 'broadcaster':
         keyboard = [
             [InlineKeyboardButton("📢 ارسال همگانی", callback_data='admin:broadcast')],
+            [InlineKeyboardButton("📊 نظرسنجی کانال", callback_data='admin:poll_main')],
         ]
         text = "📢 <b>پنل مسئول اطلاعیه</b>\n━━━━━━━━━━━━━━━━"
         markup = InlineKeyboardMarkup(keyboard)
@@ -114,7 +125,10 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
                 InlineKeyboardButton("📅 برنامه جدید",  callback_data='schedule:add_type'),
                 InlineKeyboardButton("🗑 حذف برنامه",   callback_data='schedule:del_list'),
             ],
-            [InlineKeyboardButton("📢 ارسال همگانی",    callback_data='admin:broadcast')],
+            [
+                InlineKeyboardButton("📢 ارسال همگانی",  callback_data='admin:broadcast'),
+                InlineKeyboardButton("📊 نظرسنجی",       callback_data='admin:poll_main'),
+            ],
         ]
         text = "👮 <b>پنل ادمین ربات (نماینده)</b>\n━━━━━━━━━━━━━━━━\nدسترسی محدود — بدون تنظیمات حیاتی."
         markup = InlineKeyboardMarkup(keyboard)
@@ -157,7 +171,10 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
         [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
         [InlineKeyboardButton("🎫 مدیریت تیکت‌ها",     callback_data='ticket:admin_list')],
         [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه",  callback_data='report:manage:all')],
-        [InlineKeyboardButton("📢 ارسال همگانی",        callback_data='admin:broadcast')],
+        [
+            InlineKeyboardButton("📢 ارسال همگانی",  callback_data='admin:broadcast'),
+            InlineKeyboardButton("📊 نظرسنجی کانال", callback_data='admin:poll_main'),
+        ],
         [InlineKeyboardButton("💾 پشتیبان‌گیری",        callback_data='backup:menu')],
         [InlineKeyboardButton("📡 وضعیت ربات",            callback_data='admin:bot_status')],
     ]
@@ -799,6 +816,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ══════════════════════════════════════════════
     elif action == 'broadcast':
         await _broadcast_main(query, context)
+
+    # ══ POLL ══
+    elif action == 'poll_main':
+        await _poll_main(query, context)
+    elif action == 'poll_ask_q':
+        await _poll_ask_question(query, context)
+    elif action == 'poll_add_opt':
+        await _poll_add_option_prompt(query, context)
+    elif action == 'poll_del_opt':
+        idx = int(parts[2]) if len(parts) > 2 else -1
+        opts = context.user_data.get('poll_options', [])
+        if 0 <= idx < len(opts):
+            opts.pop(idx)
+        await _poll_preview(query, context)
+    elif action == 'poll_toggle_anon':
+        context.user_data['poll_anonymous'] = not context.user_data.get('poll_anonymous', True)
+        await _poll_preview(query, context)
+    elif action == 'poll_toggle_multi':
+        context.user_data['poll_allows_multiple'] = not context.user_data.get('poll_allows_multiple', False)
+        await _poll_preview(query, context)
+    elif action == 'poll_send':
+        await _poll_do_send(query, context)
+    elif action == 'poll_cancel':
+        _poll_clear(context)
+        await query.answer('❌ نظرسنجی لغو شد.')
+        await _admin_menu(query, uid=uid)
     elif action == 'bc_target':
         target = parts[2] if len(parts) > 2 else 'all'
         context.user_data['bc_target'] = target
@@ -1143,6 +1186,166 @@ def _broadcast_clear(context):
         context.user_data.pop(key, None)
 
 
+# ══════════════════════════════════════════════════
+# 📊 توابع Poll (نظرسنجی کانال)
+# ══════════════════════════════════════════════════
+
+async def _poll_main(query, context):
+    """منوی اصلی نظرسنجی — با بررسی اینکه POLL_CHANNEL_ID تنظیم شده یا نه"""
+    if not POLL_CHANNEL_ID:
+        await query.edit_message_text(
+            "📊 <b>نظرسنجی کانال</b>\n\n"            "⚠️ <b>تنظیم نشده!</b>\n\n"            "برای استفاده از این قابلیت باید:\n"            "۱. یک کانال تلگرام بساز\n"            "۲. ربات را admin کانال کن\n"            "۳. ID کانال را در .env اضافه کن:\n"            "   <code>POLL_CHANNEL_ID=-100xxxxxxxxxx</code>\n\n"            "بعد از تنظیم، ربات را ری‌استارت کن.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')
+            ]])
+        )
+        return
+
+    _poll_clear(context)
+    keyboard = [
+        [InlineKeyboardButton("➕ نظرسنجی جدید", callback_data='admin:poll_ask_q')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(
+        f"📊 <b>نظرسنجی کانال</b>\n\n"        f"📌 پیام به کانال: <code>{POLL_CHANNEL_ID}</code>\n\n"        "نظرسنجی native تلگرام در کانال ارسال می‌شود.\n"        "همه دانشجوها نتیجه را real-time می‌بینند.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _poll_ask_question(query, context):
+    """مرحله ۱: دریافت سوال نظرسنجی"""
+    _poll_clear(context)
+    context.user_data['mode'] = _POLL_MODE_QUESTION
+    await query.edit_message_text(
+        "📊 <b>نظرسنجی جدید</b>\n\n"        "━━━━━━━━━━━━━━━━\n"        "✍️ <b>مرحله ۱:</b> سوال نظرسنجی را بنویسید:\n\n"        "<i>مثال: بهترین زمان برای کلاس جبرانی چه روزیه؟</i>\n\n"        "💡 حداکثر ۲۵۵ کاراکتر",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ لغو", callback_data='admin:poll_cancel')
+        ]])
+    )
+
+
+async def _poll_add_option_prompt(query, context):
+    """مرحله ۲: درخواست گزینه جدید"""
+    opts = context.user_data.get('poll_options', [])
+    context.user_data['mode'] = _POLL_MODE_OPTIONS
+    opts_text = '\n'.join(f"  {i+1}. {o}" for i, o in enumerate(opts)) if opts else '  (هنوز گزینه‌ای نیست)'
+    await query.edit_message_text(
+        f"📊 <b>نظرسنجی — افزودن گزینه</b>\n\n"        f"❓ سوال: <b>{context.user_data.get('poll_question','')}</b>\n\n"        f"📋 گزینه‌های فعلی ({len(opts)}/10):\n{opts_text}\n\n"        "━━━━━━━━━━━━━━━━\n"        "✍️ گزینه جدید را بنویسید (حداکثر ۱۰۰ کاراکتر):",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ پیش‌نمایش و ارسال", callback_data='admin:poll_send')] if len(opts) >= 2 else [],
+            [InlineKeyboardButton("❌ لغو", callback_data='admin:poll_cancel')],
+        ])
+    )
+
+
+async def _poll_preview(query, context):
+    """نمایش پیش‌نمایش نظرسنجی با گزینه‌ها"""
+    question = context.user_data.get('poll_question', '')
+    opts     = context.user_data.get('poll_options', [])
+    anon     = context.user_data.get('poll_anonymous', True)
+    multi    = context.user_data.get('poll_allows_multiple', False)
+
+    opts_text = '\n'.join(f"  {'✅' if i==0 else '⬜'} {o}" for i, o in enumerate(opts))
+    anon_icon  = "🔒 ناشناس" if anon else "👤 غیرناشناس"
+    multi_icon = "☑️ چندگزینه‌ای" if multi else "🔘 تک‌گزینه‌ای"
+
+    keyboard = []
+    if len(opts) < 10:
+        keyboard.append([InlineKeyboardButton("➕ افزودن گزینه", callback_data='admin:poll_add_opt')])
+
+    # دکمه حذف گزینه‌ها
+    del_row = []
+    for i, o in enumerate(opts):
+        short = o[:10] + '…' if len(o) > 10 else o
+        del_row.append(InlineKeyboardButton(f"🗑 {short}", callback_data=f'admin:poll_del_opt:{i}'))
+        if len(del_row) == 2:
+            keyboard.append(del_row)
+            del_row = []
+    if del_row:
+        keyboard.append(del_row)
+
+    keyboard.append([
+        InlineKeyboardButton(f"{anon_icon}",  callback_data='admin:poll_toggle_anon'),
+        InlineKeyboardButton(f"{multi_icon}", callback_data='admin:poll_toggle_multi'),
+    ])
+    if len(opts) >= 2:
+        keyboard.append([InlineKeyboardButton("📤 ارسال به کانال", callback_data='admin:poll_send')])
+    keyboard.append([InlineKeyboardButton("❌ لغو", callback_data='admin:poll_cancel')])
+
+    await query.edit_message_text(
+        f"📊 <b>پیش‌نمایش نظرسنجی</b>\n\n"        f"❓ <b>{question}</b>\n\n"        f"{opts_text}\n\n"        f"━━━━━━━━━━━━━━━━\n"        f"⚙️ {anon_icon}  |  {multi_icon}\n"        f"📌 کانال: <code>{POLL_CHANNEL_ID}</code>\n\n"        f"{'✅ آماده ارسال' if len(opts) >= 2 else '⚠️ حداقل ۲ گزینه لازم است'}",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _poll_do_send(query, context):
+    """ارسال poll به کانال"""
+    question = context.user_data.get('poll_question', '')
+    opts     = context.user_data.get('poll_options', [])
+    anon     = context.user_data.get('poll_anonymous', True)
+    multi    = context.user_data.get('poll_allows_multiple', False)
+
+    if not question or len(opts) < 2:
+        await query.answer('❌ سوال یا گزینه‌ها ناقص است.', show_alert=True)
+        return
+
+    if not POLL_CHANNEL_ID:
+        await query.answer('❌ POLL_CHANNEL_ID تنظیم نشده!', show_alert=True)
+        return
+
+    try:
+        await context.bot.send_poll(
+            chat_id=POLL_CHANNEL_ID,
+            question=question,
+            options=opts,
+            is_anonymous=anon,
+            allows_multiple_answers=multi,
+            type='regular',
+        )
+        actor_id   = query.from_user.id
+        actor_user = await db.get_user(actor_id)
+        actor_name = actor_user.get('name', 'مدیر') if actor_user else 'مدیر'
+        actor_role = await db.get_actor_role_label(actor_id)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, actor_id,
+            "ارسال نظرسنجی به کانال", module='Poll', severity='INFO',
+            actor_role=actor_role,
+            details=f"سوال: {question[:50]} | گزینه‌ها: {len(opts)}",
+            tags=['نظرسنجی']
+        )
+        _poll_clear(context)
+        await query.edit_message_text(
+            f"✅ <b>نظرسنجی ارسال شد!</b>\n\n"            f"❓ {question}\n"            f"📋 {len(opts)} گزینه\n"            f"📌 کانال: <code>{POLL_CHANNEL_ID}</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 نظرسنجی جدید", callback_data='admin:poll_main')],
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+            ])
+        )
+    except Exception as e:
+        logger.error(f"poll send error: {e}")
+        await query.edit_message_text(
+            f"❌ <b>خطا در ارسال نظرسنجی</b>\n\n"            f"<code>{str(e)[:200]}</code>\n\n"            "مطمئن شو ربات admin کانال است.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:poll_main')
+            ]])
+        )
+
+
+def _poll_clear(context):
+    for key in ['poll_question', 'poll_options', 'poll_anonymous', 'poll_allows_multiple']:
+        context.user_data.pop(key, None)
+    if context.user_data.get('mode') in (_POLL_MODE_QUESTION, _POLL_MODE_OPTIONS):
+        context.user_data.pop('mode', None)
+
+
+# ══════════════════════════════════════════════════
 async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت پیام و نمایش preview — فراخوانی از unified handlers در bot.py"""
     uid = update.effective_user.id
@@ -2128,6 +2331,63 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             context.user_data['mode'] = ''
             await update.message.reply_text(f"✅ فایل بانک سوال اضافه شد!\n📚 {lesson} — {topic}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به بانک سوال", callback_data='admin:qbank_manage')]]))
+        return True
+
+    # ── Poll: دریافت سوال ──
+    if mode == _POLL_MODE_QUESTION:
+        if len(text) > 255:
+            await update.message.reply_text(
+                '❌ سوال خیلی طولانی است (حداکثر ۲۵۵ کاراکتر).\nدوباره بنویسید:')
+            return True
+        context.user_data['poll_question'] = text
+        context.user_data['poll_options']  = []
+        context.user_data['poll_anonymous'] = True
+        context.user_data['poll_allows_multiple'] = False
+        context.user_data['mode'] = _POLL_MODE_OPTIONS
+        opts_text = '  (هنوز گزینه‌ای نیست)'
+        await update.message.reply_text(
+            f'📊 <b>نظرسنجی — افزودن گزینه‌ها</b>\n\n'
+            f'❓ سوال: <b>{text}</b>\n\n'
+            f'📋 گزینه‌های فعلی (0/10):\n{opts_text}\n\n'
+            '━━━━━━━━━━━━━━━━\n'
+            '✍️ اولین گزینه را بنویسید:',
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton('❌ لغو', callback_data='admin:poll_cancel')
+            ]])
+        )
+        return True
+
+    # ── Poll: دریافت گزینه‌ها ──
+    if mode == _POLL_MODE_OPTIONS:
+        if len(text) > 100:
+            await update.message.reply_text(
+                '❌ گزینه خیلی طولانی است (حداکثر ۱۰۰ کاراکتر).\nدوباره بنویسید:')
+            return True
+        opts = context.user_data.setdefault('poll_options', [])
+        if text in opts:
+            await update.message.reply_text('⚠️ این گزینه قبلاً اضافه شده. گزینه دیگری وارد کنید:')
+            return True
+        if len(opts) >= 10:
+            await update.message.reply_text('❌ حداکثر ۱۰ گزینه مجاز است.')
+            return True
+        opts.append(text)
+        question = context.user_data.get('poll_question', '')
+        opts_text = '\n'.join(f'  {i+1}. {o}' for i, o in enumerate(opts))
+        keyboard = []
+        if len(opts) >= 2:
+            keyboard.append([InlineKeyboardButton('✅ پیش‌نمایش و ارسال', callback_data='admin:poll_send')])
+        if len(opts) < 10:
+            keyboard.append([InlineKeyboardButton('➕ گزینه بعدی را بنویسید', callback_data='admin:poll_add_opt')])
+        keyboard.append([InlineKeyboardButton('❌ لغو', callback_data='admin:poll_cancel')])
+        await update.message.reply_text(
+            f'📊 <b>گزینه اضافه شد ✅</b>\n\n'
+            f'❓ سوال: <b>{question}</b>\n\n'
+            f'📋 گزینه‌ها ({len(opts)}/10):\n{opts_text}\n\n'
+            f'{"✍️ گزینه بعدی را بنویسید یا ارسال کنید:" if len(opts) < 10 else "✅ آماده ارسال"}',
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return True
 
     return False
