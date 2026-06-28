@@ -9,7 +9,15 @@ RESOURCE_TYPES = ['📄 جزوه', '📊 پاورپوینت', '📝 نکات', '
 logger = logging.getLogger(__name__)
 UPLOAD_METADATA = 1
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
-CHANNEL_ID = os.getenv('CHANNEL_ID', '')
+CHANNEL_ID = os.getenv('CHANNEL_ID', '')  # fallback — از پنل ادمین تنظیم کنید
+
+
+async def _get_poll_channel_id():
+    """آیدی کانال نظرسنجی را از دیتابیس می‌خواند (اولویت) یا از env."""
+    from_db = await db.get_setting('poll_channel_id', None)
+    if from_db:
+        return from_db
+    return CHANNEL_ID or None
 
 
 async def resources_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,10 +231,11 @@ async def upload_metadata_handler(update: Update, context: ContextTypes.DEFAULT_
                 {'version': version, 'tags': tags, 'importance': importance, 'description': description}
             )
 
-            if CHANNEL_ID:
+            channel_target = await _get_poll_channel_id()
+            if channel_target:
                 try:
                     await context.bot.send_document(
-                        CHANNEL_ID, file_id,
+                        channel_target, file_id,
                         caption=f"📚 {path.get('lesson','')} — {path.get('topic','')}\n{path.get('type','')} v{version}",
                         parse_mode='HTML'
                     )
