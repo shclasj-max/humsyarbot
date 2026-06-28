@@ -633,6 +633,10 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
         return await admin_broadcast_handler(update, context)
 
+    # ۱b. Poll: دریافت سوال یا گزینه‌های نظرسنجی
+    if uid == ADMIN_ID and context.user_data.get('mode') in ('poll_q', 'poll_opts'):
+        return await handle_admin_text(update, context)
+
     # ۲. FIX: profile_edit — ویرایش نام/شماره دانشجویی (هر کاربری)
     if context.user_data.get('mode') == 'profile_edit':
         from profile import profile_text_handler
