@@ -56,7 +56,10 @@ async def build_dashboard_text(uid: int) -> tuple:
     act_stars = '🔥' * min(act // 3, 5) if act > 0 else '💤'
 
     notif_s       = user.get('notification_settings', {})
-    active_notifs = sum(1 for v in notif_s.values() if v)
+    from notifications import NOTIF_ITEMS
+    notif_total   = len(NOTIF_ITEMS)
+    defaults      = await db.get_notif_defaults()
+    active_notifs = sum(1 for k, _, _ in NOTIF_ITEMS if notif_s.get(k, defaults.get(k, True)))
     group_icon    = "1️⃣" if str(user.get('group', '')) == '1' else "2️⃣"
     role          = user.get('role', 'student')
     role_badge    = (
@@ -84,7 +87,7 @@ async def build_dashboard_text(uid: int) -> tuple:
         f"⚡ <b>نقاط ضعف:</b> {weak_str}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📚 منابع جدید این هفته: <b>{new_res}</b>  "
-        f"🔔 اعلان‌های فعال: <b>{active_notifs}/4</b>"
+        f"🔔 اعلان‌های فعال: <b>{active_notifs}/{notif_total}</b>"
     )
     if open_tickets:
         text += f"\n🎫 تیکت‌های باز: <b>{open_tickets}</b>"
