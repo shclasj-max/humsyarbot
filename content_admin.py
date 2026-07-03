@@ -485,6 +485,20 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif action == 'del_faq':
         await db.faq_delete(parts[2]); await _show_faq(query)
 
+    # FIX باگ بسیار مهم — منشأ «ربات متن دریافت نمی‌کند»:
+    # این تابع به‌عنوان entry_point با pattern='^ca:' ثبت شده است،
+    # یعنی با هر کلیک در پنل محتوا، ConversationHandler کاربر را
+    # وارد یک state می‌کند. قبلاً این تابع هیچ‌وقت
+    # ConversationHandler.END برنمی‌گرداند، پس کاربر برای ۳۰ دقیقه
+    # (conversation_timeout) در آن state می‌ماند — حتی برای اکشن‌های
+    # ساده‌ی نمایشی که نیازی به ورودی متنی ندارند. در نتیجه پیام‌های
+    # بعدی کاربر در بخش‌های کاملاً نامرتبط (مثل broadcast در پنل
+    # ادمین) توسط ca_text_handler به‌اشتباه قورت می‌شدند.
+    # حالا اگر action واقعاً منتظر یک ورودی متنی/فایلی نباشد
+    # (یعنی در KEEP_MODE نیست)، رسماً از conversation خارج می‌شویم.
+    if action not in KEEP_MODE:
+        return ConversationHandler.END
+
 
 # ══════════════════════════════════════════════════════════
 #  توابع نمایش
@@ -868,7 +882,7 @@ async def ca_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
-    if not await db.is_content_admin(uid): return
+    if not await db.is_content_admin(uid): return ConversationHandler.END
     ca_mode = context.user_data.get('ca_mode','')
     text    = update.message.text.strip()
 
@@ -876,6 +890,23 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _clear(context)
         await update.message.reply_text("✅ عملیات لغو شد.")
         return ConversationHandler.END
+
+    # FIX باگ مهم: 'ربات متن دریافت نمی‌کند' — این تابع به‌عنوان
+    # entry_point ربات را در ConversationHandler نگه می‌داشت (با
+    # callback pattern='^ca:') حتی بعد از خروج از پنل محتوا. اگر
+    # ca_mode خالی/نامعتبر باشد (یعنی کاربر دیگر واقعاً در حال
+    # تکمیل یک فرم محتوا نیست — مثلاً وارد broadcast شده)، باید
+    # فوراً کنترل را به مسیر عادی (route_message) برگردانیم،
+    # نه این‌که متن را بی‌صدا نادیده بگیریم.
+    VALID_CA_MODES = {
+        'add_lesson', 'add_session', 'edit_lesson', 'edit_session',
+        'waiting_description', 'waiting_ref_description',
+        'add_faq', 'add_ref_subject', 'add_ref_book',
+        'edit_ref_subject', 'edit_ref_book',
+    }
+    if ca_mode not in VALID_CA_MODES:
+        from message_router import route_message
+        return await route_message(update, context)
 
     if ca_mode == 'add_lesson':
         ps = [p.strip() for p in text.split(',')]
