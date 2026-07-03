@@ -530,6 +530,48 @@ async def channel_lock_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
+async def broadcast_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX باگ اصلی گزارش‌شده: «گاهی پیام همگانی خونده میشه، گاهی نه».
+    علت: ConversationHandler اصلی (conv) و MessageHandler عمومی متن
+    (unified_text_handler) هر دو در همون گروه پیش‌فرض (group=0) ثبت
+    می‌شن و conv زودتر ثبت می‌شه. در PTB، توی هر گروه فقط اولین
+    هندلری که check_update‌ش True بشه اجرا میشه. پس اگه ادمین قبلاً
+    (حتی خیلی وقت پیش) وارد یکی از state های conv شده باشه (مثلاً
+    پنل محتوا، ساخت سوال، ویرایش پروفایل، تیکت) و بدون /cancel یا
+    رسیدن به END از اون خارج نشده باشه، اون state گیر می‌مونه و از
+    اون به بعد پیام‌های متنی خصوصی — از جمله متن broadcast — اول به
+    هندلر state قدیمی می‌افتن، نه به admin_broadcast_handler.
+
+    راه‌حل: این گیت با group=-1 (قبل از conv) ثبت می‌شه، پس همیشه —
+    فارغ از هر state گیرافتاده‌ای — اول چک می‌کنه mode == 'broadcast'
+    هست یا نه و در صورت وجود مستقیم admin_broadcast_handler رو صدا
+    می‌زنه و با ApplicationHandlerStop جلوی ادامه رو می‌گیره.
+    """
+    if update.effective_chat is None or update.effective_chat.type != 'private':
+        return
+    msg = update.message
+    if msg is None:
+        return
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None:
+        return
+    if context.user_data.get('mode') != 'broadcast':
+        return
+
+    if uid != ADMIN_ID:
+        role_doc = await db.get_admin_role(uid)
+        perms = db.ROLE_PERMISSIONS.get(role_doc.get('role', ''), set()) if role_doc else set()
+        if 'broadcast' not in perms:
+            return
+
+    if not (msg.text or msg.photo or msg.video or msg.document or msg.voice or msg.audio):
+        return
+
+    await admin_broadcast_handler(update, context)
+    raise ApplicationHandlerStop
+
+
 async def channel_lock_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دکمه «عضو شدم، بررسی کن» — چک مجدد و عبور در صورت موفقیت"""
     query = update.callback_query
@@ -835,6 +877,10 @@ def build_application() -> Application:
     # ترتیب مهم است: ابتدا maintenance (اولویت بالاتر)، سپس قفل کانال
     app.add_handler(TypeHandler(Update, maintenance_gate), group=-1)
     app.add_handler(TypeHandler(Update, channel_lock_gate), group=-1)
+    # FIX باگ اصلی: پیام همگانی باید زودتر از ConversationHandler اصلی
+    # (conv) چک بشه، وگرنه اگه ادمین در یکی از state های قدیمی conv
+    # گیر کرده باشه، متن broadcast اصلاً بهش نمی‌رسه.
+    app.add_handler(TypeHandler(Update, broadcast_gate), group=-1)
     app.add_handler(TypeHandler(Update, update_last_active), group=-1)
 
     app.add_handler(conv)
