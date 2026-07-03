@@ -1214,8 +1214,14 @@ def _broadcast_clear(context):
 async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت پیام و نمایش preview — فراخوانی از unified handlers در bot.py"""
     uid = update.effective_user.id
+    # FIX باگ: قبلاً فقط ADMIN_ID اجازه داشت، پس نقش‌های فرعی که
+    # مجوز broadcast دارند (مثلاً 'broadcaster' یا 'bot_admin') هیچ‌وقت
+    # نمی‌تونستن واقعاً پیام همگانی بفرستن — متنشون گرفته نمی‌شد.
     if uid != ADMIN_ID:
-        return
+        role_doc = await db.get_admin_role(uid)
+        perms = db.ROLE_PERMISSIONS.get(role_doc.get('role', ''), set()) if role_doc else set()
+        if 'broadcast' not in perms:
+            return
     if context.user_data.get('mode') != 'broadcast':
         return
 
