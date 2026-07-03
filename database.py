@@ -1076,7 +1076,7 @@ class DB:
         'content_scoped': {'content_scoped', 'questions_review_scoped'},
         'broadcaster':    {'broadcast'},
         'reviewer':       {'reports_review'},                          # FIX جدید
-        'bot_admin':      {'users', 'schedules', 'notifications'},      # FIX جدید
+        'bot_admin':      {'users', 'schedules', 'notifications', 'broadcast'},      # FIX جدید
     }
 
     async def add_admin_role(self, uid: int, role: str, added_by: int,
