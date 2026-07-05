@@ -624,7 +624,7 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     'qbank_awaiting_desc', 'add_schedule', 'flex_time_change',
     'set_auto_backup_hour', 'report_note', 'ticket_search',
     'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
-    'add_required_channel',
+    'add_required_channel', 'edit_schedule_field',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
@@ -642,7 +642,9 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     msg_text = update.message.text.strip() if update.message and update.message.text else ''
     if msg_text in MENU_BUTTON_TEXTS and context.user_data.get('mode') in INTERRUPTIBLE_SIMPLE_MODES:
         for k in ('mode', 'new_role_type', 'new_role_intake', 'flex_change_sid',
-                  'report_target_type', 'report_target_id', 'report_reason'):
+                  'report_target_type', 'report_target_id', 'report_reason',
+                  'edit_schedule_sid', 'edit_schedule_field', 'schedule_edit_sid',
+                  'schedule_type', 'pending_schedule'):
             context.user_data.pop(k, None)
         # ادامه نده — اجازه بده همین تابع پایین‌تر پیام دکمه را عادی مسیر کند
 
@@ -717,6 +719,11 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') == 'flex_time_change':
         from schedule import handle_flex_time_change_text
         return await handle_flex_time_change_text(update, context)
+
+    # ۵c2. FIX جدید (بخش اول): edit_schedule_field — ویرایش تک‌فیلدی برنامه
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'edit_schedule_field':
+        from schedule import handle_edit_schedule_field_text
+        return await handle_edit_schedule_field_text(update, context)
 
     # ۵d. FIX جدید: ساعت دلخواه بکاپ خودکار
     if uid == ADMIN_ID and context.user_data.get('mode') == 'set_auto_backup_hour':
