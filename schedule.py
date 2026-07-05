@@ -167,27 +167,36 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'edit_pending' and uid == ADMIN_ID:
         p = context.user_data.get('pending_schedule', {})
         stype = p.get('stype', 'class')
+        edit_sid = p.get('edit_sid')
         context.user_data.pop('pending_schedule', None)
         context.user_data['schedule_type'] = stype
         context.user_data['mode'] = 'add_schedule'
+        if edit_sid:
+            context.user_data['schedule_edit_sid'] = edit_sid
         type_fa = TYPE_NAMES.get(stype, stype)
+        cancel_cb = f'schedule:item:{edit_sid}' if edit_sid else 'admin:main'
         await query.edit_message_text(
             f"✏️ <b>ویرایش {type_fa}</b>\n\n"
             "اطلاعات را دوباره با فرمت زیر بفرستید:\n"
             "<code>درس, استاد, 1404/MM/DD, HH:MM, مکان, گروه, توضیح</code>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data='admin:main')
+                InlineKeyboardButton("❌ لغو", callback_data=cancel_cb)
             ]])
         )
 
     elif action == 'cancel_pending' and uid == ADMIN_ID:
+        p = context.user_data.get('pending_schedule', {})
+        edit_sid = p.get('edit_sid')
         context.user_data.pop('pending_schedule', None)
         context.user_data.pop('mode', None)
+        context.user_data.pop('schedule_edit_sid', None)
+        back_cb = f'schedule:item:{edit_sid}' if edit_sid else 'admin:main'
+        back_label = "🔙 بازگشت به برنامه" if edit_sid else "🔙 پنل ادمین"
         await query.edit_message_text(
-            "❌ لغو شد. هیچ موردی ثبت نشد.",
+            "❌ لغو شد. هیچ تغییری ثبت نشد." if edit_sid else "❌ لغو شد. هیچ موردی ثبت نشد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 پنل ادمین", callback_data='admin:main')
+                InlineKeyboardButton(back_label, callback_data=back_cb)
             ]])
         )
 
@@ -290,6 +299,72 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ══════════════════════════════════════════════
     elif action == 'flex_list' and uid == ADMIN_ID:
         await _show_flex_list(query)
+
+    # ══════════════════════════════════════════════
+    # بخش اول: قابلیت ویرایش برنامه‌ها
+    # ══════════════════════════════════════════════
+    elif action == 'manage_types' and uid == ADMIN_ID:
+        await _show_manage_types(query)
+
+    elif action == 'manage_list' and uid == ADMIN_ID:
+        stype = parts[2] if len(parts) > 2 else 'class'
+        await _show_manage_list(query, stype)
+
+    elif action == 'item' and uid == ADMIN_ID:
+        sid = parts[2]
+        await _show_item_detail(query, sid)
+
+    elif action == 'edit_menu' and uid == ADMIN_ID:
+        sid = parts[2]
+        await _show_edit_menu(query, sid)
+
+    elif action == 'edit_field' and uid == ADMIN_ID:
+        sid   = parts[2]
+        field = parts[3] if len(parts) > 3 else ''
+        await _start_field_edit(query, context, sid, field)
+
+    elif action == 'edit_full' and uid == ADMIN_ID:
+        sid = parts[2]
+        item = await db.get_schedule_by_id(sid)
+        if not item:
+            await query.edit_message_text("❌ این برنامه پیدا نشد.")
+            return
+        context.user_data['schedule_type']    = item.get('type', 'class')
+        context.user_data['schedule_edit_sid'] = sid
+        context.user_data['mode']             = 'add_schedule'
+        type_fa = TYPE_NAMES.get(item.get('type', 'class'), '')
+        await query.edit_message_text(
+            f"✏️ <b>ویرایش کامل {type_fa}</b>\n\n"
+            "اطلاعات جدید را با فرمت زیر بفرستید (کل اطلاعات جایگزین می‌شود):\n"
+            "<code>درس, استاد, 1404/MM/DD, HH:MM, مکان, گروه, توضیح</code>\n\n"
+            "📌 مثال:\n"
+            "<code>آناتومی, دکتر محمدی, 1404/01/15, 09:00, کلاس A2, هر دو</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data=f'schedule:item:{sid}')
+            ]])
+        )
+
+    elif action == 'del_item' and uid == ADMIN_ID:
+        sid = parts[2]
+        item = await db.schedules.find_one({'_id': ObjectId(sid)})
+        stype = item.get('type', 'class') if item else 'class'
+        await db.delete_schedule(sid)
+        await query.answer("🗑 برنامه حذف شد!", show_alert=True)
+        if item:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+            actor_role = await db.get_actor_role_label(uid)
+            type_fa = TYPE_NAMES.get(item.get('type', ''), '')
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                f"حذف {type_fa}", module='Schedules', severity='HIGH',
+                actor_role=actor_role,
+                target_id=sid, target_type='schedule',
+                target_label=f"{item.get('lesson','')} — {fmt_jalali(item.get('date',''))}",
+                tags=['حذف_برنامه']
+            )
+        await _show_manage_list(query, stype)
 
     elif action == 'flex_change' and uid == ADMIN_ID:
         sid = parts[2]
@@ -452,6 +527,251 @@ async def _show_schedule_list(query, items: list, title: str):
     if len(text) > 4000:
         text = text[:3900] + "\n\n<i>... موارد بیشتر موجود است</i>"
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=kb_back)
+
+
+# ══════════════════════════════════════════════════
+#  بخش اول: مدیریت (مشاهده/ویرایش/حذف) برنامه‌ها
+# ══════════════════════════════════════════════════
+
+FIELD_LABELS = {
+    'date':     '📅 تاریخ',
+    'time':     '⏰ ساعت',
+    'location': '📍 مکان',
+    'teacher':  '👨\u200d🏫 استاد',
+    'lesson':   '📚 درس',
+    'notes':    '📝 توضیحات',
+    'group':    '👥 گروه',
+}
+
+
+async def _show_manage_types(query):
+    """FIX جدید: انتخاب نوع برنامه برای ویرایش/مدیریت"""
+    keyboard = [
+        [InlineKeyboardButton("📖 کلاس",   callback_data='schedule:manage_list:class')],
+        [InlineKeyboardButton("📝 امتحان", callback_data='schedule:manage_list:exam')],
+        [InlineKeyboardButton("🔄 جبرانی", callback_data='schedule:manage_list:makeup')],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(
+        "✏️ <b>ویرایش برنامه‌ها</b>\n\nنوع برنامه‌ای که می‌خواهید ببینید/ویرایش کنید را انتخاب کنید:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _show_manage_list(query, stype: str):
+    """
+    FIX جدید (بخش اول): نمایش لیست برنامه‌های ثبت‌شده از یک نوع خاص،
+    برای انتخاب و مشاهده/ویرایش/حذف.
+    """
+    items = await db.get_schedules(stype=stype, upcoming=False)
+    type_fa = TYPE_NAMES.get(stype, stype)
+    keyboard = []
+    for s in items[:30]:
+        sid = str(s['_id'])
+        jd  = fmt_jalali(s.get('date', ''))
+        label = f"{s.get('lesson','')} | {jd} {s.get('time','')}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f'schedule:item:{sid}')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='schedule:manage_types')])
+    text = f"✏️ <b>{type_fa}</b>\n\nیک مورد را برای مشاهده/ویرایش/حذف انتخاب کنید:"
+    if not items:
+        text = f"✏️ <b>{type_fa}</b>\n\n❌ هیچ برنامه‌ای از این نوع ثبت نشده است."
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_item_detail(query, sid: str):
+    """FIX جدید: نمایش «مشاهده» کامل یک برنامه + دکمه‌های ویرایش/حذف/بازگشت"""
+    item = await db.get_schedule_by_id(sid)
+    if not item:
+        await query.edit_message_text("❌ این برنامه پیدا نشد.")
+        return
+    stype   = item.get('type', 'class')
+    type_fa = TYPE_NAMES.get(stype, stype)
+    jalali_display = fmt_jalali(item.get('date', ''))
+    flex = item.get('flex_type', 'fixed')
+    flex_label = "🔄 منعطف" if flex == 'flexible' else "📌 ثابت"
+    g_label = item.get('group') or 'هر دو'
+    text = (
+        f"👁 <b>{type_fa}</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"📚 <b>درس:</b> {item.get('lesson','')}\n"
+        f"👨‍🏫 <b>استاد:</b> {item.get('teacher','')}\n"
+        f"📅 <b>تاریخ:</b> {jalali_display}\n"
+        f"⏰ <b>ساعت:</b> {item.get('time','')}\n"
+        f"📍 <b>مکان:</b> {item.get('location','')}\n"
+        f"👥 <b>گروه:</b> {g_label}\n"
+        f"🔁 <b>نوع زمان‌بندی:</b> {flex_label}\n"
+        + (f"📝 <b>توضیحات:</b> {item.get('notes')}\n" if item.get('notes') else '')
+    )
+    keyboard = [
+        [InlineKeyboardButton("✏️ ویرایش", callback_data=f'schedule:edit_menu:{sid}')],
+        [InlineKeyboardButton("🗑 حذف",     callback_data=f'schedule:del_item:{sid}')],
+        [InlineKeyboardButton("🔙 بازگشت",  callback_data=f'schedule:manage_list:{stype}')],
+    ]
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_edit_menu(query, sid: str):
+    """FIX جدید: انتخاب اینکه کدام فیلد ویرایش شود، یا ویرایش کامل"""
+    item = await db.get_schedule_by_id(sid)
+    if not item:
+        await query.edit_message_text("❌ این برنامه پیدا نشد.")
+        return
+    keyboard = [
+        [
+            InlineKeyboardButton("📅 ویرایش تاریخ", callback_data=f'schedule:edit_field:{sid}:date'),
+            InlineKeyboardButton("⏰ ویرایش ساعت",  callback_data=f'schedule:edit_field:{sid}:time'),
+        ],
+        [
+            InlineKeyboardButton("📍 ویرایش مکان",  callback_data=f'schedule:edit_field:{sid}:location'),
+            InlineKeyboardButton("👨‍🏫 ویرایش استاد", callback_data=f'schedule:edit_field:{sid}:teacher'),
+        ],
+        [
+            InlineKeyboardButton("📚 ویرایش درس",   callback_data=f'schedule:edit_field:{sid}:lesson'),
+            InlineKeyboardButton("👥 ویرایش گروه",  callback_data=f'schedule:edit_field:{sid}:group'),
+        ],
+        [InlineKeyboardButton("📝 ویرایش توضیحات", callback_data=f'schedule:edit_field:{sid}:notes')],
+        [InlineKeyboardButton("✏️ ویرایش کامل همه اطلاعات", callback_data=f'schedule:edit_full:{sid}')],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data=f'schedule:item:{sid}')],
+    ]
+    await query.edit_message_text(
+        f"✏️ <b>ویرایش {item.get('lesson','')}</b>\n\nکدام بخش را می‌خواهید ویرایش کنید؟",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _start_field_edit(query, context, sid: str, field: str):
+    """FIX جدید: شروع ویرایش تک‌فیلدی — نمایش مقدار فعلی و درخواست مقدار جدید"""
+    item = await db.get_schedule_by_id(sid)
+    if not item or field not in FIELD_LABELS:
+        await query.edit_message_text("❌ این برنامه پیدا نشد.")
+        return
+    context.user_data['edit_schedule_sid']   = sid
+    context.user_data['edit_schedule_field'] = field
+    context.user_data['mode']                = 'edit_schedule_field'
+
+    current = item.get(field, '')
+    current_display = fmt_jalali(current) if field == 'date' else (current or '—')
+    label = FIELD_LABELS[field]
+
+    hint = ''
+    if field == 'date':
+        hint = "\n\nفرمت: <code>1404/MM/DD</code> (تاریخ شمسی)"
+    elif field == 'time':
+        hint = "\n\nفرمت: <code>HH:MM</code> — مثال: <code>14:30</code>"
+    elif field == 'group':
+        hint = "\n\nمقدار: <code>1</code> یا <code>2</code> یا <code>هر دو</code>"
+
+    await query.edit_message_text(
+        f"✏️ <b>{label}</b>\n\n"
+        f"مقدار فعلی: <b>{current_display}</b>\n\n"
+        f"مقدار جدید را ارسال کنید:{hint}",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ لغو", callback_data=f'schedule:item:{sid}')
+        ]])
+    )
+
+
+async def handle_edit_schedule_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید (بخش اول): پردازش مقدار جدید یک فیلد و به‌روزرسانی مستقیم
+    همان رکورد در دیتابیس (UPDATE، نه INSERT) + اطلاع‌رسانی به دانشجوها.
+    """
+    from utils import broadcast_message
+    sid   = context.user_data.pop('edit_schedule_sid', None)
+    field = context.user_data.pop('edit_schedule_field', None)
+    context.user_data.pop('mode', None)
+    raw   = update.message.text.strip()
+
+    if not sid or not field:
+        await update.message.reply_text("❌ خطا — دوباره تلاش کنید.")
+        return
+
+    item = await db.get_schedule_by_id(sid)
+    if not item:
+        await update.message.reply_text("❌ این برنامه پیدا نشد (ممکن است حذف شده باشد).")
+        return
+
+    value = raw
+    if field == 'date':
+        parsed = _parse_jalali_date(_normalize_text(raw))
+        try:
+            datetime.strptime(parsed, '%Y-%m-%d')
+        except ValueError:
+            await update.message.reply_text(
+                "❌ تاریخ نامعتبر است. فرمت صحیح: <code>1404/MM/DD</code>",
+                parse_mode='HTML'
+            )
+            return
+        value = parsed
+    elif field == 'time':
+        raw_time = raw.strip()
+        if not _is_valid_time(raw_time):
+            await update.message.reply_text("❌ فرمت ساعت اشتباه است. مثال: <code>14:30</code>", parse_mode='HTML')
+            return
+        value = raw_time
+    elif field == 'group':
+        group_map = {
+            '1': '1', '۱': '1', 'گروه ۱': '1', 'گروه 1': '1',
+            '2': '2', '۲': '2', 'گروه ۲': '2', 'گروه 2': '2',
+            'هر دو': 'هر دو', 'هردو': 'هر دو', 'all': 'هر دو',
+        }
+        value = group_map.get(raw.strip(), raw.strip() or 'هر دو')
+
+    before_value = fmt_jalali(item.get('date', '')) if field == 'date' else item.get(field, '')
+    ok = await db.update_schedule_field(sid, field, value)
+    if not ok:
+        await update.message.reply_text("❌ خطا در ذخیره تغییر.")
+        return
+
+    type_fa = TYPE_NAMES.get(item.get('type', ''), '')
+    label   = FIELD_LABELS.get(field, field)
+    after_value = fmt_jalali(value) if field == 'date' else value
+
+    admin_uid  = update.effective_user.id
+    admin_user = await db.get_user(admin_uid)
+    actor_name = admin_user.get('name', 'ادمین') if admin_user else 'ادمین'
+    actor_role = await db.get_actor_role_label(admin_uid)
+    await send_audit_log(
+        context.bot, 'admin', actor_name, admin_uid,
+        f"ویرایش {type_fa} — {label}", module='Schedules', severity='WARNING',
+        actor_role=actor_role,
+        target_id=sid, target_type='schedule', target_label=item.get('lesson', ''),
+        before={label: before_value}, after={label: after_value},
+        tags=['ویرایش_برنامه']
+    )
+
+    # FIX (بخش اول): اطلاع‌رسانی به دانشجوها که برنامه بروزرسانی شده —
+    # بدون هیچ کش قدیمی؛ همه Queryهای نمایش برنامه مستقیماً از دیتابیس
+    # می‌خوانند، پس نسخه جدید بلافاصله برای همه قابل مشاهده است.
+    ntype = {'exam': 'exam', 'makeup': 'makeup'}.get(item.get('type'), 'schedule')
+    users = await db.notif_users(ntype)
+    if field in ('date', 'time'):
+        notif_text = "زمان کلاس تغییر کرده است." if item.get('type') == 'class' else f"⏰ زمان {type_fa} تغییر کرده است."
+    else:
+        notif_text = f"برنامه {type_fa} شما بروزرسانی شد."
+    notif_msg = (
+        f"🔔 <b>{notif_text}</b>\n\n"
+        f"📚 {item.get('lesson','')}\n"
+        f"📅 {fmt_jalali(value) if field=='date' else fmt_jalali(item.get('date',''))}"
+        f"  ⏰ {value if field=='time' else item.get('time','')}\n"
+        f"📍 {value if field=='location' else item.get('location','')}"
+    )
+    sent, _ = await broadcast_message(context.bot, users, notif_msg)
+
+    await update.message.reply_text(
+        f"✅ <b>{label} با موفقیت ویرایش شد!</b>\n\n"
+        f"📚 {item.get('lesson','')}\n"
+        f"مقدار جدید: <b>{after_value}</b>\n\n"
+        f"🔔 <b>{sent} نفر</b> مطلع شدند.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("👁 مشاهده برنامه", callback_data=f'schedule:item:{sid}'),
+            InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:main'),
+        ]])
+    )
 
 
 async def _show_delete_list(query):
@@ -658,9 +978,12 @@ async def _show_schedule_preview(message_or_query, context, edit: bool = False):
     flex = p.get('flex_type', 'fixed')
     flex_label = "🔄 منعطف (ممکن است تغییر کند)" if flex == 'flexible' else "📌 ثابت"
     g_label = p['group'] if p['group'] not in ('', None) else 'هر دو'
+    is_edit = bool(p.get('edit_sid'))
+    header  = "👁 <b>پیش‌نمایش ویرایش — لطفاً بررسی کنید</b>" if is_edit else "👁 <b>پیش‌نمایش — لطفاً بررسی کنید</b>"
+    footer  = "بروزرسانی همان برنامه (بدون ساخت رکورد جدید)" if is_edit else "در انتظار تأیید نهایی شما"
 
     text = (
-        "👁 <b>پیش‌نمایش — لطفاً بررسی کنید</b>\n"
+        f"{header}\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"🏷 <b>نوع:</b> {type_fa}\n"
         f"📚 <b>درس:</b> {p['lesson']}\n"
@@ -672,7 +995,7 @@ async def _show_schedule_preview(message_or_query, context, edit: bool = False):
         f"🔁 <b>نوع زمان‌بندی:</b> {flex_label}\n"
         + (f"📝 <b>توضیحات:</b> {p['notes']}\n" if p.get('notes') else '')
         + "\n━━━━━━━━━━━━━━━━\n"
-        "📤 <b>وضعیت انتشار:</b> در انتظار تأیید نهایی شما"
+        f"📤 <b>وضعیت انتشار:</b> {footer}"
     )
     keyboard = [
         [InlineKeyboardButton("✅ تأیید و انتشار", callback_data='schedule:confirm_add')],
@@ -697,12 +1020,35 @@ async def _finalize_schedule_add(update_or_query, context):
     if not p:
         return
 
-    sid = await db.add_schedule(
-        p['stype'], p['lesson'], p['teacher'], p['date'], p['time'],
-        p['location'], p.get('notes', ''), p['group'],
-        flex_type=p.get('flex_type', 'fixed'),
-        flex_note=p.get('time', '') if p.get('flex_type') == 'flexible' else '',
-    )
+    edit_sid = p.get('edit_sid')
+    is_edit  = bool(edit_sid)
+
+    if is_edit:
+        # FIX جدید (بخش اول): از UPDATE استفاده می‌شود، نه INSERT —
+        # همان رکورد بروزرسانی می‌شود و ID برنامه ثابت می‌ماند.
+        ok = await db.update_schedule_full(
+            edit_sid, p['lesson'], p['teacher'], p['date'], p['time'],
+            p['location'], p.get('notes', ''), p['group'],
+            flex_type=p.get('flex_type', 'fixed'),
+            flex_note=p.get('time', '') if p.get('flex_type') == 'flexible' else '',
+        )
+        sid = edit_sid
+        if not ok:
+            for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type', 'schedule_edit_sid'):
+                context.user_data.pop(k, None)
+            fail_text = "❌ خطا در بروزرسانی — این برنامه پیدا نشد."
+            if hasattr(update_or_query, 'edit_message_text'):
+                await update_or_query.edit_message_text(fail_text)
+            else:
+                await update_or_query.message.reply_text(fail_text)
+            return
+    else:
+        sid = await db.add_schedule(
+            p['stype'], p['lesson'], p['teacher'], p['date'], p['time'],
+            p['location'], p.get('notes', ''), p['group'],
+            flex_type=p.get('flex_type', 'fixed'),
+            flex_note=p.get('time', '') if p.get('flex_type') == 'flexible' else '',
+        )
 
     # FIX جدید: نوتیف جبرانی جدا از برنامه کلاسی عادی است
     ntype = {'exam': 'exam', 'makeup': 'makeup'}.get(p['stype'], 'schedule')
@@ -711,8 +1057,12 @@ async def _finalize_schedule_add(update_or_query, context):
     g_label = f" | گروه {p['group']}" if p['group'] not in ('هر دو', '') else ''
     jalali_display = fmt_jalali(p['date'])
     flex_tag = " 🔄 (منعطف)" if p.get('flex_type') == 'flexible' else ''
+    if is_edit:
+        title_line = f"🔔 <b>{type_fa} شما بروزرسانی شد</b>{flex_tag}"
+    else:
+        title_line = f"📅 <b>{type_fa} جدید</b>{flex_tag}"
     notif_msg = (
-        f"📅 <b>{type_fa} جدید</b>{flex_tag}\n\n"
+        f"{title_line}\n\n"
         f"📚 {p['lesson']}\n"
         f"👨‍🏫 {p['teacher']}\n"
         f"📅 {jalali_display}  ⏰ {p['time']}\n"
@@ -727,18 +1077,21 @@ async def _finalize_schedule_add(update_or_query, context):
     actor_role = await db.get_actor_role_label(admin_uid)
     await send_audit_log(
         bot_obj, 'admin', actor_name, admin_uid,
-        f"ایجاد {type_fa} جدید", module='Schedules', severity='INFO',
+        f"ویرایش کامل {type_fa}" if is_edit else f"ایجاد {type_fa} جدید",
+        module='Schedules', severity='WARNING' if is_edit else 'INFO',
         actor_role=actor_role,
+        target_id=str(sid),
         target_type='schedule', target_label=p['lesson'],
         details=f"{jalali_display} {p['time']}",
-        tags=['ایجاد_برنامه']
+        tags=['ویرایش_برنامه'] if is_edit else ['ایجاد_برنامه']
     )
 
-    for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type'):
+    for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type', 'schedule_edit_sid'):
         context.user_data.pop(k, None)
 
+    header = f"✅ <b>{type_fa} با موفقیت ویرایش شد!</b>" if is_edit else f"✅ <b>{type_fa} با موفقیت اضافه شد!</b>"
     text = (
-        f"✅ <b>{type_fa} با موفقیت اضافه شد!</b>\n\n"
+        f"{header}\n\n"
         f"📚 {p['lesson']}\n"
         f"👨‍🏫 {p['teacher']}\n"
         f"📅 {jalali_display}  ⏰ {p['time']}\n"
@@ -746,6 +1099,8 @@ async def _finalize_schedule_add(update_or_query, context):
         f"🔔 <b>{sent} نفر</b> مطلع شدند."
     )
     keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("👁 مشاهده برنامه", callback_data=f'schedule:item:{sid}')
+        if is_edit else
         InlineKeyboardButton("📅 مشاهده برنامه", callback_data=f'schedule:type:{p["stype"]}:'),
         InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:main'),
     ]])
@@ -837,17 +1192,27 @@ async def handle_add_schedule_text(update: Update, context: ContextTypes.DEFAULT
 
         # FIX جدید: به‌جای ذخیره مستقیم، اطلاعات پارس‌شده را نگه می‌داریم
         # و یک پیش‌نمایش + انتخاب نوع زمان‌بندی نشان می‌دهیم.
-        context.user_data['pending_schedule'] = {
+        pending = {
             'stype': stype, 'lesson': lesson, 'teacher': teacher,
             'date': date, 'time': time_str, 'location': location,
             'group': group, 'notes': notes,
         }
+        # FIX جدید (بخش اول — ویرایش کامل): اگر این متن برای ویرایش یک
+        # برنامه‌ی موجود است (نه افزودن جدید)، sid آن را نگه می‌داریم
+        # تا در پایان به‌جای INSERT از UPDATE استفاده شود.
+        edit_sid = context.user_data.pop('schedule_edit_sid', None)
+        if edit_sid:
+            pending['edit_sid'] = edit_sid
+        context.user_data['pending_schedule'] = pending
         context.user_data.pop('mode', None)
         await _ask_flex_type(update.message, context)
 
     except ValueError as e:
+        edit_sid = context.user_data.get('schedule_edit_sid')
         for k in ('awaiting_search', 'search_mode', 'mode', 'schedule_type'):
             context.user_data.pop(k, None)
+        retry_cb = f'schedule:edit_full:{edit_sid}' if edit_sid else f'schedule:add_start:{stype}'
+        cancel_cb = f'schedule:item:{edit_sid}' if edit_sid else 'admin:main'
         await update.message.reply_text(
             f"❌ <b>خطا:</b> {e}\n\n"
             "━━━━━━━━━━━━━━━━\n"
@@ -858,7 +1223,7 @@ async def handle_add_schedule_text(update: Update, context: ContextTypes.DEFAULT
             "⚠️ <b>مهم:</b> از کاما انگلیسی <code>,</code> استفاده کنید",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f'schedule:add_start:{stype}'),
-                InlineKeyboardButton("❌ لغو",         callback_data='admin:main'),
+                InlineKeyboardButton("🔄 تلاش مجدد", callback_data=retry_cb),
+                InlineKeyboardButton("❌ لغو",         callback_data=cancel_cb),
             ]])
         )
