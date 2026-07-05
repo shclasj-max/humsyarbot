@@ -801,6 +801,59 @@ class DB:
         except Exception:
             return False
 
+    async def get_schedule_by_id(self, sid: str):
+        """
+        FIX جدید (بخش اول — ویرایش برنامه): گرفتن یک برنامه با ID،
+        برای نمایش اطلاعات فعلی قبل از ویرایش.
+        """
+        try:
+            return await self.schedules.find_one({'_id': ObjectId(sid)})
+        except Exception:
+            return None
+
+    async def update_schedule_field(self, sid: str, field: str, value) -> bool:
+        """
+        FIX جدید (بخش اول — ویرایش برنامه): ویرایش یک فیلد مشخص از یک
+        برنامه‌ی موجود. حتماً از UPDATE استفاده می‌شود، نه INSERT —
+        رکورد جدیدی ساخته نمی‌شود و ID برنامه ثابت می‌ماند.
+        """
+        allowed_fields = {'date', 'time', 'location', 'teacher', 'lesson', 'notes', 'group'}
+        if field not in allowed_fields:
+            return False
+        try:
+            result = await self.schedules.update_one(
+                {'_id': ObjectId(sid)},
+                {'$set': {field: value, 'last_edited_at': datetime.now().isoformat()}}
+            )
+            return result.matched_count > 0
+        except Exception:
+            logger.exception('update_schedule_field failed')
+            return False
+
+    async def update_schedule_full(self, sid: str, lesson: str, teacher: str,
+                                    date: str, time: str, location: str,
+                                    notes: str = '', group: str = 'هر دو',
+                                    flex_type: str = 'fixed', flex_note: str = '') -> bool:
+        """
+        FIX جدید (بخش اول — ویرایش برنامه): ویرایش کامل همه فیلدهای یک
+        برنامه‌ی موجود با یک UPDATE واحد. رکورد جدید ساخته نمی‌شود و
+        ID برنامه دست‌نخورده باقی می‌ماند.
+        """
+        try:
+            result = await self.schedules.update_one(
+                {'_id': ObjectId(sid)},
+                {'$set': {
+                    'lesson': lesson, 'teacher': teacher, 'date': date, 'time': time,
+                    'location': location, 'notes': notes, 'group': group,
+                    'flex_type': flex_type, 'flex_note': flex_note,
+                    'last_edited_at': datetime.now().isoformat(),
+                }}
+            )
+            return result.matched_count > 0
+        except Exception:
+            logger.exception('update_schedule_full failed')
+            return False
+
     async def get_schedules(self, stype: str = None, upcoming: bool = True, group: str = None):
         q = {}
         if stype:    q['type'] = stype
@@ -1502,6 +1555,27 @@ class DB:
         defaults = await self.get_notif_defaults()
         defaults[ntype] = value
         await self.set_setting('notif_defaults', defaults)
+
+    async def apply_notif_default_to_all_users(self, ntype: str, value: bool) -> int:
+        """
+        FIX (بخش سوم): وقتی ادمین یک تنظیم پیش‌فرض اعلان را تغییر می‌دهد،
+        باید همان لحظه روی تمام کاربران (قدیمی و جدید، فعال و غیرفعال)
+        اعمال شود — نه فقط روی کاربران تازه ثبت‌نامی.
+        قبلاً چون هر کاربر هنگام ثبت‌نام یک کپی صریح از دیکشنری
+        notification_settings می‌گرفت، تغییر بعدیِ پیش‌فرض هرگز به
+        کاربران قبلی نمی‌رسید (چون s.get(key, ...) همیشه مقدار صریح
+        قدیمی را برمی‌گرداند، نه پیش‌فرض جدید را).
+        این متد با یک UPDATE سراسری، مقدار را برای همه کاربران هم‌زمان
+        بازنویسی می‌کند.
+        """
+        try:
+            result = await self.users.update_many(
+                {}, {'$set': {f'notification_settings.{ntype}': value}}
+            )
+            return result.modified_count
+        except Exception:
+            logger.exception('apply_notif_default_to_all_users failed')
+            return 0
 
 
     async def count_active_users(self, minutes: int = 30) -> int:
