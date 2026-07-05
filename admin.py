@@ -112,8 +112,9 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             [InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0')],
             [
                 InlineKeyboardButton("📅 برنامه جدید",  callback_data='schedule:add_type'),
-                InlineKeyboardButton("🗑 حذف برنامه",   callback_data='schedule:del_list'),
+                InlineKeyboardButton("✏️ ویرایش برنامه", callback_data='schedule:manage_types'),
             ],
+            [InlineKeyboardButton("🗑 حذف برنامه",   callback_data='schedule:del_list')],
             [InlineKeyboardButton("📢 ارسال همگانی",    callback_data='admin:broadcast')],
         ]
         text = "👮 <b>پنل ادمین ربات (نماینده)</b>\n━━━━━━━━━━━━━━━━\nدسترسی محدود — بدون تنظیمات حیاتی."
@@ -154,6 +155,7 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             InlineKeyboardButton("📅 برنامه جدید",     callback_data='schedule:add_type'),
             InlineKeyboardButton("🗑 حذف برنامه",      callback_data='schedule:del_list'),
         ],
+        [InlineKeyboardButton("✏️ ویرایش برنامه‌ها",    callback_data='schedule:manage_types')],
         [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
         [InlineKeyboardButton("🎫 مدیریت تیکت‌ها",     callback_data='ticket:admin_list')],
         [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه",  callback_data='report:manage:all')],
@@ -440,6 +442,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         defaults = await db.get_notif_defaults()
         new_val  = not defaults.get(ntype, True)
         await db.set_notif_default(ntype, new_val)
+        # FIX (بخش سوم): تغییر پیش‌فرض دیگر فقط روی کاربران جدید اعمال
+        # نمی‌شود — همین لحظه روی همه کاربران (قدیمی/جدید/فعال/غیرفعال)
+        # هم اعمال می‌شود، چون قبلاً هر کاربر یک کپی صریح از تنظیمات
+        # پیش‌فرض زمان ثبت‌نامش را نگه می‌داشت و از تغییرات بعدی بی‌خبر
+        # می‌ماند.
+        affected = await db.apply_notif_default_to_all_users(ntype, new_val)
         admin_user = await db.get_user(uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
         actor_role = await db.get_actor_role_label(uid)
@@ -447,10 +455,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot, 'admin', actor_name, uid,
             "تغییر تنظیمات اعلان‌ها", module='Settings', severity='WARNING',
             actor_role=actor_role,
-            details=f"پیش‌فرض {ntype}: {'روشن' if new_val else 'خاموش'}",
+            details=f"پیش‌فرض {ntype}: {'روشن' if new_val else 'خاموش'} | اعمال روی {affected} کاربر",
             tags=['تنظیمات_اعلان']
         )
-        await query.answer("✅ بروزرسانی شد", show_alert=True)
+        await query.answer(f"✅ بروزرسانی شد و روی {affected} کاربر اعمال شد", show_alert=True)
         await _show_notif_defaults(query)
 
     # ══════════════════════════════════════════════
@@ -922,6 +930,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'bc_edit':
         await _broadcast_ask_message(query, context, context.user_data.get('bc_target','all'), edit=True)
 
+    elif action == 'bc_preview_back':
+        # FIX باگ: بازگشت واقعی به پیش‌نمایش بدون ارسال پیام
+        context.user_data.pop('bc_delay_min', None)
+        await _broadcast_show_preview(query, context)
+
 
 # ══════════════════════════════════════════════════
 # 📢 توابع Broadcast
@@ -1051,7 +1064,11 @@ async def _broadcast_schedule_menu(query, context):
         ("⏰ ۲۴ ساعت دیگر",1440),
     ]
     keyboard = [[InlineKeyboardButton(label, callback_data=f'admin:bc_sched_set:{mins}')] for label, mins in options]
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پیش‌نمایش", callback_data='admin:bc_confirm')])
+    # FIX باگ: این دکمه قبلاً به 'admin:bc_confirm' وصل بود که همان اکشن
+    # «ارسال قطعی» است — یعنی با زدن «بازگشت به پیش‌نمایش» پیام واقعاً و
+    # فوراً ارسال می‌شد! حالا به 'admin:bc_preview_back' وصل است که فقط
+    # دوباره صفحه پیش‌نمایش را نشان می‌دهد، بدون ارسال.
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پیش‌نمایش", callback_data='admin:bc_preview_back')])
     keyboard.append([InlineKeyboardButton("❌ لغو", callback_data='admin:bc_cancel')])
     await query.edit_message_text("⏰ <b>ارسال زماندار</b>\n\nچه زمانی پیام ارسال شود?",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1588,7 +1605,7 @@ async def _show_notif_manage(query):
             InlineKeyboardButton("48 ساعت" + (" ✅" if interval == 48 else ""), callback_data='admin:notif_set_interval:48'),
             InlineKeyboardButton("72 ساعت" + (" ✅" if interval == 72 else ""), callback_data='admin:notif_set_interval:72'),
         ],
-        [InlineKeyboardButton("⚙️ وضعیت پیش‌فرض اعلان‌ها (کاربر جدید)", callback_data='admin:notif_defaults')],
+        [InlineKeyboardButton("⚙️ وضعیت پیش‌فرض اعلان‌ها (همه کاربران)", callback_data='admin:notif_defaults')],
         [InlineKeyboardButton("📚 تاریخچه: منابع جدید",   callback_data='admin:notif_history:new_resources')],
         [InlineKeyboardButton("📝 تاریخچه: یادآوری امتحان", callback_data='admin:notif_history:exam_reminder')],
         [InlineKeyboardButton("🧪 تاریخچه: سوال روزانه",   callback_data='admin:notif_history:daily_question')],
@@ -1600,16 +1617,16 @@ async def _show_notif_manage(query):
 
 async def _show_notif_defaults(query):
     """
-    FIX طبق سند: تعیین وضعیت پیش‌فرض (روشن/خاموش) هر دسته اعلان
-    برای کاربران تازه ثبت‌نام‌شده — قابل تغییر، بدون اثر روی
-    کاربران فعلی که خودشان تنظیم کرده‌اند.
+    FIX (بخش سوم): تعیین وضعیت پیش‌فرض (روشن/خاموش) هر دسته اعلان.
+    برخلاف قبل، این مقدار همین لحظه روی همه کاربران — قدیمی، جدید،
+    فعال و غیرفعال — اعمال می‌شود (نه فقط کاربران تازه ثبت‌نام‌شده).
     """
     from notifications import NOTIF_ITEMS
     defaults = await db.get_notif_defaults()
     text = (
         "⚙️ <b>وضعیت پیش‌فرض اعلان‌ها</b>\n━━━━━━━━━━━━━━━━\n\n"
-        "این تنظیمات فقط روی <b>کاربران جدید</b> اعمال می‌شود؛ "
-        "کاربران فعلی همان انتخاب خودشان را دارند."
+        "تغییر هر مورد، همین الان روی <b>همه کاربران</b> "
+        "(قدیمی و جدید) اعمال می‌شود."
     )
     keyboard = []
     for key, label, _ in NOTIF_ITEMS:
