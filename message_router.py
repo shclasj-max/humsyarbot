@@ -43,6 +43,11 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from admin import admin_broadcast_handler
             return await admin_broadcast_handler(update, context)
 
+    # ── ویرایش تک‌فیلدی برنامه (بخش اول) ──
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'edit_schedule_field':
+        from schedule import handle_edit_schedule_field_text
+        return await handle_edit_schedule_field_text(update, context)
+
     # ── حالت ساخت سوال ──
     if context.user_data.get('mode') == 'creating_question':
         from questions import handle_create_question_steps
