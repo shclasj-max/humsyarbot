@@ -692,7 +692,7 @@ async def _ticket_list(query, uid: int):
         rc   = len(t.get('replies', []))
         status_str = "بسته" if t['status'] == 'closed' else "در جریان"
         keyboard.append([InlineKeyboardButton(
-            f"{icon} #{t['ticket_id']} | {t.get('subject','')[:20]} | {rc} پیام",
+            f"{icon} #{t['ticket_id']} | {t.get('subject','')[:20]} | {status_str} | {rc} پیام",
             callback_data=f"ticket:view:{t['ticket_id']}"
         )])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ticket:main')])
