@@ -14,6 +14,7 @@ from telegram import (
     Message
 )
 from telegram.ext import ContextTypes, ConversationHandler
+from telegram.error import RetryAfter, Forbidden, BadRequest, TimedOut, NetworkError
 from database import db
 from utils import main_keyboard, content_admin_keyboard, admin_keyboard, safe_send, send_audit_log
 
@@ -249,7 +250,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     show_alert=True
                 )
                 return
-            if role == 'broadcaster' and action != 'broadcast':
+            if role == 'broadcaster' and not (action == 'broadcast' or action.startswith('bc_')):
                 await query.answer(
                     "ℹ️ شما فقط دسترسی ارسال همگانی دارید.",
                     show_alert=True
@@ -265,10 +266,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
             # FIX جدید: ادمین ربات فقط به کاربران، برنامه‌ها، broadcast دسترسی دارد
-            if role == 'bot_admin' and action not in (
-                'users', 'users_filter', 'uf_group', 'uf_intake', 'uf_clear',
-                'user_detail', 'search_user', 'approve', 'reject', 'edit_group',
-                'set_group', 'edit_intake', 'set_intake', 'pending', 'broadcast',
+            if role == 'bot_admin' and not (
+                action in (
+                    'users', 'users_filter', 'uf_group', 'uf_intake', 'uf_clear',
+                    'user_detail', 'search_user', 'approve', 'reject', 'edit_group',
+                    'set_group', 'edit_intake', 'set_intake', 'pending', 'broadcast',
+                ) or action.startswith('bc_')
             ):
                 await query.answer(
                     "ℹ️ شما دسترسی محدود دارید — کاربران، برنامه‌ها و ارسال همگانی.",
@@ -1083,18 +1086,37 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         await query.answer("❌ پیامی برای ارسال وجود ندارد!", show_alert=True)
         return
 
+    # FIX (حرفه‌ای‌سازی): جلوگیری از دابل‌تپ روی «ارسال کن» — اگر یک
+    # ارسال از قبل در حال انجام است، دوباره شروع نشود (وگرنه پیام دوبار
+    # برای همه فرستاده می‌شود).
+    if context.user_data.get('bc_sending'):
+        await query.answer("⏳ ارسال قبلی هنوز در حال انجام است، صبر کنید...", show_alert=True)
+        return
+
     if delay_min > 0:
         h = delay_min // 60
         m = delay_min % 60
         t_str = f"{h} ساعت {m} دقیقه" if h else f"{m} دقیقه"
         send_time = (datetime.now() + timedelta(minutes=delay_min)).strftime('%H:%M')
 
+        job_id = f'broadcast_{int(datetime.now().timestamp())}'
         context.job_queue.run_once(
             _scheduled_broadcast_job,
             when=timedelta(minutes=delay_min),
             data={'msg_data': msg_data, 'target': target, 'admin_id': ADMIN_ID},
-            name=f'broadcast_{int(datetime.now().timestamp())}',
+            name=job_id,
         )
+        # FIX (حرفه‌ای‌سازی): ذخیره در دیتابیس تا اگر ربات قبل از زمان
+        # ارسال ری‌استارت شد، بشود بعداً بررسی/بازیابی کرد (حداقل برای
+        # گزارش و شفافیت، نه فقط حافظه‌ی موقت جاب‌کیو).
+        try:
+            await db.set_setting(f'scheduled_broadcast_{job_id}', {
+                'msg_data': msg_data, 'target': target,
+                'send_at': (datetime.now() + timedelta(minutes=delay_min)).isoformat(),
+                'created_by': query.from_user.id,
+            })
+        except Exception:
+            logger.exception('could not persist scheduled broadcast record')
 
         _broadcast_clear(context)
         await query.edit_message_text(
@@ -1105,9 +1127,48 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
         return
 
-    await query.edit_message_text("⏳ <b>در حال ارسال پیام...</b>\n\nلطفاً صبر کنید.", parse_mode='HTML')
+    context.user_data['bc_sending'] = True
+    try:
+        status_msg = await query.edit_message_text(
+            "⏳ <b>در حال ارسال پیام...</b>\n\nدر حال آماده‌سازی فهرست مخاطبان...",
+            parse_mode='HTML')
+    except Exception:
+        status_msg = query.message
+
     users_list = await _get_target_users(target)
-    sent, failed = await _do_broadcast_send(context.bot, users_list, msg_data)
+    total = len(users_list)
+
+    if total == 0:
+        context.user_data['bc_sending'] = False
+        _broadcast_clear(context)
+        await status_msg.edit_text(
+            "⚠️ <b>هیچ مخاطبی برای این هدف پیدا نشد.</b>\n\nپیامی ارسال نشد.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+        return
+
+    async def _progress(done, total_n, sent_n, failed_n, blocked_n):
+        pct = int(done * 100 / total_n) if total_n else 100
+        try:
+            await status_msg.edit_text(
+                f"⏳ <b>در حال ارسال پیام...</b>\n\n"
+                f"📊 پیشرفت: <b>{done}/{total_n}</b> ({pct}%)\n"
+                f"✅ موفق: {sent_n}  |  🚫 بلاک: {blocked_n}  |  ❌ سایر خطاها: {failed_n - blocked_n}",
+                parse_mode='HTML')
+        except Exception:
+            pass  # ادیت خیلی سریع پشت سر هم ممکنه با محدودیت تلگرام مواجه بشه — بی‌خطر نادیده گرفته می‌شود
+
+    try:
+        # FIX (حرفه‌ای‌سازی): همه‌ی مراحل ارسال داخل try/finally هستند
+        # تا در صورت بروز هر خطای پیش‌بینی‌نشده‌ای، پرچم bc_sending
+        # همیشه آزاد شود و ادمین برای همیشه پشت یک ارسالِ «گیر کرده»
+        # قفل نماند.
+        sent, failed_total, blocked = await _do_broadcast_send(
+            context.bot, users_list, msg_data, progress_cb=_progress)
+    finally:
+        context.user_data['bc_sending'] = False
+
+    other_failed = failed_total - blocked
     _broadcast_clear(context)
     # FIX طبق سند: ارسال همگانی سراسری = CRITICAL (نه WARNING)،
     # چون اگر اشتباه به همه فرستاده شود باید فوری و برجسته معلوم باشد.
@@ -1120,12 +1181,15 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         "ارسال همگانی", module='Notifications', severity='CRITICAL',
         actor_role=actor_role,
         target_type='broadcast', target_label=f"هدف: {target}",
-        details=f"موفق: {sent} نفر | ناموفق: {failed} نفر",
+        details=f"موفق: {sent} | بلاک: {blocked} | سایر خطاها: {other_failed} | مجموع: {total}",
         tags=['ارسال_همگانی']
     )
-    await query.edit_message_text(
+    await status_msg.edit_text(
         f"📢 <b>ارسال همگانی تمام شد</b>\n\n━━━━━━━━━━━━━━━━\n"
-        f"✅ موفق: <b>{sent} نفر</b>\n❌ ناموفق: <b>{failed} نفر</b>\n📊 مجموع: <b>{sent+failed} نفر</b>",
+        f"✅ موفق: <b>{sent} نفر</b>\n"
+        f"🚫 مسدود کرده‌اند (بلاک ربات): <b>{blocked} نفر</b>\n"
+        f"❌ سایر خطاها: <b>{other_failed} نفر</b>\n"
+        f"📊 مجموع مخاطبان: <b>{total} نفر</b>",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
 
@@ -1136,46 +1200,99 @@ async def _scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     target   = data.get('target', 'all')
     admin_id = data.get('admin_id', ADMIN_ID)
     users_list = await _get_target_users(target)
-    sent, failed = await _do_broadcast_send(context.bot, users_list, msg_data)
+    sent, failed_total, blocked = await _do_broadcast_send(context.bot, users_list, msg_data)
+    other_failed = failed_total - blocked
+    # پاک‌سازی رکورد ماندگارشده — دیگر لازم نیست چون همین الان ارسال شد
+    try:
+        job_name = context.job.name
+        await db.delete_setting(f'scheduled_broadcast_{job_name}')
+    except Exception:
+        pass
     try:
         await context.bot.send_message(admin_id,
-            f"📢 <b>ارسال زماندار انجام شد</b>\n\n✅ موفق: <b>{sent} نفر</b>\n❌ ناموفق: <b>{failed} نفر</b>",
+            f"📢 <b>ارسال زماندار انجام شد</b>\n\n"
+            f"✅ موفق: <b>{sent} نفر</b>\n"
+            f"🚫 بلاک: <b>{blocked} نفر</b>\n"
+            f"❌ سایر خطاها: <b>{other_failed} نفر</b>",
             parse_mode='HTML')
     except Exception:
         pass
 
 
-async def _do_broadcast_send(bot, users_list: list, msg_data: dict) -> tuple:
-    sent, failed = 0, 0
+async def _do_broadcast_send(bot, users_list: list, msg_data: dict, progress_cb=None) -> tuple:
+    """
+    FIX کامل (حرفه‌ای‌سازی ارسال همگانی):
+    - RetryAfter (محدودیت نرخ تلگرام) → صبر دقیق به‌اندازه‌ی زمان اعلام‌شده
+      و تلاش مجدد برای همان کاربر، به‌جای شمردنش به‌عنوان ناموفق.
+    - TimedOut / NetworkError (خطای موقت شبکه) → یک تلاش مجدد کوتاه.
+    - Forbidden (کاربر ربات را بلاک/غیرفعال کرده) → به‌طور جداگانه شمرده
+      و در دیتابیس علامت‌گذاری می‌شود (blocked_bot) تا آمار واقعی و
+      قابل‌اعتماد باشد، نه فقط یک عدد «ناموفق» مبهم.
+    - سایر خطاها (BadRequest و غیره) → ناموفق، ولی ارسال به بقیه‌ی
+      کاربران متوقف نمی‌شود.
+    - progress_cb (اختیاری): هر ۲۵ نفر یک‌بار صدا زده می‌شود تا پیام
+      «در حال ارسال...» زنده بروزرسانی شود.
+    """
+    sent, failed, blocked = 0, 0, 0
     msg_type = msg_data.get('type', 'text')
     caption  = msg_data.get('caption', '')
     file_id  = msg_data.get('file_id', '')
     text_val = msg_data.get('text', '')
+    total    = len(users_list)
 
     for i, u in enumerate(users_list):
         uid = u['user_id']
-        try:
-            if msg_type == 'text':
-                await bot.send_message(uid, text_val, parse_mode='HTML')
-            elif msg_type == 'photo':
-                await bot.send_photo(uid, file_id, caption=caption, parse_mode='HTML')
-            elif msg_type == 'video':
-                await bot.send_video(uid, file_id, caption=caption, parse_mode='HTML')
-            elif msg_type == 'document':
-                await bot.send_document(uid, file_id, caption=caption, parse_mode='HTML')
-            elif msg_type == 'voice':
-                await bot.send_voice(uid, file_id, caption=caption)
-            elif msg_type == 'audio':
-                await bot.send_audio(uid, file_id, caption=caption, parse_mode='HTML')
+        ok  = False
+        for attempt in range(3):
+            try:
+                if msg_type == 'text':
+                    await bot.send_message(uid, text_val, parse_mode='HTML')
+                elif msg_type == 'photo':
+                    await bot.send_photo(uid, file_id, caption=caption, parse_mode='HTML')
+                elif msg_type == 'video':
+                    await bot.send_video(uid, file_id, caption=caption, parse_mode='HTML')
+                elif msg_type == 'document':
+                    await bot.send_document(uid, file_id, caption=caption, parse_mode='HTML')
+                elif msg_type == 'voice':
+                    await bot.send_voice(uid, file_id, caption=caption)
+                elif msg_type == 'audio':
+                    await bot.send_audio(uid, file_id, caption=caption, parse_mode='HTML')
+                ok = True
+                break
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 0.5)
+                continue  # همین کاربر را دوباره امتحان کن، ناموفق حساب نشود
+            except Forbidden:
+                blocked += 1
+                await db.mark_user_blocked(uid)
+                break
+            except (TimedOut, NetworkError):
+                await asyncio.sleep(1.5)
+                continue
+            except BadRequest:
+                logger.warning(f"broadcast BadRequest for uid={uid}")
+                break
+            except Exception:
+                logger.exception(f"broadcast unexpected error for uid={uid}")
+                break
+        if ok:
             sent += 1
-        except Exception:
+        else:
             failed += 1
+
+        if progress_cb and ((i + 1) % 25 == 0 or (i + 1) == total):
+            try:
+                await progress_cb(i + 1, total, sent, failed, blocked)
+            except Exception:
+                pass
+
+        # کنترل نرخ ارسال — برای جلوگیری از محدودیت تلگرام
         if i % 30 == 29:
             await asyncio.sleep(1)
         else:
             await asyncio.sleep(0.05)
 
-    return sent, failed
+    return sent, failed + blocked, blocked
 
 
 async def _get_target_users(target: str) -> list:
@@ -1837,7 +1954,15 @@ async def _export_excel(query, context):
     """
     FIX جدید: خروجی کامل دیتابیس (کاربران، تیکت‌ها، آمار سوالات)
     به‌صورت یک فایل اکسل با چند شیت، آماده دانلود.
+
+    🐛 باگ واقعی که اینجا بود: متغیر uid هیچ‌جا تعریف نشده بود، پس
+    بلافاصله بعد از ارسال موفق فایل اکسل (reply_document)، خط ثبت
+    گزارش (audit log) با NameError کرش می‌کرد. نتیجه: ادمین فایل
+    اکسل را واقعاً دریافت می‌کرد، اما بلافاصله بعدش پیام «❌ خطا در
+    ساخت فایل» را هم می‌دید — گیج‌کننده و اشتباه، چون فایل در واقع
+    درست ساخته و ارسال شده بود.
     """
+    uid = query.from_user.id
     await query.edit_message_text("⏳ <b>در حال ساخت فایل اکسل...</b>", parse_mode='HTML')
     try:
         import openpyxl
@@ -2222,11 +2347,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ch_id, ch_title = parts_txt[0], parts_txt[1]
         ok = await db.add_required_channel(ch_id, ch_title)
         if ok:
-            admin_user = await db.get_user(uid)
+            admin_uid = update.effective_user.id
+            admin_user = await db.get_user(admin_uid)
             actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
-            actor_role = await db.get_actor_role_label(uid)
+            actor_role = await db.get_actor_role_label(admin_uid)
             await send_audit_log(
-                context.bot, 'admin', actor_name, uid,
+                context.bot, 'admin', actor_name, admin_uid,
                 "افزودن کانال اجباری", module='Settings', severity='HIGH',
                 actor_role=actor_role,
                 target_id=ch_id, target_type='channel', target_label=ch_title,
@@ -2355,7 +2481,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         scope_txt  = f" — محدود به ورودی {scope_intake}" if scope_intake else ""
         admin_user = await db.get_user(admin_uid)
         actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
-        actor_role = await db.get_actor_role_label(uid)
+        actor_role = await db.get_actor_role_label(admin_uid)
         target_user_for_log = await db.get_user(target_uid)
         await send_audit_log(
             context.bot, 'admin', actor_name, admin_uid,
