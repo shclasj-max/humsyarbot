@@ -284,13 +284,34 @@ async def cancel_handler(update, context):
 # ══════════════════════════════════════════════════
 
 async def safe_send(bot, uid: int, text: str, **kwargs) -> bool:
-    """ارسال پیام با مدیریت خطا — برای broadcast"""
-    try:
-        await bot.send_message(uid, text, **kwargs)
-        return True
-    except Exception as e:
-        logger.debug(f"safe_send failed for {uid}: {e}")
-        return False
+    """
+    ارسال پیام با مدیریت خطا — برای broadcast.
+
+    🐛 باگ واقعی که اینجا بود: این تابع هیچ فرقی بین «کاربر ربات را
+    بلاک کرده» (خطای دائمی) و «تلگرام موقتاً محدودمان کرده / خطای
+    شبکه‌ی گذرا» (RetryAfter / TimedOut — قابل‌حل با کمی صبر) قائل
+    نمی‌شد؛ هر دو را یکسان «ناموفق» می‌شمرد و برای همیشه از دستش
+    می‌داد. چون این تابع پایه‌ی broadcast_message است و آن هم پایه‌ی
+    اطلاع‌رسانی برنامه/امتحان/منابع جدید در کل ربات، همین یک باگ روی
+    همه‌ی کانال‌های اعلان اثر می‌گذاشت. حالا RetryAfter و خطاهای موقت
+    شبکه باعث یک صبر کوتاه و تلاش مجدد می‌شوند، نه از دست رفتن پیام.
+    """
+    import asyncio
+    from telegram.error import RetryAfter, TimedOut, NetworkError
+    for attempt in range(3):
+        try:
+            await bot.send_message(uid, text, **kwargs)
+            return True
+        except RetryAfter as e:
+            await asyncio.sleep(min(e.retry_after, 30) + 0.5)
+            continue
+        except (TimedOut, NetworkError):
+            await asyncio.sleep(1.5)
+            continue
+        except Exception as e:
+            logger.debug(f"safe_send failed for {uid}: {e}")
+            return False
+    return False
 
 
 async def broadcast_message(bot, users: List[dict], text: str,
