@@ -128,10 +128,21 @@ class DB:
     async def pending_users(self):
         return await self.users.find({'approved': False}).to_list(100)
 
-    async def notif_users(self, ntype: str):
-        return await self.users.find(
-            {'approved': True, f'notification_settings.{ntype}': True}
-        ).to_list(5000)
+    async def notif_users(self, ntype: str, group: str = None):
+        """
+        🐛 باگ واقعی که اینجا بود: این متد گروه (۱/۲/هر دو) را اصلاً در
+        نظر نمی‌گرفت — یعنی وقتی برنامه‌ی یک کلاس فقط برای «گروه ۱»
+        بود و ادمین زمانش را تغییر می‌داد، اعلان به «همه‌ی» کاربرانی
+        که نوتیف مربوطه را روشن داشتند فرستاده می‌شد؛ گروه ۲ هم پیام
+        نامربوط به کلاسشان را دریافت می‌کرد. حالا پارامتر اختیاری
+        group اضافه شده: اگر مقداری غیر از None/'' /'هر دو' بدهی، فقط
+        همان گروه فیلتر می‌شود؛ در غیر این صورت رفتار قبلی (همه) حفظ
+        می‌شود — کاملاً backward-compatible.
+        """
+        query = {'approved': True, f'notification_settings.{ntype}': True}
+        if group and str(group).strip() not in ('', 'هر دو', 'هردو', 'all'):
+            query['group'] = str(group)
+        return await self.users.find(query).to_list(5000)
 
     async def get_content_admins(self):
         return await self.users.find(
@@ -152,7 +163,8 @@ class DB:
         return False
 
     async def search_users(self, query_text: str):
-        regex = {'$regex': query_text, '$options': 'i'}
+        import re
+        regex = {'$regex': re.escape(query_text), '$options': 'i'}
         return await self.users.find({
             '$or': [
                 {'name':       regex},
@@ -380,7 +392,8 @@ class DB:
         await self.log(uid, 'bs_download', {'content_id': cid})
 
     async def search_resources(self, query_text: str):
-        regex = {'$regex': query_text, '$options': 'i'}
+        import re
+        regex = {'$regex': re.escape(query_text), '$options': 'i'}
         sessions = await self.bs_sessions.find(
             {'$or': [{'topic': regex}, {'teacher': regex}]}
         ).to_list(20)
@@ -1092,6 +1105,25 @@ class DB:
             upsert=True
         )
 
+    async def delete_setting(self, key: str) -> None:
+        try:
+            await self.settings.update_one(
+                {'_id': 'global'}, {'$unset': {key: ''}}
+            )
+        except Exception:
+            pass
+
+    async def get_settings_by_prefix(self, prefix: str) -> dict:
+        """
+        FIX (ارسال زماندار پایدار): برای پیدا کردن تمام کلیدهایی که با
+        یک پیشوند مشخص شروع می‌شوند (مثلاً scheduled_broadcast_) —
+        استفاده در بازیابی پیام‌های زماندار بعد از ری‌استارت ربات.
+        """
+        doc = await self.settings.find_one({'_id': 'global'})
+        if not doc:
+            return {}
+        return {k: v for k, v in doc.items() if isinstance(k, str) and k.startswith(prefix)}
+
     async def get_all_settings(self) -> dict:
         doc = await self.settings.find_one({'_id': 'global'})
         return doc or {}
@@ -1555,6 +1587,22 @@ class DB:
         defaults = await self.get_notif_defaults()
         defaults[ntype] = value
         await self.set_setting('notif_defaults', defaults)
+
+    async def mark_user_blocked(self, uid: int, blocked: bool = True):
+        """
+        FIX (ارسال همگانی حرفه‌ای‌تر): وقتی ارسال پیام به کاربری با خطای
+        Forbidden (کاربر ربات را بلاک کرده) مواجه می‌شود، این پرچم را
+        ذخیره می‌کنیم — هم برای گزارش دقیق‌تر ارسال همگانی، هم برای
+        اینکه دفعات بعد بلافاصله این کاربر را در آمار «مسدود» بشماریم.
+        """
+        try:
+            await self.users.update_one(
+                {'user_id': uid},
+                {'$set': {'blocked_bot': blocked,
+                          'blocked_bot_at': datetime.now().isoformat()}}
+            )
+        except Exception:
+            pass
 
     async def apply_notif_default_to_all_users(self, ntype: str, value: bool) -> int:
         """
