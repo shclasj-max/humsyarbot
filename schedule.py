@@ -747,7 +747,7 @@ async def handle_edit_schedule_field_text(update: Update, context: ContextTypes.
     # بدون هیچ کش قدیمی؛ همه Queryهای نمایش برنامه مستقیماً از دیتابیس
     # می‌خوانند، پس نسخه جدید بلافاصله برای همه قابل مشاهده است.
     ntype = {'exam': 'exam', 'makeup': 'makeup'}.get(item.get('type'), 'schedule')
-    users = await db.notif_users(ntype)
+    users = await db.notif_users(ntype, group=item.get('group'))
     if field in ('date', 'time'):
         notif_text = "زمان کلاس تغییر کرده است." if item.get('type') == 'class' else f"⏰ زمان {type_fa} تغییر کرده است."
     else:
@@ -884,7 +884,7 @@ async def handle_flex_time_change_text(update: Update, context: ContextTypes.DEF
         f"📍 {location}"
         + (f"\n\n📝 {note}" if note else '')
     )
-    users = await db.notif_users('schedule')
+    users = await db.notif_users('schedule', group=group)
     sent, _ = await broadcast_message(context.bot, users, notif_msg)
 
     admin_uid  = update.effective_user.id
@@ -1052,7 +1052,7 @@ async def _finalize_schedule_add(update_or_query, context):
 
     # FIX جدید: نوتیف جبرانی جدا از برنامه کلاسی عادی است
     ntype = {'exam': 'exam', 'makeup': 'makeup'}.get(p['stype'], 'schedule')
-    users   = await db.notif_users(ntype)
+    users   = await db.notif_users(ntype, group=p.get('group'))
     type_fa = TYPE_NAMES.get(p['stype'], p['stype'])
     g_label = f" | گروه {p['group']}" if p['group'] not in ('هر دو', '') else ''
     jalali_display = fmt_jalali(p['date'])
