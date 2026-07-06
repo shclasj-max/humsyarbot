@@ -1204,8 +1204,9 @@ async def _ca_question_list(query, uid: int, context):
         creator = q.get('creator_name', '') or ''
         lesson  = q.get('lesson', '')
         text_q  = q.get('question', '')[:30]
+        creator_tag = f" | {creator}" if (creator and not q.get('by_bot')) else ''
         keyboard.append([InlineKeyboardButton(
-            f"{status}{source} {text_q} | {lesson}",
+            f"{status}{source} {text_q} | {lesson}{creator_tag}",
             callback_data=f'questions:ca_q_view:{qid}'
         )])
 
