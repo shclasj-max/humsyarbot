@@ -606,7 +606,8 @@ async def _show_overview(query):
         f"⏳ انتظار: <b>{s['q_pending']}</b>\n"
         f"<code>[{q_bar}]</code>\n"
         f"  🤖 توسط بات: <b>{s['q_by_bot']}</b>   "
-        f"👤 کاربران: <b>{s['q_by_users']}</b>\n\n"
+        f"👤 کاربران: <b>{s['q_by_users']}</b>\n"
+        f"  📊 نسبت تولید توسط بات: <b>{q_ratio}</b>\n\n"
 
         "━━━━ 📈 <b>کلی</b> ━━━━━━━━━\n"
         f"⬇️ کل دانلودها: <b>{s['total_downloads']}</b>\n"
