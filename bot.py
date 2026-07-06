@@ -45,7 +45,7 @@ from admin import (
     handle_admin_text, BROADCAST
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
-from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log
+from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send
 from profile import profile_callback, profile_text_handler, PROFILE_EDIT_WAITING
 from message_router import route_message
 from basic_science import basic_science_callback
@@ -105,16 +105,16 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                     f"👨‍🏫 استاد: {exam.get('teacher', '')}\n\n"
                     f"<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← یادآوری امتحان</i>"
                 )
-                users = await db.notif_users('exam')
+                users = await db.notif_users('exam', group=exam.get('group'))
                 sent  = 0
                 total_targets += len(users)
                 for u in users:
-                    try:
-                        await context.bot.send_message(u['user_id'], msg, parse_mode='HTML')
+                    ok = await safe_send(context.bot, u['user_id'], msg, parse_mode='HTML')
+                    if ok:
                         sent += 1
-                        await asyncio.sleep(0.05)
-                    except Exception:
+                    else:
                         total_failed += 1
+                    await asyncio.sleep(0.05)
                 total_sent += sent
                 if sent:
                     await db.mark_exam_notified(sid, days)
@@ -157,13 +157,13 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
         )
         users = await db.notif_users('daily_question')
         for u in users:
-            try:
-                await context.bot.send_message(u['user_id'], text, parse_mode='HTML')
+            ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
+            if ok:
                 sent += 1
-                await asyncio.sleep(0.05)
-            except Exception:
+            else:
                 failed += 1
                 failed_ids.append(u['user_id'])
+            await asyncio.sleep(0.05)
         await db.notif_run_finish(run_id, sent, failed, len(users))
         if failed_ids:
             await db.notif_run_add_failed(run_id, failed_ids)
@@ -246,13 +246,13 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
         users = await db.notif_users('new_resources')
         sent, failed, failed_ids = 0, 0, []
         for u in users:
-            try:
-                await context.bot.send_message(u['user_id'], text, parse_mode='HTML')
+            ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
+            if ok:
                 sent += 1
-                await asyncio.sleep(0.05)
-            except Exception:
+            else:
                 failed += 1
                 failed_ids.append(u['user_id'])
+            await asyncio.sleep(0.05)
 
         await db.mark_resources_notified([item['_id'] for item in new_items])
         await db.set_setting('resource_notif_last_sent', datetime.now().isoformat())
@@ -543,10 +543,21 @@ async def broadcast_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     اون به بعد پیام‌های متنی خصوصی — از جمله متن broadcast — اول به
     هندلر state قدیمی می‌افتن، نه به admin_broadcast_handler.
 
-    راه‌حل: این گیت با group=-1 (قبل از conv) ثبت می‌شه، پس همیشه —
-    فارغ از هر state گیرافتاده‌ای — اول چک می‌کنه mode == 'broadcast'
-    هست یا نه و در صورت وجود مستقیم admin_broadcast_handler رو صدا
-    می‌زنه و با ApplicationHandlerStop جلوی ادامه رو می‌گیره.
+    راه‌حل: این گیت با group جداگانه‌ی خودش (قبل از conv) ثبت می‌شه، پس
+    همیشه — فارغ از هر state گیرافتاده‌ای — اول چک می‌کنه mode ==
+    'broadcast' هست یا نه و در صورت وجود مستقیم admin_broadcast_handler
+    رو صدا می‌زنه و با ApplicationHandlerStop جلوی ادامه رو می‌گیره.
+
+    ⛔️ نکته‌ی مهم‌تر (ریشه‌ی واقعی باگ که این گیت به‌تنهایی حلش
+    نمی‌کرد): این تابع و maintenance_gate/channel_lock_gate/
+    update_last_active قبلاً همگی با group=-1 مشترک ثبت شده بودند.
+    در PTB، توی هر group فقط اولین Handler ای که check_update اش True
+    بشه اجرا می‌شه و بقیه‌ی همون group اصلاً چک نمی‌شن. چون
+    TypeHandler(Update, ...) روی هر آپدیتی True برمی‌گردونه، فقط
+    maintenance_gate (که زودتر ثبت شده بود) واقعاً اجرا می‌شد و این
+    تابع هیچ‌وقت حتی صدا زده نمی‌شد! الان در bot.py هرکدام از این ۴
+    گیت group منفیِ مجزای خودشان را دارند (-4 تا -1) تا واقعاً همه
+    برای هر آپدیت اجرا شوند.
     """
     if update.effective_chat is None or update.effective_chat.type != 'private':
         return
@@ -880,14 +891,27 @@ def build_application() -> Application:
         per_message=False,
         conversation_timeout=1800,
     )
-    # ── FIX جدید: maintenance gate + last_active — قبل از همه چیز (group=-1) ──
-    # ترتیب مهم است: ابتدا maintenance (اولویت بالاتر)، سپس قفل کانال
-    app.add_handler(TypeHandler(Update, maintenance_gate), group=-1)
-    app.add_handler(TypeHandler(Update, channel_lock_gate), group=-1)
+    # ══════════════════════════════════════════════════
+    # ⛔️ باگ اصلیِ واقعی «پیام همگانی گاهی دریافت نمی‌شود» اینجا بود:
+    # کتابخانه python-telegram-bot توی هر group فقط اولین Handler ای
+    # که check_update اش True برگردونه رو اجرا می‌کنه و فوراً break
+    # می‌کنه — بدون اینکه بقیه‌ی Handlerهای همون group اصلاً چک بشن
+    # (منبع خود کتابخونه: «Only a max of 1 handler per group is
+    # handled»). چون maintenance_gate و channel_lock_gate و
+    # broadcast_gate و update_last_active هر چهارتا TypeHandler(Update, ...)
+    # بودن و همگی توی یک group مشترک (-1) ثبت شده بودن، و
+    # TypeHandler(Update, ...) روی *هر* آپدیتی True برمی‌گردونه، همیشه
+    # فقط maintenance_gate واقعاً اجرا می‌شد و broadcast_gate هیچ‌وقت
+    # حتی یک‌بار هم فراخوانی نمی‌شد — صرف‌نظر از اینکه ادمین چی
+    # می‌فرستاد. الان هر گیت یک group منفیِ جداگانه‌ی خودش را دارد تا
+    # هر ۴ تا، برای هر آپدیت، به‌ترتیب اجرا شوند.
+    # ══════════════════════════════════════════════════
+    app.add_handler(TypeHandler(Update, maintenance_gate),   group=-4)
+    app.add_handler(TypeHandler(Update, channel_lock_gate),  group=-3)
     # FIX باگ اصلی: پیام همگانی باید زودتر از ConversationHandler اصلی
     # (conv) چک بشه، وگرنه اگه ادمین در یکی از state های قدیمی conv
     # گیر کرده باشه، متن broadcast اصلاً بهش نمی‌رسه.
-    app.add_handler(TypeHandler(Update, broadcast_gate), group=-1)
+    app.add_handler(TypeHandler(Update, broadcast_gate), group=-2)
     app.add_handler(TypeHandler(Update, update_last_active), group=-1)
 
     app.add_handler(conv)
@@ -1003,6 +1027,34 @@ async def post_init(application: Application):
         )
 
         logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
+
+        # FIX (ارسال زماندار پایدار): اگر ربات بین ثبت یک پیام زماندار
+        # و زمان ارسالش ری‌استارت شود، job در حافظه‌ی job_queue از بین
+        # می‌رفت و پیام هرگز ارسال نمی‌شد. حالا رکورد آن در دیتابیس هم
+        # ذخیره شده بود؛ اینجا در شروع ربات آن‌ها را می‌خوانیم و دوباره
+        # زمان‌بندی می‌کنیم (یا اگر زمانش گذشته، فوراً ارسال می‌کنیم).
+        try:
+            from admin import _scheduled_broadcast_job
+            pending = await db.get_settings_by_prefix('scheduled_broadcast_')
+            for key, rec in pending.items():
+                job_id = key[len('scheduled_broadcast_'):]
+                try:
+                    send_at = datetime.fromisoformat(rec['send_at'])
+                except Exception:
+                    continue
+                remaining = (send_at - datetime.now()).total_seconds()
+                delay = max(remaining, 0)
+                application.job_queue.run_once(
+                    _scheduled_broadcast_job,
+                    when=timedelta(seconds=delay),
+                    data={'msg_data': rec.get('msg_data', {}), 'target': rec.get('target', 'all'),
+                          'admin_id': rec.get('created_by', ADMIN_ID)},
+                    name=job_id,
+                )
+            if pending:
+                logger.info(f"✅ {len(pending)} پیام زماندار قدیمی دوباره زمان‌بندی شد")
+        except Exception:
+            logger.exception("خطا در بازیابی پیام‌های زماندار قبلی")
     else:
         logger.warning("⚠️ JobQueue فعال نیست — یادآوری‌ها و گزارش هفتگی غیرفعال هستند")
         logger.warning('   نصب با: pip install "python-telegram-bot[job-queue]"')
