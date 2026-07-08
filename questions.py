@@ -9,7 +9,7 @@
 ✅ آمار پیشرفته
 ✅ بهینه‌سازی سرعت — کش لیست درس‌ها و مباحث
 """
-import os, io, logging, time
+import os, io, asyncio, logging, time
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
@@ -918,8 +918,14 @@ async def _generate_pdf_v2(query, context, uid, mode: str = 'practice'):
         from qbank import generate_exam_pdf
         meta = ExamMeta(lesson=lesson, chapter=chapter, topic=topic,
                          difficulty=difficulty, student_name=student_name)
-        pdf_bytes = generate_exam_pdf(qs, meta, mode=mode,
-                                       question_images=q_images, answer_images=a_images)
+        # 🧵 ساخت PDF (reportlab) کاملاً همزمان/CPU-bound است و اگر مستقیم
+        # await شود، event loop اصلی ربات را برای چند ثانیه بلاک می‌کند —
+        # یعنی در همان لحظه هیچ کاربر دیگری (حتی /start) پاسخ نمی‌گیرد.
+        # با asyncio.to_thread آن را در یک ترد جدا اجرا می‌کنیم تا لوپ آزاد بماند.
+        pdf_bytes = await asyncio.to_thread(
+            generate_exam_pdf, qs, meta, mode=mode,
+            question_images=q_images, answer_images=a_images,
+        )
     except Exception as e:
         logger.exception("qbank exam PDF generation failed")
         await query.edit_message_text(
