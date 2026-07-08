@@ -173,6 +173,7 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
         ])
         keyboard.append([
             InlineKeyboardButton("📢 مدیریت اعلان‌ها",   callback_data='admin:notif_manage'),
+            InlineKeyboardButton("💙 حمایت مالی",        callback_data='admin:donation_manage'),
         ])
         keyboard.append([
             InlineKeyboardButton("📋 لاگ فعالیت",        callback_data='admin:audit_log'),
@@ -211,6 +212,8 @@ ROOT_ONLY_ACTIONS = {
     'set_poll_channel',  # کانال نظرسنجی / اطلاع‌رسانی
     'poll_main', 'poll_create', 'poll_add_option', 'poll_done_options',
     'poll_type', 'poll_confirm', 'poll_cancel',
+    'donation_manage', 'donation_toggle', 'set_donation_link',
+    'remove_donation_link',  # حمایت مالی
 }
 
 
@@ -377,6 +380,48 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:settings')]])
         )
+
+    # ══════════════════════════════════════════════
+    # 💙 حمایت مالی
+    # ══════════════════════════════════════════════
+    elif action == 'donation_manage':
+        await _show_donation_manage(query)
+
+    elif action == 'donation_toggle':
+        current = await db.get_setting('donation_enabled', False)
+        new_val = not current
+        await db.set_setting('donation_enabled', new_val)
+        await query.answer("✅ بخش حمایت مالی فعال شد" if new_val else "✅ بخش حمایت مالی غیرفعال شد", show_alert=True)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "فعال‌شدن بخش حمایت مالی" if new_val else "غیرفعال‌شدن بخش حمایت مالی",
+            module='Settings', severity='HIGH',
+            actor_role=actor_role,
+            before={'وضعیت': 'غیرفعال' if new_val else 'فعال'},
+            after={'وضعیت': 'فعال' if new_val else 'غیرفعال'},
+            tags=['حمایت_مالی']
+        )
+        await _show_donation_manage(query)
+
+    elif action == 'set_donation_link':
+        context.user_data['mode'] = 'set_donation_link'
+        current = await db.get_setting('donation_link', None)
+        current_txt = f"\n\n📌 لینک فعلی:\n<code>{current}</code>" if current else ""
+        await query.edit_message_text(
+            f"💙 <b>تنظیم لینک حمایت مالی</b>{current_txt}\n\n"
+            "لینک صفحه حمایت مالی را ارسال کنید (مثلاً لینک صفحه پروژه در reymit.org).\n\n"
+            "<i>برای حذف لینک فعلی، کلمه «حذف» را بفرستید.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:donation_manage')]])
+        )
+
+    elif action == 'remove_donation_link':
+        await db.set_setting('donation_link', None)
+        await query.answer("✅ لینک حمایت مالی حذف شد", show_alert=True)
+        await _show_donation_manage(query)
 
     elif action == 'export_excel':
         await _export_excel(query, context)
@@ -1887,6 +1932,38 @@ async def _show_settings(query):
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def _show_donation_manage(query):
+    """
+    💙 پنل مدیریت بخش حمایت مالی — فعال/غیرفعال کردن دکمه در
+    داشبورد کاربران و تنظیم/حذف لینک صفحه حمایت (مثل reymit).
+    """
+    enabled = await db.get_setting('donation_enabled', False)
+    link    = await db.get_setting('donation_link', None)
+
+    status_txt = "✅ فعال (در داشبورد نمایش داده می‌شود)" if enabled else "⬜ غیرفعال (در داشبورد مخفی است)"
+    toggle_txt = "🔴 غیرفعال کردن" if enabled else "🟢 فعال کردن"
+    link_txt   = f"<code>{link}</code>" if link else "⚠️ تنظیم نشده"
+
+    text = (
+        "💙 <b>مدیریت حمایت مالی</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"📊 وضعیت نمایش: {status_txt}\n\n"
+        f"🔗 لینک فعلی: {link_txt}\n\n"
+        "<i>کاربران با زدن دکمه «💙 حمایت مالی» در داشبورد مستقیماً به این لینک هدایت می‌شوند.</i>"
+    )
+    if enabled and not link:
+        text += "\n\n⚠️ توجه: بخش فعال است اما لینکی تنظیم نشده — دکمه در داشبورد نمایش داده نمی‌شود تا لینک ثبت کنید."
+
+    keyboard = [
+        [InlineKeyboardButton(toggle_txt, callback_data='admin:donation_toggle')],
+        [InlineKeyboardButton("✏️ تنظیم / تغییر لینک", callback_data='admin:set_donation_link')],
+    ]
+    if link:
+        keyboard.append([InlineKeyboardButton("🗑 حذف لینک", callback_data='admin:remove_donation_link')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def _show_audit_log(query, category: str, min_severity: str = None, module: str = None):
     """
     FIX بازطراحی کامل طبق سند جدید Audit Log — نمایش هر لاگ با ساختار
@@ -2458,6 +2535,31 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(
             f"✅ کانال نظرسنجی با آیدی <code>{channel_id}</code> ذخیره شد.", parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ بازگشت به تنظیمات", callback_data='admin:settings')]])
+        )
+        return True
+
+    # تنظیم لینک حمایت مالی
+    if mode == 'set_donation_link':
+        context.user_data['mode'] = ''
+        if text in ('حذف', '-'):
+            await db.set_setting('donation_link', None)
+            await update.message.reply_text(
+                "✅ لینک حمایت مالی حذف شد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💙 بازگشت به مدیریت حمایت مالی", callback_data='admin:donation_manage')]])
+            )
+            return True
+        if not (text.startswith('http://') or text.startswith('https://')):
+            context.user_data['mode'] = 'set_donation_link'
+            await update.message.reply_text(
+                "⚠️ لینک باید با <code>http://</code> یا <code>https://</code> شروع شود. دوباره ارسال کنید.",
+                parse_mode='HTML'
+            )
+            return True
+        await db.set_setting('donation_link', text)
+        await update.message.reply_text(
+            f"✅ لینک حمایت مالی ذخیره شد:\n<code>{text}</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💙 بازگشت به مدیریت حمایت مالی", callback_data='admin:donation_manage')]])
         )
         return True
 
