@@ -241,27 +241,47 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lessons = context.user_data.get('_pdf_lessons', [])
         if idx < len(lessons):
             context.user_data['pdf_lesson'] = lessons[idx]
-            await _pdf_topic_select(query, context, lessons[idx])
+            await _pdf_chapter_select(query, context, lessons[idx])
+
+    elif action == 'pdf_chapter':
+        chapters = context.user_data.get('_pdf_chapters', [])
+        chapter  = None if parts[2] == 'all' else (chapters[int(parts[2])] if int(parts[2]) < len(chapters) else None)
+        context.user_data['pdf_chapter'] = chapter
+        lesson = context.user_data.get('pdf_lesson', '')
+        await _pdf_topic_select(query, context, lesson, chapter)
 
     elif action == 'pdf_topic':
         topics = context.user_data.get('_pdf_topics', [])
         topic  = 'همه' if parts[2] == 'all' else (topics[int(parts[2])] if int(parts[2]) < len(topics) else 'همه')
+        lesson  = context.user_data.get('pdf_lesson', '')
+        chapter = context.user_data.get('pdf_chapter')
+        context.user_data['pdf_topic'] = topic
+        await _pdf_difficulty_select(query, context, lesson, chapter, topic)
+
+    elif action == 'pdf_diff':
+        diffs = context.user_data.get('_pdf_diffs', [])
+        difficulty = None if parts[2] == 'all' else (diffs[int(parts[2])] if int(parts[2]) < len(diffs) else None)
+        context.user_data['pdf_difficulty'] = difficulty
         lesson = context.user_data.get('pdf_lesson', '')
+        topic  = context.user_data.get('pdf_topic', 'همه')
         await _pdf_count_select(query, context, lesson, topic)
 
     elif action == 'pdf_count':
-        lesson = context.user_data.get('pdf_lesson', '')
-        topic  = context.user_data.get('pdf_topic', 'همه')
-        count  = int(parts[2])
+        count = int(parts[2])
+        context.user_data['pdf_count'] = count
+        await _pdf_mode_select(query, context)
+
+    elif action == 'pdf_mode':
         await query.edit_message_text("⏳ در حال ساخت فایل...", parse_mode='HTML')
-        await _generate_pdf(query, context, uid, lesson, topic, count)
+        await _generate_pdf_v2(query, context, uid, mode=parts[2])
 
     elif action == 'pdf_topic_sel':
         topics = context.user_data.get('_pdf_topics', [])
         topic  = 'همه' if parts[2] == 'all' else (topics[int(parts[2])] if int(parts[2]) < len(topics) else 'همه')
         context.user_data['pdf_topic'] = topic
-        lesson = context.user_data.get('pdf_lesson','')
-        await _pdf_count_select(query, context, lesson, topic)
+        lesson  = context.user_data.get('pdf_lesson','')
+        chapter = context.user_data.get('pdf_chapter')
+        await _pdf_difficulty_select(query, context, lesson, chapter, topic)
 
     # ── مدیریت سوالات توسط ادمین محتوا/ادمین ──
     elif action == 'ca_q_list':
@@ -717,7 +737,7 @@ async def _fb_files(query, context, lesson, topic):
 # ══════════════════════════════════════════════════════════
 
 async def _pdf_menu(query, context):
-    lessons = await db.get_lessons()
+    lessons = await db.get_qbank_lessons()
     if not lessons:
         await query.edit_message_text(
             "❌ هنوز سوالی موجود نیست.",
@@ -733,19 +753,72 @@ async def _pdf_menu(query, context):
         keyboard.append(row)
     keyboard.append(_back("🔙 بازگشت", "questions:main"))
     await query.edit_message_text(
-        "📄 <b>خروجی فایل سوالات</b>\n\n"
+        "📄 <b>بانک سوالات — ساخت آزمون PDF</b>\n\n"
         "درس مورد نظر را انتخاب کنید:",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-async def _pdf_topic_select(query, context, lesson):
-    topics = await db.get_topics(lesson)
+async def _pdf_chapter_select(query, context, lesson):
+    """
+    🆕 مرحله‌ی جدید (اختیاری): انتخاب فصل.
+    اگه سوالات این درس فصل‌بندی نشده باشن (چون این یک فیلد جدید و
+    اختیاریه)، این مرحله کاملاً و بی‌صدا رد می‌شه — رفتار قبلی حفظ
+    می‌شه، بدون این‌که کاربر یک مرحله‌ی خالی ببینه.
+    """
+    chapters = await db.get_qbank_chapters(lesson)
+    if not chapters:
+        context.user_data['pdf_chapter'] = None
+        await _pdf_topic_select(query, context, lesson, None)
+        return
+    context.user_data['_pdf_chapters'] = chapters
+    keyboard = [[InlineKeyboardButton(f"📖 {c}", callback_data=f'questions:pdf_chapter:{i}')]
+                for i, c in enumerate(chapters)]
+    keyboard.append([InlineKeyboardButton("📂 همه فصل‌ها", callback_data='questions:pdf_chapter:all')])
+    keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
+    await query.edit_message_text(f"📄 <b>{lesson}</b>\n\nفصل را انتخاب کنید:",
+                                  parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _pdf_topic_select(query, context, lesson, chapter=None):
+    topics = await db.get_qbank_topics(lesson, chapter)
     context.user_data['_pdf_topics'] = topics
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:pdf_topic_sel:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:pdf_topic_sel:all')])
     keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
-    await query.edit_message_text(f"📄 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
+    c_label = f" — {chapter}" if chapter else ''
+    await query.edit_message_text(f"📄 <b>{lesson}{c_label}</b>\n\nمبحث را انتخاب کنید:",
+                                  parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _pdf_difficulty_select(query, context, lesson, chapter, topic):
+    """
+    🆕 مرحله‌ی جدید (اختیاری): انتخاب سطح سختی.
+    اگه فقط یک سطح سختی (یا هیچ‌کدام) برای این فیلتر موجود باشه، این
+    مرحله خودکار رد می‌شه — کاربر مجبور به انتخاب چیزی که فرقی نداره
+    نمی‌شه.
+    """
+    from qbank.styles import normalize_difficulty
+    raw_diffs = await db.get_qbank_difficulties(lesson, chapter, topic)
+    seen, diffs = set(), []
+    for d in raw_diffs:
+        key = normalize_difficulty(d)
+        if key not in seen:
+            seen.add(key)
+            diffs.append(d)
+    if len(diffs) <= 1:
+        context.user_data['pdf_difficulty'] = None
+        await _pdf_count_select(query, context, lesson, topic)
+        return
+    context.user_data['_pdf_diffs'] = diffs
+    icon = {'آسان': '🟢', 'متوسط': '🟡', 'سخت': '🔴'}
+    keyboard = [[InlineKeyboardButton(f"{icon.get(normalize_difficulty(d),'')} {normalize_difficulty(d)}",
+                                       callback_data=f'questions:pdf_diff:{i}')]
+                for i, d in enumerate(diffs)]
+    keyboard.append([InlineKeyboardButton("📂 همه سطوح", callback_data='questions:pdf_diff:all')])
+    keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
+    t_label = f" — {topic}" if topic != 'همه' else ''
+    await query.edit_message_text(f"📄 <b>{lesson}{t_label}</b>\n\nسطح سختی را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -765,9 +838,70 @@ async def _pdf_count_select(query, context, lesson, topic):
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-async def _generate_pdf(query, context, uid, lesson, topic, count):
-    """ساخت فایل txt از سوالات"""
-    qs = await db.get_questions_for_pdf(lesson=lesson, topic=topic if topic != 'همه' else None, count=count)
+async def _pdf_mode_select(query, context):
+    """
+    🆕 مرحله‌ی جدید: انتخاب قالب خروجی.
+    - تمرین: پاسخ و تحلیل بلافاصله زیر هر سوال (مناسب مرور شخصی)
+    - آزمون: سوالات بدون پاسخ + پاسخنامه‌ی جدا + پاسخ تشریحی در انتها
+      (مناسب چاپ و خودآزمایی واقعی)
+    """
+    lesson = context.user_data.get('pdf_lesson', '')
+    count  = context.user_data.get('pdf_count', 20)
+    keyboard = [
+        [InlineKeyboardButton("🎯 تمرین (پاسخ زیر هر سوال)", callback_data='questions:pdf_mode:practice')],
+        [InlineKeyboardButton("📝 آزمون (پاسخنامه در انتها)", callback_data='questions:pdf_mode:exam')],
+        _back("🔙 بازگشت", "questions:pdf_menu"),
+    ]
+    await query.edit_message_text(
+        f"📄 <b>{lesson}</b> — {count} سوال\n\nقالب خروجی را انتخاب کنید:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _resolve_question_images(context, questions: list) -> tuple:
+    """
+    دانلود تصاویر سوال/پاسخ (در صورت وجود file_id تلگرام) و تبدیل به
+    ImageReader آماده برای reportlab. qbank هیچ‌وقت مستقیم با تلگرام
+    کار نمی‌کند؛ این تابع همان لایه‌ی واسط است.
+    فعلاً فرم طراحی سوال، آپلود تصویر را جمع‌آوری نمی‌کند، پس این
+    دیکشنری‌ها معمولاً خالی می‌مانند — اما اگر یک سوال فیلد
+    question_image/answer_image داشته باشد (مثلاً به‌صورت دستی یا در
+    نسخه‌ی بعدی فرم طراحی سوال ثبت شود)، همین الان هم به‌درستی و
+    Responsive در PDF نمایش داده می‌شود.
+    """
+    from reportlab.lib.utils import ImageReader
+    q_images, a_images = {}, {}
+    for q in questions:
+        qid = str(q.get('_id', ''))
+        for field, target in (('question_image', q_images), ('answer_image', a_images)):
+            file_id = q.get(field)
+            if not file_id:
+                continue
+            try:
+                tg_file = await context.bot.get_file(file_id)
+                raw = await tg_file.download_as_bytearray()
+                target[qid] = ImageReader(io.BytesIO(bytes(raw)))
+            except Exception:
+                logger.warning(f"qbank: could not download image for question {qid}")
+    return q_images, a_images
+
+
+async def _generate_pdf_v2(query, context, uid, mode: str = 'practice'):
+    """
+    ساخت آزمون PDF کامل با معماری ماژولار qbank (کاور + سوالات +
+    در حالت آزمون: پاسخنامه + پاسخ تشریحی جدا). جایگزین کامل نسخه‌ی
+    قبلی که فقط یک فایل txt ساده می‌ساخت.
+    """
+    lesson     = context.user_data.get('pdf_lesson', '')
+    chapter    = context.user_data.get('pdf_chapter')
+    topic      = context.user_data.get('pdf_topic', 'همه')
+    difficulty = context.user_data.get('pdf_difficulty')
+    count      = context.user_data.get('pdf_count', 20)
+
+    from qbank.query import fetch_exam_questions, ExamMeta
+    qs = await fetch_exam_questions(
+        db, lesson=lesson, chapter=chapter, topic=topic if topic != 'همه' else None,
+        difficulty=difficulty, count=count, randomize=True,
+    )
     if not qs:
         await query.edit_message_text(
             "❌ سوالی برای این فیلتر پیدا نشد.",
@@ -775,42 +909,43 @@ async def _generate_pdf(query, context, uid, lesson, topic, count):
                 _back("🔙 بازگشت", "questions:pdf_menu")
             ])); return
 
-    lines = []
+    user = await db.get_user(uid)
+    student_name = user.get('name', '') if user else ''
+
+    q_images, a_images = await _resolve_question_images(context, qs)
+
+    try:
+        from qbank import generate_exam_pdf
+        meta = ExamMeta(lesson=lesson, chapter=chapter, topic=topic,
+                         difficulty=difficulty, student_name=student_name)
+        pdf_bytes = generate_exam_pdf(qs, meta, mode=mode,
+                                       question_images=q_images, answer_images=a_images)
+    except Exception as e:
+        logger.exception("qbank exam PDF generation failed")
+        await query.edit_message_text(
+            f"❌ خطا در ساخت PDF: {e}",
+            reply_markup=InlineKeyboardMarkup([
+                _back("🔙 بازگشت", "questions:main")
+            ])); return
+
+    for k in ('pdf_chapter', 'pdf_difficulty', 'pdf_count', '_pdf_chapters', '_pdf_diffs'):
+        context.user_data.pop(k, None)
+
     t_label = f" — {topic}" if topic and topic != 'همه' else ''
-    lines.append(f"بانک سوال — {lesson}{t_label}")
-    lines.append(f"تاریخ: {datetime.now().strftime('%Y-%m-%d')}")
-    lines.append(f"تعداد سوالات: {len(qs)}")
-    lines.append("=" * 50)
-    lines.append("")
-
-    for i, q in enumerate(qs, 1):
-        diff = q.get('difficulty', '')
-        lines.append(f"سوال {i} | {q.get('lesson','')} — {q.get('topic','')} | {diff}")
-        lines.append("")
-        lines.append(q['question'])
-        lines.append("")
-        for j, opt in enumerate(q.get('options', [])):
-            marker = "✓" if j == q.get('correct_answer', 0) else " "
-            lines.append(f"  {['الف','ب','ج','د'][j]}) {opt}  {marker}")
-        expl = q.get('explanation', '')
-        if expl:
-            lines.append(f"  توضیح: {expl}")
-        lines.append("-" * 40)
-        lines.append("")
-
-    text_content = "\n".join(lines)
-    file_obj     = io.BytesIO(text_content.encode('utf-8'))
-    fname        = f"qbank_{lesson}_{datetime.now().strftime('%Y%m%d')}.txt"
+    mode_label = "تمرین" if mode == 'practice' else "آزمون"
+    file_obj = io.BytesIO(pdf_bytes)
+    fname = f"qbank_{lesson}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
     file_obj.name = fname
 
     try:
         await query.message.reply_document(
             document=file_obj,
-            caption=f"📄 <b>بانک سوال</b>\n📚 {lesson}{t_label}\n🔢 {len(qs)} سوال",
+            caption=f"📄 <b>{mode_label} بانک سوال</b>\n📚 {lesson}{t_label}\n🔢 {len(qs)} سوال\n"
+                    f"🔖 کد: {meta.exam_code}",
             parse_mode='HTML',
             filename=fname)
         await query.edit_message_text(
-            f"✅ فایل سوالات ارسال شد!\n📚 {lesson}\n🔢 {len(qs)} سوال",
+            f"✅ فایل PDF ({mode_label}) ارسال شد!\n📚 {lesson}\n🔢 {len(qs)} سوال",
             reply_markup=InlineKeyboardMarkup([
                 _back("🔙 بازگشت به منو", "questions:main")
             ]))
