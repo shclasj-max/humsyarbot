@@ -27,17 +27,26 @@ from telegram.ext import (
 )
 
 # ── ایمپورت ماژول‌ها ──
+# 🧠 FIX معماری «دو مغز»: قبلاً ثبت‌نام، ساخت سوال، پنل محتوا، پروفایل
+# و تیکت هم داخل ConversationHandler مرکزی state داشتند و هم موازی
+# با آن از context.user_data['mode' / 'ca_mode' / 'ticket_mode'] در
+# unified_text_handler/unified_file_handler/message_router پیروی
+# می‌کردند. دو سیستم مستقل که هر دو فکر می‌کردند مسئول مسیر کاربرند
+# دقیقاً همان چیزی بود که باعث شد یک بار پیام broadcast ادمین به‌جای
+# مقصد درست، وسط یک state قدیمی (مثلاً ساخت سوال) قورت داده شود.
+# الان ConversationHandler فقط مسئول تنها فلوی واقعاً چندمرحله‌ای‌ای
+# است که معادل mode-based ندارد: «ثبت‌نام». همه‌ی بقیه (ساخت سوال،
+# پنل محتوا، پروفایل، تیکت، پاسخ به سوال) از قبل به‌طور کامل توسط
+# unified_text_handler / unified_file_handler / CallbackQueryHandlerهای
+# standalone پایین همین فایل پوشش داده می‌شوند — همان‌ها تنها مرجع
+# باقی می‌مانند تا همیشه state واقعی و به‌روز را ببینند.
 from start import (
     start_handler, register_start_callback, step_name_handler,
     register_intake_callback, step_student_id_handler,
     REGISTER, STEP_NAME, STEP_GROUP, STEP_INTAKE, STEP_STUDENT_ID
 )
 from dashboard import dashboard_callback
-from questions import (
-    questions_callback, handle_question_answer,
-    handle_create_question_steps, handle_difficulty_choice,
-    ANSWERING, CREATING_Q
-)
+from questions import questions_callback, handle_difficulty_choice
 from schedule import schedule_callback
 from stats import stats_callback
 from notifications import notifications_callback
@@ -47,20 +56,14 @@ from admin import (
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
 from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send
-from profile import profile_callback, profile_text_handler, PROFILE_EDIT_WAITING
+from profile import profile_callback
 from message_router import route_message
 from basic_science import basic_science_callback
 from resources import resources_callback
 from references import references_callback
-from content_admin import (
-    content_admin_callback, ca_file_handler, ca_text_handler,
-    CA_WAITING_FILE, CA_WAITING_TEXT
-)
+from content_admin import content_admin_callback, ca_file_handler, ca_text_handler
 from faq import faq_callback
-from ticket import (
-    ticket_callback, ticket_message_handler,
-    TICKET_WAITING, TICKET_REPLY_WAITING
-)
+from ticket import ticket_callback, ticket_message_handler
 from reports import report_callback, handle_report_note_text   # FIX جدید
 from database import db
 
@@ -837,9 +840,17 @@ def build_application() -> Application:
             # FIX باگ مهم: /start و همه‌ی mode‌های گفتگو فقط در پیوی
             # خصوصی فعال باشند — وگرنه ربات روی پیام‌های گروه‌های لاگ
             # (ادمین/محتوا) هم واکنش می‌داد و می‌گفت «/start بزنید».
+            #
+            # 🧠 FIX معماری: ورودی‌های questions:cr_topic: و ^ca: قبلاً
+            # هم اینجا entry_point بودند هم پایین‌تر standalone
+            # CallbackQueryHandler داشتند — یعنی یک تپ روی «ca:...»
+            # می‌توانست یک conversation جدید و بی‌مصرف باز کند (چون
+            # دیگر هیچ‌کدام از state هایش را نگه نمی‌داریم) درحالی‌که
+            # نسخه‌ی standalone پایین همین فایل به‌تنهایی کاملاً کافی
+            # است. حذف شدند تا ConversationHandler فقط برای «ثبت‌نام»
+            # — تنها فلوی واقعاً چندمرحله‌ای بدون معادل mode-based —
+            # یک conversation باز کند.
             CommandHandler('start', start_handler, filters=filters.ChatType.PRIVATE),
-            CallbackQueryHandler(questions_callback,      pattern=r'^questions:cr_topic:'),
-            CallbackQueryHandler(content_admin_callback,  pattern=r'^ca:'),
         ],
         states={
             REGISTER: [
@@ -861,43 +872,29 @@ def build_application() -> Application:
             STEP_STUDENT_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, step_student_id_handler),
             ],
-            ANSWERING: [
-                CallbackQueryHandler(handle_question_answer, pattern=r'^answer:')
-            ],
-            CREATING_Q: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_create_question_steps),
-                CallbackQueryHandler(handle_difficulty_choice, pattern=r'^qd:'),
-                CallbackQueryHandler(questions_callback, pattern=r'^questions:'),
-            ],
-            CA_WAITING_FILE: [
-                MessageHandler(
-                    (filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE)
-                    & filters.ChatType.PRIVATE,
-                    ca_file_handler
-                ),
-                CallbackQueryHandler(content_admin_callback, pattern=r'^ca:'),
-                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
-            ],
-            CA_WAITING_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ca_text_handler),
-                CallbackQueryHandler(content_admin_callback, pattern=r'^ca:'),
-                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
-            ],
-            PROFILE_EDIT_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, profile_text_handler),
-                CallbackQueryHandler(profile_callback, pattern=r'^profile:'),
-                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
-            ],
-            TICKET_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ticket_message_handler),
-                CallbackQueryHandler(ticket_callback, pattern=r'^ticket:'),
-                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
-            ],
-            TICKET_REPLY_WAITING: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ticket_message_handler),
-                CallbackQueryHandler(ticket_callback, pattern=r'^ticket:'),
-                CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE),
-            ],
+            # 🧠 FIX معماری «دو مغز» (پرریسک‌ترین ایراد معماری پروژه):
+            # state های ANSWERING، CREATING_Q، CA_WAITING_FILE/TEXT،
+            # PROFILE_EDIT_WAITING، TICKET_WAITING/REPLY_WAITING از
+            # اینجا حذف شدند. بررسی کد نشان داد هر کدام از قبل و به‌طور
+            # کامل معادل mode-based خودشان را داشتند (ANSWERING حتی
+            # هیچ‌وقت واقعاً وارد نمی‌شد — یک state کاملاً مرده بود):
+            #   • answer:            → questions_callback (استاندالون پایین همین فایل)
+            #   • creating_question  → unified_text_handler → route_message
+            #   • qd:                → استاندالون شد (لیست cbs پایین‌تر)
+            #   • ca_mode (فایل/متن) → unified_file_handler / unified_text_handler
+            #   • profile_edit       → unified_text_handler
+            #   • ticket_mode        → unified_text_handler
+            # نگه‌داشتن این state ها همزمان با معادل mode-based شان
+            # دقیقاً همان چیزی بود که باعث شد یک بار پیام broadcast
+            # ادمین وسط یک state قدیمی گم شود: وقتی کاربر از یک فلوی
+            # چندمرحله‌ای خارج می‌شد بدون رسیدن به پایانش، conv در همان
+            # state قدیمی «گیر» می‌ماند و پیام بعدی‌اش را — حتی اگر
+            # مربوط به بخش کاملاً متفاوتی بود — با handler همان state
+            # قدیمی قورت می‌داد. حالا چون این مسیرها هیچ state ای در
+            # ConversationHandler ندارند، هر پیام همیشه مستقیم به
+            # unified_text_handler/unified_file_handler می‌رسد و مقدار
+            # واقعیِ همین‌الانِ mode/ca_mode/ticket_mode را می‌بیند —
+            # نه یک state منجمد از چند دقیقه قبل.
         },
         fallbacks=[
             CommandHandler('start', start_handler, filters=filters.ChatType.PRIVATE),
@@ -963,9 +960,21 @@ def build_application() -> Application:
         (ticket_callback,          r'^ticket:'),
         (report_callback,          r'^report:'),   # FIX جدید
         (channel_lock_check_callback, r'^channel_lock:check'),   # FIX جدید
+        # 🧠 FIX معماری: قبلاً qd: (انتخاب سختی سوال) فقط داخل state
+        # CREATING_Q قابل‌دسترس بود؛ چون آن state حذف شد، اینجا
+        # standalone ثبت می‌شود تا فلوی ساخت سوال دست‌نخورده بماند.
+        (handle_difficulty_choice, r'^qd:'),
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
+
+    # 🧠 FIX معماری: /cancel قبلاً فقط داخل state های حذف‌شده
+    # (CA_WAITING_FILE/TEXT، PROFILE_EDIT_WAITING، TICKET_WAITING/
+    # REPLY_WAITING) و در fallbacks خودِ conv در دسترس بود. حالا که آن
+    # فلوها دیگر conversation جدا ندارند، /cancel باید مستقل ثبت شود
+    # تا همچنان بتواند ca_mode/ticket_mode/profile_edit/creating_question
+    # را با همان تابع قبلی (cancel_handler) پاک کند.
+    app.add_handler(CommandHandler('cancel', cancel_handler, filters=filters.ChatType.PRIVATE))
 
     # ── File handler — همه انواع فایل ──
     # FIX باگ مهم: فقط در پیوی خصوصی فعال باشد — وگرنه فایل‌هایی
