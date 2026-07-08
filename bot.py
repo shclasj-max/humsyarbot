@@ -8,6 +8,7 @@
 """
 import os
 import sys
+import html
 import logging
 import asyncio
 from datetime import datetime, time as dtime, timezone, timedelta
@@ -172,6 +173,67 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
         await db.notif_run_finish(run_id, sent, failed, sent + failed, status='error', error=str(e))
 
 
+# ── آیکون هر نوع فایل — جایگزین پیشوند متنی «PDF:» / «نمونه سوال:» قبلی؛
+#    آیکون خودش نوع فایل را می‌گوید، پس چشم مستقیم می‌رود سراغ اسم فایل ──
+_RESOURCE_ICONS = {
+    'pdf':   '📄',
+    'video': '🎬',
+    'pptx':  '📊',
+    'test':  '📝',
+    'voice': '🎧',
+    'audio': '🎧',
+}
+_DEFAULT_RESOURCE_ICON = '📎'
+
+
+async def _build_new_resources_text(new_items: list) -> str:
+    """
+    ساخت متن نوتیف «منابع جدید» — بازطراحی UX:
+      • آیکون به‌جای پیشوند متنی نوع فایل (📄 به‌جای «PDF:»)
+      • همه‌ی منابع نمایش داده می‌شوند، نه فقط چند مورد اول
+      • گروه‌بندی بر اساس درس با هدر بولد
+      • کل لیست داخل یک <blockquote> واحد تلگرام قرار می‌گیرد تا پیام
+        فشرده و جمع‌وجور بماند (نه پراکنده روی کل صفحه)
+      • توضیح فایل عیناً همان چیزی است که ادمین تایپ کرده (شامل هر
+        اعتبار/نام تیم که خودش در انتهای توضیح نوشته) — بدون افزودن
+        هیچ برچسب/فلش مصنوعی اضافه که معنای مستقلی ندارد
+    """
+    by_lesson: dict = {}
+    lesson_order: list = []
+
+    for item in new_items:
+        path = await db.bs_get_content_full_path(str(item['_id']))
+        lesson_name = path.get('lesson_name') or 'سایر'
+        if lesson_name not in by_lesson:
+            by_lesson[lesson_name] = []
+            lesson_order.append(lesson_name)
+        icon = _RESOURCE_ICONS.get(path.get('content_type', ''), _DEFAULT_RESOURCE_ICON)
+        desc = html.escape(path.get('description') or path.get('topic') or 'بدون عنوان')
+        by_lesson[lesson_name].append(f"{icon} {desc}")
+
+    lesson_blocks = []
+    for lesson_name in lesson_order:
+        header = f"📘 <b>{html.escape(lesson_name)}</b>"
+        lesson_blocks.append(header + "\n" + "\n".join(by_lesson[lesson_name]))
+
+    quote_body = "\n\n".join(lesson_blocks)
+    title  = f"🆕 <b>{len(new_items)} منبع جدید اضافه شد</b>"
+    footer = (
+        "\n\n📚 مشاهده کامل ← بخش «منابع»\n"
+        "<i>⚙️ خاموش‌کردن: اعلان‌ها ← منابع جدید</i>"
+    )
+
+    # ایمنی: اگر (به‌ندرت) تعداد منابع خیلی زیاد باشد و پیام از سقف
+    # ۴۰۹۶ کاراکتری تلگرام رد شود، فقط داخل Quote کوتاه می‌شود — نه وسط
+    # پیام — تا تگ <blockquote> همیشه درست بسته شود و کل پیام رد نشود.
+    shell_len = len(title) + len(footer) + len("\n\n<blockquote></blockquote>")
+    budget    = 4096 - shell_len - 100
+    if len(quote_body) > budget:
+        quote_body = quote_body[:max(budget, 0)] + "\n…"
+
+    return f"{title}\n\n<blockquote>{quote_body}</blockquote>{footer}"
+
+
 async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
     """
     FIX جدید: نوتیف دسته‌ای منابع جدید — این job هر ساعت اجرا می‌شود
@@ -195,53 +257,7 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
         run_id = await db.notif_run_start('new_resources')
-
-        # FIX طبق سند: گروه‌بندی بر اساس درس + نمایش نوع/مبحث/استاد —
-        # قبلاً فقط لیست تخت نام فایل‌ها بود که ارزش کمی داشت.
-        type_fa = {
-            'pdf': 'PDF', 'video': 'Video', 'voice': 'Voice',
-            'pptx': 'PowerPoint', 'test': 'نمونه سوال', 'audio': 'Voice',
-        }
-        by_lesson: dict = {}
-        lesson_order: list = []
-        for item in new_items:
-            path = await db.bs_get_content_full_path(str(item['_id']))
-            lesson_name = path.get('lesson_name', '') or 'سایر'
-            if lesson_name not in by_lesson:
-                by_lesson[lesson_name] = []
-                lesson_order.append(lesson_name)
-            ctype = type_fa.get(path.get('content_type', ''), path.get('content_type', '') or 'فایل')
-            desc  = path.get('description', '') or path.get('topic', '') or 'بدون عنوان'
-            by_lesson[lesson_name].append(f"• {ctype}: {desc}")
-
-        MAX_LESSONS_SHOWN = 4
-        MAX_ITEMS_PER_LESSON = 3
-        blocks = []
-        shown_count = 0
-        for lesson_name in lesson_order[:MAX_LESSONS_SHOWN]:
-            items = by_lesson[lesson_name]
-            block_lines = [f"📘 <b>{lesson_name}</b>"] + items[:MAX_ITEMS_PER_LESSON]
-            extra_in_lesson = len(items) - MAX_ITEMS_PER_LESSON
-            if extra_in_lesson > 0:
-                block_lines.append(f"  ...و {extra_in_lesson} مورد دیگر")
-            blocks.append('\n'.join(block_lines))
-            shown_count += len(items)
-
-        remaining_lessons = len(lesson_order) - MAX_LESSONS_SHOWN
-        remaining_items   = len(new_items) - shown_count
-        tail = ""
-        if remaining_lessons > 0:
-            tail = f"\n\n📦 و {remaining_items} مورد دیگر در {remaining_lessons} درس دیگر"
-
-        text = (
-            "📚 <b>منابع جدیدی اضافه شده‌اند</b>\n\n"
-            + '\n\n'.join(blocks) + tail +
-            "\n\n📚 برای مشاهده کامل: بخش «منابع»\n\n"
-            "<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← منابع جدید</i>"
-        )
-
-        if len(text) > 3800:
-            text = text[:3700] + "\n\n<i>... برای مشاهده کامل وارد بخش «منابع» شوید</i>"
+        text   = await _build_new_resources_text(new_items)
 
         users = await db.notif_users('new_resources')
         sent, failed, failed_ids = 0, 0, []
