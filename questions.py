@@ -136,6 +136,9 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.setdefault('cx', {})['count'] = count
         await _cx_time_select(query, context)
 
+    elif action == 'cx_back_count':
+        await _cx_count_select(query, context)
+
     elif action == 'cx_time':
         minutes = int(parts[2])
         context.user_data.setdefault('cx', {})['time'] = minutes
@@ -282,6 +285,27 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lesson  = context.user_data.get('pdf_lesson','')
         chapter = context.user_data.get('pdf_chapter')
         await _pdf_difficulty_select(query, context, lesson, chapter, topic)
+
+    # ── دکمه‌های بازگشت یک‌قدمی در ویزارد PDF (بدون گم‌کردن انتخاب‌های قبلی) ──
+    elif action == 'pdf_back_chapter':
+        lesson = context.user_data.get('pdf_lesson', '')
+        await _pdf_chapter_select(query, context, lesson)
+
+    elif action == 'pdf_back_topic':
+        lesson  = context.user_data.get('pdf_lesson', '')
+        chapter = context.user_data.get('pdf_chapter')
+        await _pdf_topic_select(query, context, lesson, chapter)
+
+    elif action == 'pdf_back_diff':
+        lesson  = context.user_data.get('pdf_lesson', '')
+        chapter = context.user_data.get('pdf_chapter')
+        topic   = context.user_data.get('pdf_topic', 'همه')
+        await _pdf_difficulty_select(query, context, lesson, chapter, topic)
+
+    elif action == 'pdf_back_count':
+        lesson = context.user_data.get('pdf_lesson', '')
+        topic  = context.user_data.get('pdf_topic', 'همه')
+        await _pdf_count_select(query, context, lesson, topic)
 
     # ── مدیریت سوالات توسط ادمین محتوا/ادمین ──
     elif action == 'ca_q_list':
@@ -430,6 +454,7 @@ async def _cx_count_select(query, context):
     lesson = cx.get('lesson', '')
     topic  = cx.get('topic', 'همه')
     t_label = f" — {topic}" if topic != 'همه' else ''
+    lesson_idx = context.user_data.get('cx_lesson_idx', 0)
     keyboard = [
         [InlineKeyboardButton("5 سوال",  callback_data='questions:cx_count:5'),
          InlineKeyboardButton("10 سوال", callback_data='questions:cx_count:10')],
@@ -437,7 +462,7 @@ async def _cx_count_select(query, context):
          InlineKeyboardButton("20 سوال", callback_data='questions:cx_count:20')],
         [InlineKeyboardButton("30 سوال", callback_data='questions:cx_count:30'),
          InlineKeyboardButton("40 سوال", callback_data='questions:cx_count:40')],
-        _back("🔙 بازگشت", "questions:custom_exam"),
+        _back("🔙 بازگشت", f'questions:cx_lesson:{lesson_idx}'),
     ]
     await query.edit_message_text(
         f"📝 <b>آزمون سفارشی</b>\n📚 {lesson}{t_label}\n\n"
@@ -459,7 +484,7 @@ async def _cx_time_select(query, context):
          InlineKeyboardButton("۴۵ دقیقه ⏱",  callback_data='questions:cx_time:45')],
         [InlineKeyboardButton("۶۰ دقیقه ⏱",  callback_data='questions:cx_time:60'),
          InlineKeyboardButton("۹۰ دقیقه ⏱",  callback_data='questions:cx_time:90')],
-        _back("🔙 بازگشت", "questions:custom_exam"),
+        _back("🔙 بازگشت", "questions:cx_back_count"),
     ]
     await query.edit_message_text(
         f"📝 <b>آزمون سفارشی</b>\n📚 {lesson}{t_label}\n🔢 {count} سوال\n\n"
@@ -785,7 +810,8 @@ async def _pdf_topic_select(query, context, lesson, chapter=None):
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:pdf_topic_sel:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data='questions:pdf_topic_sel:all')])
-    keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
+    back_cb = 'questions:pdf_back_chapter' if context.user_data.get('_pdf_chapters') else 'questions:pdf_menu'
+    keyboard.append(_back("🔙 بازگشت", back_cb))
     c_label = f" — {chapter}" if chapter else ''
     await query.edit_message_text(f"📄 <b>{lesson}{c_label}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -816,7 +842,7 @@ async def _pdf_difficulty_select(query, context, lesson, chapter, topic):
                                        callback_data=f'questions:pdf_diff:{i}')]
                 for i, d in enumerate(diffs)]
     keyboard.append([InlineKeyboardButton("📂 همه سطوح", callback_data='questions:pdf_diff:all')])
-    keyboard.append(_back("🔙 بازگشت", "questions:pdf_menu"))
+    keyboard.append(_back("🔙 بازگشت", "questions:pdf_back_topic"))
     t_label = f" — {topic}" if topic != 'همه' else ''
     await query.edit_message_text(f"📄 <b>{lesson}{t_label}</b>\n\nسطح سختی را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -826,12 +852,14 @@ async def _pdf_count_select(query, context, lesson, topic):
     context.user_data['pdf_lesson'] = lesson
     context.user_data['pdf_topic']  = topic
     t_label = f" — {topic}" if topic != 'همه' else ''
+    diffs = context.user_data.get('_pdf_diffs')
+    back_cb = 'questions:pdf_back_diff' if diffs and len(diffs) > 1 else 'questions:pdf_back_topic'
     keyboard = [
         [InlineKeyboardButton("۱۰ سوال",  callback_data='questions:pdf_count:10'),
          InlineKeyboardButton("۲۰ سوال",  callback_data='questions:pdf_count:20')],
         [InlineKeyboardButton("۳۰ سوال",  callback_data='questions:pdf_count:30'),
          InlineKeyboardButton("۵۰ سوال",  callback_data='questions:pdf_count:50')],
-        _back("🔙 بازگشت", "questions:pdf_menu"),
+        _back("🔙 بازگشت", back_cb),
     ]
     await query.edit_message_text(
         f"📄 <b>{lesson}{t_label}</b>\n\nتعداد سوالات:",
@@ -850,7 +878,7 @@ async def _pdf_mode_select(query, context):
     keyboard = [
         [InlineKeyboardButton("🎯 تمرین (پاسخ زیر هر سوال)", callback_data='questions:pdf_mode:practice')],
         [InlineKeyboardButton("📝 آزمون (پاسخنامه در انتها)", callback_data='questions:pdf_mode:exam')],
-        _back("🔙 بازگشت", "questions:pdf_menu"),
+        _back("🔙 بازگشت", "questions:pdf_back_count"),
     ]
     await query.edit_message_text(
         f"📄 <b>{lesson}</b> — {count} سوال\n\nقالب خروجی را انتخاب کنید:",
@@ -1016,11 +1044,16 @@ async def _lesson_select(query, context, mode, term_idx: int = None):
 async def _topic_select(query, context, lesson, mode):
     topics = await db.get_topics(lesson)
     context.user_data['_topics'] = topics
-    # بازگشت به لیست درس‌ها همان mode
+    # بازگشت به لیست درس‌های همان ترم (نه شروع دوباره از انتخاب ترم)
+    term_idx = context.user_data.get('sel_term_idx')
+    if term_idx is not None:
+        back_cb = f'questions:sel_term:{mode}:{term_idx}'
+    else:
+        back_cb = f'questions:{"exam" if mode=="exam" else "free"}'
     keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:sel_topic:{mode}:{i}')]
                 for i, t in enumerate(topics)]
     keyboard.append([InlineKeyboardButton("📂 همه مباحث", callback_data=f'questions:sel_topic:{mode}:all')])
-    keyboard.append(_back("🔙 بازگشت", f'questions:{"exam" if mode=="exam" else "free"}'))
+    keyboard.append(_back("🔙 بازگشت", back_cb))
     await query.edit_message_text(f"📚 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
                                   parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
