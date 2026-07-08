@@ -123,7 +123,11 @@ class DB:
 
     async def all_users(self, approved_only: bool = True):
         q = {'approved': True} if approved_only else {}
-        return await self.users.find(q).sort('registered_at', -1).to_list(5000)
+        # 🐛 قبلاً to_list(5000) بود: یعنی از کاربر شماره‌ی ۵۰۰۱ به بعد
+        # اصلاً در broadcast/آمار/فیلترها دیده نمی‌شد (نه ارور، نه لاگ —
+        # فقط سکوت). با to_list(length=None) درایور Motor همه‌ی نتایج را
+        # صرف‌نظر از تعدادشان برمی‌گرداند.
+        return await self.users.find(q).sort('registered_at', -1).to_list(length=None)
 
     async def pending_users(self):
         return await self.users.find({'approved': False}).to_list(100)
@@ -142,7 +146,7 @@ class DB:
         query = {'approved': True, f'notification_settings.{ntype}': True}
         if group and str(group).strip() not in ('', 'هر دو', 'هردو', 'all'):
             query['group'] = str(group)
-        return await self.users.find(query).to_list(5000)
+        return await self.users.find(query).to_list(length=None)
 
     async def get_content_admins(self):
         return await self.users.find(
@@ -1488,7 +1492,7 @@ class DB:
 
         # کاربرانی که بیش از ۱۴ روز فعالیت نداشتند (احتمال غیرفعال شدن)
         inactive_cutoff = (datetime.now() - timedelta(days=14)).isoformat()
-        all_appr = await self.users.find({'approved': True}).to_list(5000)
+        all_appr = await self.users.find({'approved': True}).to_list(length=None)
         inactive_count = 0
         for u in all_appr:
             last = u.get('last_active', u.get('registered_at', ''))
