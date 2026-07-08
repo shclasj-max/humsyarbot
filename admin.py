@@ -574,21 +574,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == 'users':
         page = int(parts[2]) if len(parts) > 2 else 0
-        await _show_users_list(query, page, group=context.user_data.get('filter_group'), intake=context.user_data.get('filter_intake'))
+        await _show_users_list(query, context, page, group=context.user_data.get('filter_group'), intake=context.user_data.get('filter_intake'))
     elif action == 'users_filter':
         await _show_users_filter(query, context)
     elif action == 'uf_group':
         g = parts[2] if len(parts) > 2 and parts[2] != 'all' else None
         context.user_data['filter_group'] = g
-        await _show_users_list(query, 0, group=g, intake=context.user_data.get('filter_intake'))
+        await _show_users_list(query, context, 0, group=g, intake=context.user_data.get('filter_intake'))
     elif action == 'uf_intake':
         icode = parts[2] if len(parts) > 2 and parts[2] != 'all' else None
         context.user_data['filter_intake'] = icode
-        await _show_users_list(query, 0, group=context.user_data.get('filter_group'), intake=icode)
+        await _show_users_list(query, context, 0, group=context.user_data.get('filter_group'), intake=icode)
     elif action == 'uf_clear':
         context.user_data.pop('filter_group', None)
         context.user_data.pop('filter_intake', None)
-        await _show_users_list(query, 0)
+        await _show_users_list(query, context, 0)
     elif action == 'user_detail':
         await _show_user_detail(query, context, int(parts[2]))
     elif action in ('edit_name', 'edit_group', 'edit_sid'):
@@ -666,7 +666,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id=str(target_uid), target_type='user', target_label=target_name,
             tags=['مسدودسازی']
         )
-        await _show_users_list(query, 0)
+        await _show_users_list(query, context, 0)
     elif action == 'approve':
         target_uid = int(parts[2])
         prev_user = await db.get_user(target_uid)
@@ -724,7 +724,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id=str(target_uid), target_type='user', target_label=name,
             tags=['حذف_کاربر']
         )
-        await _show_users_list(query, 0)
+        await _show_users_list(query, context, 0)
     elif action == 'pending':
         await _show_pending(query)
     elif action == 'search_user':
@@ -824,8 +824,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = '' if idx == 'all' else (topics[int(idx)] if int(idx) < len(topics) else '')
         context.user_data['qbank_topic'] = topic
         context.user_data['mode'] = 'qbank_awaiting_file'
+        lessons = context.user_data.get('_lessons', [])
+        lesson  = context.user_data.get('qbank_lesson', '')
+        cancel_cb = f'admin:qbank_lesson:{lessons.index(lesson)}' if lesson in lessons else 'admin:qbank_manage'
         await query.edit_message_text("📤 فایل PDF یا عکس بانک سوال را ارسال کنید:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:qbank_manage')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data=cancel_cb)]]))
     elif action == 'qbank_list':
         await _show_qbank_list(query)
     elif action == 'qbank_del':
@@ -922,7 +925,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('poll_data', None)
         context.user_data['mode'] = ''
         await query.answer("✅ لغو شد.")
-        await _admin_menu(query, uid=uid)
+        await _poll_main(query, context)
     elif action == 'bc_target':
         target = parts[2] if len(parts) > 2 else 'all'
         context.user_data['bc_target'] = target
@@ -964,7 +967,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'bc_cancel':
         _broadcast_clear(context)
         await query.answer("✅ لغو شد.")
-        await _admin_menu(query, uid=uid)
+        await _broadcast_main(query, context)
     elif action == 'bc_confirm':
         await _broadcast_do_send(query, context)
     elif action == 'bc_schedule':
@@ -1576,7 +1579,11 @@ async def _show_stats(query):
         ]))
 
 
-async def _show_users_list(query, page: int = 0, group: str = None, intake: str = None):
+async def _show_users_list(query, context, page: int = 0, group: str = None, intake: str = None):
+    # FIX UX: صفحه فعلی لیست کاربران را نگه می‌داریم تا دکمه «بازگشت به
+    # لیست» در صفحه جزئیات کاربر، دقیقاً به همین صفحه و فیلتر برگردد
+    # — نه همیشه به صفحه اول.
+    context.user_data['users_page'] = page
     all_users = await db.all_users(approved_only=False)
     if group:
         all_users = [u for u in all_users if u.get('group') == group]
@@ -1619,19 +1626,19 @@ async def _show_users_filter(query, context):
     f_group  = context.user_data.get('filter_group')
     f_intake = context.user_data.get('filter_intake')
     keyboard = [
-        [InlineKeyboardButton("━━ فیلتر گروه ━━", callback_data='admin:main')],
+        [InlineKeyboardButton("━━ فیلتر گروه ━━", callback_data='admin:users_filter')],
         [
             InlineKeyboardButton(f"{'✅' if not f_group else '⬜'} همه", callback_data='admin:uf_group:all'),
             InlineKeyboardButton(f"{'✅' if f_group=='1' else '⬜'} گروه ۱", callback_data='admin:uf_group:1'),
             InlineKeyboardButton(f"{'✅' if f_group=='2' else '⬜'} گروه ۲", callback_data='admin:uf_group:2'),
         ],
-        [InlineKeyboardButton("━━ فیلتر ورودی ━━", callback_data='admin:main')],
+        [InlineKeyboardButton("━━ فیلتر ورودی ━━", callback_data='admin:users_filter')],
         [InlineKeyboardButton("همه ورودی‌ها", callback_data='admin:uf_intake:all')],
     ]
     for i in intakes:
         active = f_intake == i['code']
         keyboard.append([InlineKeyboardButton(f"{'✅' if active else '⬜'} {i['label']}", callback_data=f'admin:uf_intake:{i["code"]}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:users:0')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f'admin:users:{context.user_data.get("users_page", 0)}')])
     active_filters = []
     if f_group:  active_filters.append(f"گروه {f_group}")
     if f_intake: active_filters.append(f_intake)
@@ -1682,7 +1689,8 @@ async def _show_user_detail(query, context, target_uid: int):
     else:
         keyboard.append([InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{target_uid}'), InlineKeyboardButton("❌ رد", callback_data=f'admin:reject:{target_uid}')])
     keyboard.append([InlineKeyboardButton("🗑 حذف کامل", callback_data=f'admin:confirm_delete_user:{target_uid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست", callback_data='admin:users:0')])
+    back_page = context.user_data.get('users_page', 0)
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f'admin:users:{back_page}')])
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
