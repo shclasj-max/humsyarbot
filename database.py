@@ -647,11 +647,22 @@ class DB:
 
     async def add_question(self, lesson: str, topic: str, difficulty: str,
                            question: str, options: list, correct: int,
-                           explanation: str, creator: int, auto_approve: bool = False):
+                           explanation: str, creator: int, auto_approve: bool = False,
+                           chapter: str = '', tags: list = None,
+                           question_image: str = None, answer_image: str = None):
+        """
+        FIX/بهبود (بانک سوالات حرفه‌ای): فیلدهای جدید و اختیاری اضافه شد —
+        chapter (فصل)، tags (تگ‌ها)، question_image/answer_image (شناسه
+        فایل تصویر در تلگرام). همه‌ی این‌ها اختیاری و ۱۰۰٪ سازگار با
+        نسخه‌ی قبلی هستند: هر فراخوانی قدیمی add_question بدون این
+        آرگومان‌ها دقیقاً مثل قبل کار می‌کند.
+        """
         r = await self.questions.insert_one({
             'lesson': lesson, 'topic': topic, 'difficulty': difficulty,
+            'chapter': chapter or '', 'tags': tags or [],
             'question': question, 'options': options, 'correct_answer': correct,
             'explanation': explanation, 'creator_id': creator,
+            'question_image': question_image, 'answer_image': answer_image,
             'approved': auto_approve, 'created_at': datetime.now().isoformat(),
             'attempt_count': 0, 'correct_count': 0,
         })
@@ -701,11 +712,92 @@ class DB:
         )
         return chosen
 
-    async def get_questions_for_pdf(self, lesson: str = None, topic: str = None, count: int = 20):
-        q = {'approved': True}
-        if lesson: q['lesson'] = lesson
-        if topic and topic != 'همه': q['topic'] = topic
-        return await self.questions.find(q).to_list(count)
+    # ══════════════════════════════════════════════════
+    #  بانک سوالات — لایه‌ی Query برای سیستم تولید آزمون PDF
+    #  (جدا از منطق تولید PDF؛ فقط دیتابیس را می‌شناسد)
+    # ══════════════════════════════════════════════════
+
+    async def get_qbank_lessons(self) -> list:
+        """درس‌هایی که واقعاً در بانک سوالِ تأییدشده سوال دارند"""
+        return sorted([l for l in await self.questions.distinct('lesson', {'approved': True}) if l])
+
+    async def get_qbank_chapters(self, lesson: str) -> list:
+        """
+        فصل‌های موجود برای یک درس — فقط فصل‌هایی که واقعاً سوال دارند.
+        اگه هیچ سوالی فصل نداشته باشه (چون هنوز این فیلد پر نشده)
+        لیست خالی برمی‌گرده و ربات این مرحله رو خودکار رد می‌کنه —
+        کاملاً سازگار با سوالات قدیمی که فیلد chapter ندارند.
+        """
+        chapters = await self.questions.distinct(
+            'chapter', {'approved': True, 'lesson': lesson, 'chapter': {'$nin': [None, '']}}
+        )
+        return sorted([c for c in chapters if c])
+
+    async def get_qbank_topics(self, lesson: str, chapter: str = None) -> list:
+        """مباحث موجود برای درس (و در صورت انتخاب، فصل) — فقط مباحث دارای سوال"""
+        match = {'approved': True, 'lesson': lesson}
+        if chapter:
+            match['chapter'] = chapter
+        topics = await self.questions.distinct('topic', match)
+        return sorted([t for t in topics if t])
+
+    async def get_qbank_difficulties(self, lesson: str, chapter: str = None, topic: str = None) -> list:
+        """سطوح سختیِ واقعاً موجود برای این فیلتر (برای مرحله‌ی اختیاری انتخاب سختی)"""
+        match = {'approved': True, 'lesson': lesson}
+        if chapter: match['chapter'] = chapter
+        if topic and topic != 'همه': match['topic'] = topic
+        diffs = await self.questions.distinct('difficulty', match)
+        return [d for d in diffs if d]
+
+    async def count_qbank_questions(self, lesson: str, chapter: str = None,
+                                     topic: str = None, difficulty: str = None,
+                                     tags: list = None) -> int:
+        """تعداد سوالات موجود برای یک فیلتر — برای نمایش قبل از تولید PDF"""
+        match = self._exam_match(lesson, chapter, topic, difficulty, tags)
+        return await self.questions.count_documents(match)
+
+    def _exam_match(self, lesson, chapter=None, topic=None, difficulty=None,
+                     tags=None, exclude_ids=None) -> dict:
+        match = {'approved': True, 'lesson': lesson}
+        if chapter: match['chapter'] = chapter
+        if topic and topic != 'همه': match['topic'] = topic
+        if difficulty: match['difficulty'] = difficulty
+        if tags: match['tags'] = {'$in': tags}
+        if exclude_ids:
+            try:
+                match['_id'] = {'$nin': [ObjectId(i) for i in exclude_ids]}
+            except Exception:
+                pass
+        return match
+
+    async def get_exam_questions(self, lesson: str, chapter: str = None, topic: str = None,
+                                  difficulty: str = None, tags: list = None, count: int = 20,
+                                  randomize: bool = True, exclude_ids: list = None) -> list:
+        """
+        هسته‌ی «Randomizer + Query» برای تولید آزمون:
+        - فیلتر بر اساس درس/فصل/مبحث/سختی/تگ (هر کدام اختیاری)
+        - randomize=True → انتخاب تصادفی با $sample (بدون تکرار داخل
+          همان خروجی، چون $sample به‌طور طبیعی سندهای یکتا برمی‌گرداند)
+        - randomize=False → ترتیب سیستماتیک بر اساس تاریخ ثبت (قدیمی‌ترین اول)
+        - exclude_ids: هوک آماده برای قابلیت آینده‌ی «جلوگیری از تکرار
+          سوالات بین آزمون‌های مختلف یک دانشجو» — کافیست شناسه‌ی
+          سوالاتی که قبلاً دریافت کرده به این پارامتر داده شود.
+        """
+        match = self._exam_match(lesson, chapter, topic, difficulty, tags, exclude_ids)
+        if randomize:
+            pipeline = [{'$match': match}, {'$sample': {'size': count}}]
+            return await self.questions.aggregate(pipeline).to_list(count)
+        return await self.questions.find(match).sort('created_at', 1).to_list(count)
+
+    async def get_users_map(self, uids: list) -> dict:
+        """
+        نگاشت {user_id: نام} برای نمایش «طراح سوال» در PDF — یک کوئری
+        دسته‌ای به‌جای N کوئری جدا برای هر سوال.
+        """
+        if not uids:
+            return {}
+        docs = await self.users.find({'user_id': {'$in': list(set(uids))}}).to_list(len(set(uids)))
+        return {d['user_id']: d.get('name', '') for d in docs}
 
     async def pending_questions(self):
         return await self.questions.find({'approved': False}).to_list(50)
