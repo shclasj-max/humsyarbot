@@ -17,11 +17,13 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
 
 async def build_dashboard_text(uid: int) -> tuple:
-    user, stats, exams, new_res = await asyncio.gather(
+    user, stats, exams, new_res, donation_enabled, donation_link = await asyncio.gather(
         db.get_user(uid),
         db.user_stats(uid),
         db.upcoming_exams(7),
         db.new_resources_count(7),
+        db.get_setting('donation_enabled', False),
+        db.get_setting('donation_link', None),
     )
 
     if not user:
@@ -106,6 +108,10 @@ async def build_dashboard_text(uid: int) -> tuple:
             InlineKeyboardButton("🎫 پشتیبانی",     callback_data='ticket:main'),
         ],
     ]
+    if donation_enabled and donation_link:
+        keyboard.append([
+            InlineKeyboardButton("💙 حمایت مالی", url=donation_link),
+        ])
     if uid == ADMIN_ID:
         keyboard.append([
             InlineKeyboardButton("👨‍⚕️ پنل ادمین",  callback_data='admin:main'),
