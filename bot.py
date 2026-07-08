@@ -654,7 +654,7 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     'qbank_awaiting_desc', 'add_schedule', 'flex_time_change',
     'set_auto_backup_hour', 'report_note', 'ticket_search',
     'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
-    'add_required_channel', 'edit_schedule_field',
+    'add_required_channel', 'edit_schedule_field', 'set_donation_link',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
@@ -733,6 +733,7 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
         'set_poll_channel',
         'poll_question', 'poll_option',
+        'set_donation_link',
     ):
         return await handle_admin_text(update, context)
 
