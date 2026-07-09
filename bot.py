@@ -94,6 +94,7 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🔔 اجرای job یادآوری امتحان...")
     run_id = await db.notif_run_start('exam_reminder')
     total_sent, total_failed, total_targets = 0, 0, 0
+    failed_records = []  # FIX جدید: [{'user_id':, 'message':}, ...] برای retry دقیق
     day_labels = {1: "⚠️ فردا امتحان دارید!", 3: "📅 ۳ روز دیگر", 7: "📅 ۷ روز دیگر"}
     try:
         for days, label in day_labels.items():
@@ -118,12 +119,15 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                         sent += 1
                     else:
                         total_failed += 1
+                        failed_records.append({'user_id': u['user_id'], 'message': msg})
                     await asyncio.sleep(0.05)
                 total_sent += sent
                 if sent:
                     await db.mark_exam_notified(sid, days)
                     logger.info(f"امتحان {exam.get('lesson')} — {sent} نفر مطلع شدند")
         await db.notif_run_finish(run_id, total_sent, total_failed, total_targets)
+        if failed_records:
+            await db.notif_run_add_failed_detailed(run_id, failed_records)
     except Exception as e:
         logger.error(f"exam_reminder_job error: {e}")
         await db.notif_run_finish(run_id, total_sent, total_failed, total_targets,
@@ -160,6 +164,7 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
             f"<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← سوال روزانه</i>"
         )
         users = await db.notif_users('daily_question')
+        await db.notif_run_set_message(run_id, text)
         for u in users:
             ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
             if ok:
@@ -263,6 +268,7 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
         text   = await _build_new_resources_text(new_items)
 
         users = await db.notif_users('new_resources')
+        await db.notif_run_set_message(run_id, text)
         sent, failed, failed_ids = 0, 0, []
         for u in users:
             ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
