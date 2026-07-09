@@ -240,7 +240,7 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📖 کلاس",   callback_data='schedule:add_start:class')],
             [InlineKeyboardButton("📝 امتحان", callback_data='schedule:add_start:exam')],
             [InlineKeyboardButton("🔄 جبرانی", callback_data='schedule:add_start:makeup')],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_schedule')],
         ]
         await query.edit_message_text(
             "📅 <b>افزودن برنامه</b>\n\nنوع را انتخاب کنید:",
@@ -266,7 +266,7 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• از کاما انگلیسی <code>,</code> استفاده کنید",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data='admin:main')
+                InlineKeyboardButton("❌ لغو", callback_data='admin:cat_schedule')
             ]])
         )
 
@@ -550,7 +550,7 @@ async def _show_manage_types(query):
         [InlineKeyboardButton("📖 کلاس",   callback_data='schedule:manage_list:class')],
         [InlineKeyboardButton("📝 امتحان", callback_data='schedule:manage_list:exam')],
         [InlineKeyboardButton("🔄 جبرانی", callback_data='schedule:manage_list:makeup')],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_schedule')],
     ]
     await query.edit_message_text(
         "✏️ <b>ویرایش برنامه‌ها</b>\n\nنوع برنامه‌ای که می‌خواهید ببینید/ویرایش کنید را انتخاب کنید:",
@@ -769,7 +769,7 @@ async def handle_edit_schedule_field_text(update: Update, context: ContextTypes.
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("👁 مشاهده برنامه", callback_data=f'schedule:item:{sid}'),
-            InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:main'),
+            InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:cat_schedule'),
         ]])
     )
 
@@ -783,7 +783,7 @@ async def _show_delete_list(query):
         tp   = TYPE_NAMES.get(s.get('type', ''), '').split()[0]
         label = f"🗑 {tp} | {s.get('lesson','')} | {jd}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f'schedule:del:{sid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_schedule')])
     await query.edit_message_text(
         "🗑 <b>حذف برنامه</b>\n\nانتخاب کنید:",
         parse_mode='HTML',
@@ -804,7 +804,7 @@ async def _show_flex_list(query):
             "<i>برای ثبت کلاس منعطف، هنگام افزودن برنامه، نوع زمان‌بندی را «منعطف» انتخاب کنید.</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')
+                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_schedule')
             ]])
         )
         return
@@ -814,7 +814,7 @@ async def _show_flex_list(query):
         jd  = fmt_jalali(s.get('date', ''))
         label = f"🔄 {s.get('lesson','')} | {jd} {s.get('time','')}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f'schedule:flex_change:{sid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_schedule')])
     await query.edit_message_text(
         "🔄 <b>اعلام تغییر زمان — انتخاب کلاس</b>\n\n"
         "کلاسی که زمانش تغییر کرده را انتخاب کنید:",
@@ -908,7 +908,7 @@ async def handle_flex_time_change_text(update: Update, context: ContextTypes.DEF
         f"🔔 <b>{sent} نفر</b> مطلع شدند.",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 پنل ادمین", callback_data='admin:main')
+            InlineKeyboardButton("🔙 پنل ادمین", callback_data='admin:cat_schedule')
         ]])
     )
 
@@ -952,7 +952,7 @@ async def _ask_flex_type(message, context):
     keyboard = [
         [InlineKeyboardButton("📌 ثابت (زمان قطعی و همیشگی)", callback_data='schedule:flex:fixed')],
         [InlineKeyboardButton("🔄 منعطف (ممکن است زمان تغییر کند)", callback_data='schedule:flex:flexible')],
-        [InlineKeyboardButton("❌ لغو", callback_data='admin:main')],
+        [InlineKeyboardButton("❌ لغو", callback_data='admin:cat_schedule')],
     ]
     await message.reply_text(
         "📌 <b>نوع زمان‌بندی این مورد چیست؟</b>\n\n"
@@ -1102,7 +1102,7 @@ async def _finalize_schedule_add(update_or_query, context):
         InlineKeyboardButton("👁 مشاهده برنامه", callback_data=f'schedule:item:{sid}')
         if is_edit else
         InlineKeyboardButton("📅 مشاهده برنامه", callback_data=f'schedule:type:{p["stype"]}:'),
-        InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:main'),
+        InlineKeyboardButton("🔙 پنل ادمین",      callback_data='admin:cat_schedule'),
     ]])
     if hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(text, parse_mode='HTML', reply_markup=keyboard)
