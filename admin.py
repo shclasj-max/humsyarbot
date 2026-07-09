@@ -16,7 +16,10 @@ from telegram import (
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.error import RetryAfter, Forbidden, BadRequest, TimedOut, NetworkError
 from database import db
-from utils import main_keyboard, content_admin_keyboard, admin_keyboard, safe_send, send_audit_log
+from utils import (
+    main_keyboard, content_admin_keyboard, safe_send,
+    send_audit_log, get_keyboard_for_user,
+)
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -336,7 +339,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action in (
                     'users', 'users_filter', 'uf_group', 'uf_intake', 'uf_clear',
                     'user_detail', 'search_user', 'approve', 'reject', 'edit_group',
-                    'set_group', 'edit_intake', 'set_intake', 'pending', 'broadcast',
+                    'set_group', 'edit_intake', 'set_intake_user', 'pending', 'broadcast',
                 ) or action.startswith('bc_')
             ):
                 await query.answer(
@@ -752,7 +755,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_unban = was_already_registered and prev_user.get('approved') is False
         await db.update_user(target_uid, {'approved': True})
         user = await db.get_user(target_uid)
-        await safe_send(context.bot, target_uid, "✅ <b>دسترسی شما تأیید شد!</b>", parse_mode='HTML', reply_markup=get_keyboard_for_uid(user, target_uid))
+        target_kb = await get_keyboard_for_user(user, target_uid)
+        await safe_send(context.bot, target_uid, "✅ <b>دسترسی شما تأیید شد!</b>", parse_mode='HTML', reply_markup=target_kb)
         await query.answer("✅ تأیید شد!", show_alert=True)
         if is_unban:
             admin_user = await db.get_user(uid)
@@ -1063,6 +1067,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('bc_delay_min', None)
         await _broadcast_show_preview(query, context)
 
+    elif action == 'bc_test':
+        # ویژگی جدید: ارسال آزمایشی فقط به خود ادمین قبل از ارسال واقعی
+        await _broadcast_send_test(query, context)
+
 
 # ══════════════════════════════════════════════════
 # 📢 توابع Broadcast
@@ -1166,6 +1174,7 @@ async def _broadcast_show_preview(query_or_msg, context, scheduled: bool = False
             InlineKeyboardButton("✅ بله، ارسال کن", callback_data=confirm_cb),
             InlineKeyboardButton("✏️ ویرایش پیام",   callback_data='admin:bc_edit'),
         ],
+        [InlineKeyboardButton("🧪 ارسال آزمایشی به خودم", callback_data='admin:bc_test')],
         [InlineKeyboardButton("⏰ ارسال زماندار",    callback_data='admin:bc_schedule')],
         [InlineKeyboardButton("❌ لغو",               callback_data='admin:bc_cancel')],
     ]
@@ -1202,6 +1211,27 @@ async def _broadcast_schedule_menu(query, context):
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def _broadcast_send_test(query, context):
+    """
+    ویژگی جدید: ارسال آزمایشی پیام همگانی — دقیقاً همان محتوای آماده‌شده
+    (متن/عکس/ویدیو/فایل/ویس/صدا با همان کپشن و parse_mode) فقط برای
+    خود ادمین ارسال می‌شود. state پیش‌نمایش دست‌نخورده می‌ماند تا ادمین
+    بعد از دیدن نتیجه واقعی هنوز بتواند «ویرایش پیام»، «ارسال قطعی» یا
+    «لغو» را انتخاب کند — نه اینکه ارسال آزمایشی خودش را جای ارسال
+    واقعی جا بزند.
+    """
+    msg_data = context.user_data.get('bc_msg_data', {})
+    if not msg_data:
+        await query.answer("❌ پیامی برای ارسال آزمایشی وجود ندارد!", show_alert=True)
+        return
+    tester_uid = query.from_user.id
+    sent, _, _ = await _do_broadcast_send(context.bot, [{'user_id': tester_uid}], msg_data)
+    if sent:
+        await query.answer("✅ پیام آزمایشی برای شما ارسال شد — پایین چت خودتان را چک کنید.", show_alert=True)
+    else:
+        await query.answer("❌ ارسال آزمایشی ناموفق بود.", show_alert=True)
+
+
 async def _broadcast_do_send(query, context, scheduled: bool = False):
     msg_data  = context.user_data.get('bc_msg_data', {})
     target    = context.user_data.get('bc_target', 'all')
@@ -1224,11 +1254,12 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         t_str = f"{h} ساعت {m} دقیقه" if h else f"{m} دقیقه"
         send_time = (datetime.now() + timedelta(minutes=delay_min)).strftime('%H:%M')
 
+        scheduler_id = query.from_user.id
         job_id = f'broadcast_{int(datetime.now().timestamp())}'
         context.job_queue.run_once(
             _scheduled_broadcast_job,
             when=timedelta(minutes=delay_min),
-            data={'msg_data': msg_data, 'target': target, 'admin_id': ADMIN_ID},
+            data={'msg_data': msg_data, 'target': target, 'admin_id': scheduler_id},
             name=job_id,
         )
         # FIX (حرفه‌ای‌سازی): ذخیره در دیتابیس تا اگر ربات قبل از زمان
@@ -1379,7 +1410,7 @@ async def _do_broadcast_send(bot, users_list: list, msg_data: dict, progress_cb=
                 elif msg_type == 'document':
                     await bot.send_document(uid, file_id, caption=caption, parse_mode='HTML')
                 elif msg_type == 'voice':
-                    await bot.send_voice(uid, file_id, caption=caption)
+                    await bot.send_voice(uid, file_id, caption=caption, parse_mode='HTML')
                 elif msg_type == 'audio':
                     await bot.send_audio(uid, file_id, caption=caption, parse_mode='HTML')
                 ok = True
@@ -1555,7 +1586,9 @@ async def _show_bot_status(query, context):
         vm_total_mb = vm.total / 1024 / 1024
 
         # CPU (۰.۳ ثانیه نمونه‌گیری — سریع و کافی برای یک عدد لحظه‌ای)
-        cpu_pct = psutil.cpu_percent(interval=0.3)
+        # FIX: این یک فراخوانی blocking است؛ در ترد جداگانه اجرا می‌شود
+        # تا event loop اصلی ربات در این ۰.۳ ثانیه قفل نشود.
+        cpu_pct = await asyncio.to_thread(psutil.cpu_percent, 0.3)
 
         # uptime واقعی پروسه ربات (نه زمان سرور)
         uptime_sec = time.time() - proc.create_time()
@@ -1927,24 +1960,33 @@ async def _show_notif_history(query, job_name: str = None):
 
 async def _retry_failed_notif(query, context, run_id: str):
     """
-    FIX جدید: ارسال مجدد برای کاربرانی که در یک اجرای قبلی fail شدند.
+    FIX جدید: ارسال مجدد برای کاربرانی که در یک اجرای قبلی fail شدند
+    — این‌بار با محتوای واقعی همان پیام (نه یک متن کلی جایگزین)،
+    چون اکنون notif_runs متن دقیق هر پیام را هم ذخیره می‌کند.
     """
-    failed_ids = await db.get_failed_notif_targets(run_id)
-    if not failed_ids:
-        await query.answer("✅ موردی برای تلاش مجدد نیست.", show_alert=True)
-        return
-    sent, failed = 0, 0
-    for uid_target in failed_ids:
-        try:
-            await context.bot.send_message(
-                uid_target,
+    details = await db.get_failed_notif_details(run_id)
+    if not details:
+        # سازگاری با اجراهای قدیمی‌تر که هنوز متن پیام ذخیره نشده بود
+        failed_ids = await db.get_failed_notif_targets(run_id)
+        if not failed_ids:
+            await query.answer("✅ موردی برای تلاش مجدد نیست.", show_alert=True)
+            return
+        details = [{
+            'user_id': uid_target,
+            'message': (
                 "🔔 <b>یادآوری</b>\n\nاین پیام به دلیل خطای موقت دوباره ارسال شد. "
-                "برای جزئیات به بخش‌های مربوطه ربات مراجعه کنید.",
-                parse_mode='HTML'
-            )
+                "برای جزئیات به بخش‌های مربوطه ربات مراجعه کنید."
+            ),
+        } for uid_target in failed_ids]
+
+    sent, failed = 0, 0
+    for rec in details:
+        ok = await safe_send(context.bot, rec['user_id'], rec['message'], parse_mode='HTML')
+        if ok:
             sent += 1
-        except Exception:
+        else:
             failed += 1
+        await asyncio.sleep(0.05)
     await query.answer(f"✅ {sent} ارسال موفق، {failed} هنوز ناموفق", show_alert=True)
 
 
@@ -2781,12 +2823,3 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"✅ فایل دریافت شد!\n📚 {lesson} — {topic}\n\n📝 توضیح کوتاه وارد کنید (یا <code>-</code> بزنید):",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:qbank_manage')]]))
-
-
-def get_keyboard_for_uid(user, uid: int):
-    if uid == ADMIN_ID:
-        return admin_keyboard()
-    role = user.get('role', 'student') if user else 'student'
-    if role == 'content_admin':
-        return content_admin_keyboard()
-    return main_keyboard()
