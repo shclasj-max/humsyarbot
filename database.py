@@ -1562,6 +1562,73 @@ class DB:
         except Exception:
             pass
 
+    async def notif_run_add_failed_detailed(self, run_id: str, records: list):
+        """
+        FIX جدید: برای job هایی که در یک اجرا چند پیام متفاوت
+        می‌فرستند (مثل یادآوری چند امتحان مختلف در یک اجرا)، هر کاربر
+        ناموفق به‌همراه متن دقیق همان پیامی که برایش در نظر گرفته شده
+        بود ذخیره می‌شود — نه فقط آیدی خام — تا «تلاش مجدد» بتواند
+        محتوای درست را برایش بفرستد (نه یک پیام کلی جایگزین).
+        records: [{'user_id': int, 'message': str}, ...]
+        """
+        try:
+            await self.notif_runs.update_one(
+                {'_id': ObjectId(run_id)},
+                {'$set': {
+                    'failed_user_ids': [r['user_id'] for r in records],
+                    'failed_targets_detailed': records,
+                }}
+            )
+        except Exception:
+            pass
+
+    async def get_failed_notif_details(self, run_id: str) -> list:
+        """
+        برمی‌گرداند [{'user_id':, 'message':}] برای retry دقیق.
+        اگر جزئیات هر کاربر جداگانه ذخیره نشده باشد (job‌های تک‌پیامی
+        مثل سوال روزانه/منابع جدید)، از متن عمومی ذخیره‌شده‌ی همان
+        اجرا (notif_run_set_message) برای همه‌ی آیدی‌های ناموفق
+        استفاده می‌شود.
+        """
+        try:
+            doc = await self.notif_runs.find_one({'_id': ObjectId(run_id)})
+        except Exception:
+            return []
+        if not doc:
+            return []
+        detailed = doc.get('failed_targets_detailed')
+        if detailed:
+            return detailed
+        ids = doc.get('failed_user_ids', [])
+        msg = doc.get('message_text')
+        if ids and msg:
+            return [{'user_id': uid, 'message': msg} for uid in ids]
+        return []
+
+
+        """
+        FIX جدید: ذخیره‌ی متن واقعی پیامی که در این اجرا ارسال شده —
+        تا دکمه‌ی «تلاش مجدد» در پنل ادمین بتواند همان محتوای واقعی
+        (نه یک پیام کلی جایگزین) را دوباره برای کاربران fail‌شده بفرستد.
+        """
+        try:
+            await self.notif_runs.update_one(
+                {'_id': ObjectId(run_id)},
+                {'$set': {'message_text': text, 'message_parse_mode': parse_mode}}
+            )
+        except Exception:
+            pass
+
+    async def get_notif_run_message(self, run_id: str) -> dict:
+        """برمی‌گرداند {'text':..., 'parse_mode':...} یا None اگر ذخیره نشده باشد"""
+        try:
+            doc = await self.notif_runs.find_one({'_id': ObjectId(run_id)})
+        except Exception:
+            return None
+        if not doc or not doc.get('message_text'):
+            return None
+        return {'text': doc['message_text'], 'parse_mode': doc.get('message_parse_mode', 'HTML')}
+
 
     # ══════════════════════════════════════════════════
     #  FIX جدید: سیستم گزارش ایراد سوال/جزوه (content_reports)
