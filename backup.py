@@ -156,7 +156,7 @@ async def _show_menu(query):
          InlineKeyboardButton("🧪 بانک سوال",       callback_data='backup:export_qbank')],
         [InlineKeyboardButton("📥 بازیابی از فایل", callback_data='backup:restore_prompt')],
         [InlineKeyboardButton(auto_label, callback_data='backup:auto_settings')],
-        [InlineKeyboardButton("🔙 بازگشت به پنل",   callback_data='admin:main')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل",   callback_data='admin:cat_settings')],
     ]
     await query.edit_message_text(
         f"💾 <b>پشتیبان‌گیری و بازیابی</b>\n"
