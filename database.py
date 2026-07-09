@@ -1174,6 +1174,227 @@ class DB:
         )
         return result
 
+    # ══════════════════════════════════════════════════
+    #  FIX جدید: داشبورد آماری پیشرفته پنل ادمین — پوشش کامل‌تر
+    #  کل ربات (کاربران/محتوا/سوالات/تیکت‌ها/اعلان‌ها) با جزئیات
+    #  بیشتر از global_stats ساده‌ی قبلی.
+    # ══════════════════════════════════════════════════
+
+    async def stats_dashboard_users(self) -> dict:
+        """آمار جزئی کاربران: رشد، فعالیت، گروه/ورودی، نقش‌های فرعی"""
+        now          = datetime.now()
+        today_start  = now.strftime('%Y-%m-%dT00:00:00')
+        week_ago     = (now - timedelta(days=7)).isoformat()
+        month_ago    = (now - timedelta(days=30)).isoformat()
+
+        (total_approved, total_pending, new_today, new_week, new_month,
+         g1, g2, active_today, active_week, blocked_bot, content_admins,
+         all_approved_users, all_intakes, all_roles) = await asyncio.gather(
+            self.users.count_documents({'approved': True}),
+            self.users.count_documents({'approved': False}),
+            self.users.count_documents({'registered_at': {'$gte': today_start}}),
+            self.users.count_documents({'registered_at': {'$gte': week_ago}}),
+            self.users.count_documents({'registered_at': {'$gte': month_ago}}),
+            self.users.count_documents({'approved': True, 'group': '1'}),
+            self.users.count_documents({'approved': True, 'group': '2'}),
+            self.users.count_documents({'last_active': {'$gte': today_start}}),
+            self.users.count_documents({'last_active': {'$gte': week_ago}}),
+            self.users.count_documents({'blocked_bot': True}),
+            self.users.count_documents({'role': 'content_admin'}),
+            self.users.find({'approved': True}).to_list(length=None),
+            self.get_all_intakes(),
+            self.get_all_admin_roles(),
+        )
+
+        inactive_14 = (now - timedelta(days=14)).isoformat()
+        inactive_30 = (now - timedelta(days=30)).isoformat()
+        inactive_14d = sum(
+            1 for u in all_approved_users
+            if not u.get('last_active') or u['last_active'] < inactive_14
+        )
+        inactive_30d = sum(
+            1 for u in all_approved_users
+            if not u.get('last_active') or u['last_active'] < inactive_30
+        )
+
+        # روند رشد ثبت‌نام ۷ روز اخیر
+        growth_7d = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            d0  = day.strftime('%Y-%m-%dT00:00:00')
+            d1  = day.strftime('%Y-%m-%dT23:59:59')
+            cnt = sum(1 for u in all_approved_users if d0 <= (u.get('registered_at') or '') <= d1)
+            growth_7d.append((day.strftime('%m/%d'), cnt))
+
+        # تفکیک بر اساس ورودی
+        intake_label = {i['code']: i['label'] for i in all_intakes}
+        intake_counts: dict = {}
+        for u in all_approved_users:
+            key = u.get('intake') or ''
+            intake_counts[key] = intake_counts.get(key, 0) + 1
+        by_intake = sorted(
+            [(intake_label.get(code, code) if code else 'بدون ورودی', cnt)
+             for code, cnt in intake_counts.items()],
+            key=lambda x: -x[1]
+        )
+
+        role_counts: dict = {}
+        for r in all_roles:
+            role_counts[r.get('role', '')] = role_counts.get(r.get('role', ''), 0) + 1
+
+        return {
+            'total_approved': total_approved, 'total_pending': total_pending,
+            'new_today': new_today, 'new_week': new_week, 'new_month': new_month,
+            'group1': g1, 'group2': g2,
+            'group_unset': max(total_approved - g1 - g2, 0),
+            'active_today': active_today, 'active_week': active_week,
+            'inactive_14d': inactive_14d, 'inactive_30d': inactive_30d,
+            'blocked_bot': blocked_bot, 'content_admins': content_admins,
+            'growth_7d': growth_7d, 'by_intake': by_intake,
+            'sub_admin_roles': role_counts,
+        }
+
+    async def stats_dashboard_content(self) -> dict:
+        """آمار جزئی محتوا: علوم پایه به‌تفکیک نوع، رفرنس به‌تفکیک زبان، دانلودها"""
+        (bs_lessons, bs_sessions, bs_by_type, ref_subjects, ref_books,
+         ref_by_lang, faq_count, qbank_files, top_qbank_lessons,
+         bs_dl_agg, ref_dl_agg, qbank_dl_agg) = await asyncio.gather(
+            self.bs_lessons.count_documents({}),
+            self.bs_sessions.count_documents({}),
+            self.bs_content.aggregate(
+                [{'$group': {'_id': '$type', 'count': {'$sum': 1}}}]
+            ).to_list(20),
+            self.ref_subjects.count_documents({}),
+            self.ref_books.count_documents({}),
+            self.ref_files.aggregate(
+                [{'$group': {'_id': '$lang', 'count': {'$sum': 1}}}]
+            ).to_list(10),
+            self.faq.count_documents({}),
+            self.qbank_files.count_documents({}),
+            self.qbank_files.aggregate([
+                {'$group': {'_id': '$lesson', 'count': {'$sum': 1}}},
+                {'$sort': {'count': -1}}, {'$limit': 5},
+            ]).to_list(5),
+            self.bs_content.aggregate(
+                [{'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
+            ).to_list(1),
+            self.ref_files.aggregate(
+                [{'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
+            ).to_list(1),
+            self.qbank_files.aggregate(
+                [{'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
+            ).to_list(1),
+        )
+        type_labels = {
+            'video': '🎥 ویدیو', 'ppt': '📊 پاورپوینت', 'pdf': '📄 PDF',
+            'note': '📝 نکات', 'test': '🧪 تست', 'voice': '🎙 ویس',
+        }
+        bs_types = {type_labels.get(d['_id'], d['_id'] or 'نامشخص'): d['count'] for d in bs_by_type}
+        lang_labels = {'fa': '🇮🇷 فارسی', 'en': '🌍 انگلیسی'}
+        ref_langs = {lang_labels.get(d['_id'], d['_id'] or 'نامشخص'): d['count'] for d in ref_by_lang}
+
+        return {
+            'bs_lessons': bs_lessons, 'bs_sessions': bs_sessions,
+            'bs_types': bs_types, 'bs_total_content': sum(bs_types.values()),
+            'ref_subjects': ref_subjects, 'ref_books': ref_books,
+            'ref_langs': ref_langs, 'ref_total_files': sum(ref_langs.values()),
+            'faq_count': faq_count, 'qbank_files': qbank_files,
+            'top_qbank_lessons': [(d['_id'] or 'نامشخص', d['count']) for d in top_qbank_lessons],
+            'bs_downloads': (bs_dl_agg[0]['total'] if bs_dl_agg else 0),
+            'ref_downloads': (ref_dl_agg[0]['total'] if ref_dl_agg else 0),
+            'qbank_downloads': (qbank_dl_agg[0]['total'] if qbank_dl_agg else 0),
+        }
+
+    async def stats_dashboard_questions(self) -> dict:
+        """آمار جزئی بانک سوال: دقت پاسخ‌دهی، پرسوال‌ترین درس‌ها، سخت‌ترین سوالات"""
+        (q_approved, q_pending, by_diff, by_lesson, totals, hardest) = await asyncio.gather(
+            self.questions.count_documents({'approved': True}),
+            self.questions.count_documents({'approved': False}),
+            self.questions.aggregate([
+                {'$match': {'approved': True}},
+                {'$group': {'_id': '$difficulty', 'count': {'$sum': 1}}},
+            ]).to_list(10),
+            self.questions.aggregate([
+                {'$match': {'approved': True}},
+                {'$group': {'_id': '$lesson', 'count': {'$sum': 1}}},
+                {'$sort': {'count': -1}}, {'$limit': 5},
+            ]).to_list(5),
+            self.questions.aggregate([
+                {'$match': {'approved': True}},
+                {'$group': {'_id': None,
+                            'attempts': {'$sum': '$attempt_count'},
+                            'correct':  {'$sum': '$correct_count'}}},
+            ]).to_list(1),
+            self.questions.aggregate([
+                {'$match': {'approved': True, 'attempt_count': {'$gte': 5}}},
+                {'$project': {
+                    'lesson': 1, 'topic': 1, 'question': 1,
+                    'attempt_count': 1, 'correct_count': 1,
+                    'wrong_rate': {'$divide': [
+                        {'$subtract': ['$attempt_count', '$correct_count']},
+                        '$attempt_count',
+                    ]},
+                }},
+                {'$sort': {'wrong_rate': -1}}, {'$limit': 5},
+            ]).to_list(5),
+        )
+        diff_labels = {'easy': '🟢 آسان', 'medium': '🟡 متوسط', 'hard': '🔴 سخت'}
+        by_difficulty = {diff_labels.get(d['_id'], d['_id'] or 'نامشخص'): d['count'] for d in by_diff}
+        total_attempts = totals[0]['attempts'] if totals else 0
+        total_correct  = totals[0]['correct']  if totals else 0
+        accuracy = round(total_correct / total_attempts * 100, 1) if total_attempts else 0
+        hardest_list = [{
+            'lesson': h.get('lesson', ''), 'topic': h.get('topic', ''),
+            'question': (h.get('question', '') or '')[:50],
+            'wrong_rate': round(h.get('wrong_rate', 0) * 100, 1),
+            'attempts': h.get('attempt_count', 0),
+        } for h in hardest]
+
+        return {
+            'approved': q_approved, 'pending': q_pending,
+            'by_difficulty': by_difficulty,
+            'top_lessons': [(d['_id'] or 'نامشخص', d['count']) for d in by_lesson],
+            'total_attempts': total_attempts, 'total_correct': total_correct,
+            'accuracy': accuracy, 'hardest_questions': hardest_list,
+        }
+
+    async def stats_dashboard_tickets(self) -> dict:
+        """آمار جزئی پشتیبانی"""
+        week_ago  = (datetime.now() - timedelta(days=7)).isoformat()
+        month_ago = (datetime.now() - timedelta(days=30)).isoformat()
+        (open_t, closed_t, new_week, new_month, closed_week) = await asyncio.gather(
+            self.tickets.count_documents({'status': 'open'}),
+            self.tickets.count_documents({'status': 'closed'}),
+            self.tickets.count_documents({'created_at': {'$gte': week_ago}}),
+            self.tickets.count_documents({'created_at': {'$gte': month_ago}}),
+            self.tickets.count_documents({'status': 'closed', 'closed_at': {'$gte': week_ago}}),
+        )
+        return {
+            'open': open_t, 'closed': closed_t, 'total': open_t + closed_t,
+            'new_week': new_week, 'new_month': new_month, 'closed_week': closed_week,
+        }
+
+    async def stats_dashboard_notif(self) -> dict:
+        """خلاصه سلامت اعلان‌های خودکار — بر اساس ۱۰ اجرای اخیر هر job"""
+        jobs = ['exam_reminder', 'daily_question', 'new_resources']
+        result = {}
+        for j in jobs:
+            runs = await self.notif_runs.find({'job_name': j}).sort('started_at', -1).to_list(10)
+            if not runs:
+                result[j] = None
+                continue
+            last = runs[0]
+            result[j] = {
+                'runs_checked':  len(runs),
+                'total_sent':    sum(r.get('sent', 0) for r in runs),
+                'total_failed':  sum(r.get('failed', 0) for r in runs),
+                'last_status':   last.get('status', ''),
+                'last_at':       (last.get('started_at') or '')[:16].replace('T', ' '),
+                'last_sent':     last.get('sent', 0),
+                'last_failed':   last.get('failed', 0),
+            }
+        return result
+
     async def new_resources_count(self, days: int = 7) -> int:
         since = (datetime.now() - timedelta(days=days)).isoformat()
         bs, refs = await asyncio.gather(
