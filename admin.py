@@ -131,54 +131,25 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
         return
 
     # فقط ادمین ارشد به این نقطه می‌رسد — منوی کامل
+    # FIX جدید: منوی شلوغ قبلی (بیش از ۲۰ دکمه تخت) به ۵ دسته‌ی
+    # موضوعی دسته‌بندی شد تا پیمایش پنل ادمین ساده‌تر و تمیزتر شود.
+    # همه‌ی callback_dataهای قدیمی دست‌نخورده باقی مانده‌اند — فقط
+    # لایه‌ی ناوبری جدید روی همان اکشن‌های قبلی اضافه شده.
     keyboard = [
         [InlineKeyboardButton(
             f"📊 آمار سیستم  ({s['users']} کاربر | {s.get('open_tickets', 0)} تیکت باز)",
             callback_data='admin:stats'
         )],
         [
-            InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0'),
-            InlineKeyboardButton("⏳ تأیید کاربران",   callback_data='admin:pending'),
-        ],
-        [InlineKeyboardButton("📅 مدیریت ورودی‌ها",   callback_data='admin:intakes')],
-        [InlineKeyboardButton("🔍 جستجوی کاربر",       callback_data='admin:search_user')],
-        [InlineKeyboardButton("🎓 ادمین‌های محتوا",    callback_data='admin:content_admins')],
-        [
-            InlineKeyboardButton("📘 علوم پایه",       callback_data='ca:terms_admin'),
-            InlineKeyboardButton("📚 رفرنس‌ها",         callback_data='ca:refs_admin'),
-        ],
-        [InlineKeyboardButton("❓ مدیریت FAQ",          callback_data='ca:faq')],
-        [
-            InlineKeyboardButton("🧪 بانک سوال",       callback_data='admin:qbank_manage'),
-            InlineKeyboardButton("✅ تأیید سوالات",    callback_data='admin:pending_q'),
+            InlineKeyboardButton("👥 کاربران و دسترسی‌ها", callback_data='admin:cat_users'),
+            InlineKeyboardButton("📚 محتوای آموزشی",        callback_data='admin:cat_content'),
         ],
         [
-            InlineKeyboardButton("📅 برنامه جدید",     callback_data='schedule:add_type'),
-            InlineKeyboardButton("🗑 حذف برنامه",      callback_data='schedule:del_list'),
+            InlineKeyboardButton("📅 برنامه کلاسی",         callback_data='admin:cat_schedule'),
+            InlineKeyboardButton("📢 ارتباط با کاربران",     callback_data='admin:cat_comm'),
         ],
-        [InlineKeyboardButton("✏️ ویرایش برنامه‌ها",    callback_data='schedule:manage_types')],
-        [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
-        [InlineKeyboardButton("🎫 مدیریت تیکت‌ها",     callback_data='ticket:admin_list')],
-        [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه",  callback_data='report:manage:all')],
-        [InlineKeyboardButton("📢 ارسال همگانی",        callback_data='admin:broadcast')],
-        [InlineKeyboardButton("📊 نظرسنجی کانال",       callback_data='admin:poll_main')],
-        [InlineKeyboardButton("💾 پشتیبان‌گیری",        callback_data='backup:menu')],
-        [InlineKeyboardButton("📡 وضعیت ربات",            callback_data='admin:bot_status')],
+        [InlineKeyboardButton("⚙️ تنظیمات و سیستم", callback_data='admin:cat_settings')],
     ]
-    # FIX جدید: دکمه‌های ویژه ادمین ارشد — نقش‌های فرعی این‌ها را نمی‌بینند
-    if uid is None or uid == ADMIN_ID:
-        keyboard.append([
-            InlineKeyboardButton("🛡 سطوح دسترسی ادمین", callback_data='admin:roles'),
-            InlineKeyboardButton("⚙️ تنظیمات ربات",      callback_data='admin:settings'),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("📢 مدیریت اعلان‌ها",   callback_data='admin:notif_manage'),
-            InlineKeyboardButton("💙 حمایت مالی",        callback_data='admin:donation_manage'),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("📋 لاگ فعالیت",        callback_data='admin:audit_log'),
-            InlineKeyboardButton("📥 خروجی اکسل",        callback_data='admin:export_excel'),
-        ])
     text   = "👨‍⚕️ <b>پنل مدیریت</b>\n━━━━━━━━━━━━━━━━"
     markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -189,6 +160,97 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
     except Exception as e:
         logger.debug(f"_admin_menu: {e}")
+
+
+async def _show_cat_users(query, uid: int = None):
+    """👥 دسته: کاربران و دسترسی‌ها"""
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0'),
+            InlineKeyboardButton("⏳ تأیید کاربران",   callback_data='admin:pending'),
+        ],
+        [InlineKeyboardButton("🔍 جستجوی کاربر",       callback_data='admin:search_user')],
+        [InlineKeyboardButton("📅 مدیریت ورودی‌ها",    callback_data='admin:intakes')],
+        [InlineKeyboardButton("🎓 ادمین‌های محتوا",     callback_data='admin:content_admins')],
+    ]
+    if uid is None or uid == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("🛡 سطوح دسترسی ادمین", callback_data='admin:roles')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    await query.edit_message_text(
+        "👥 <b>کاربران و دسترسی‌ها</b>\n━━━━━━━━━━━━━━━━",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_cat_content(query):
+    """📚 دسته: محتوای آموزشی"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📘 علوم پایه",   callback_data='ca:terms_admin'),
+            InlineKeyboardButton("📚 رفرنس‌ها",     callback_data='ca:refs_admin'),
+        ],
+        [InlineKeyboardButton("❓ مدیریت FAQ",      callback_data='ca:faq_admin')],
+        [
+            InlineKeyboardButton("🧪 بانک سوال",    callback_data='admin:qbank_manage'),
+            InlineKeyboardButton("✅ تأیید سوالات", callback_data='admin:pending_q'),
+        ],
+        [InlineKeyboardButton("⚠️ گزارشات سوال/جزوه", callback_data='report:manage:all')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(
+        "📚 <b>محتوای آموزشی</b>\n━━━━━━━━━━━━━━━━",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_cat_schedule(query):
+    """📅 دسته: برنامه کلاسی"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📅 برنامه جدید", callback_data='schedule:add_type'),
+            InlineKeyboardButton("🗑 حذف برنامه",  callback_data='schedule:del_list'),
+        ],
+        [InlineKeyboardButton("✏️ ویرایش برنامه‌ها", callback_data='schedule:manage_types')],
+        [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+    ]
+    await query.edit_message_text(
+        "📅 <b>برنامه کلاسی</b>\n━━━━━━━━━━━━━━━━",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_cat_comm(query, uid: int = None):
+    """📢 دسته: ارتباط با کاربران"""
+    keyboard = [
+        [InlineKeyboardButton("📢 ارسال همگانی",  callback_data='admin:broadcast')],
+        [InlineKeyboardButton("📊 نظرسنجی کانال", callback_data='admin:poll_main')],
+        [InlineKeyboardButton("🎫 مدیریت تیکت‌ها", callback_data='ticket:admin_list')],
+    ]
+    if uid is None or uid == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("📢 مدیریت اعلان‌ها", callback_data='admin:notif_manage')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    await query.edit_message_text(
+        "📢 <b>ارتباط با کاربران</b>\n━━━━━━━━━━━━━━━━",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_cat_settings(query, uid: int = None):
+    """⚙️ دسته: تنظیمات و سیستم"""
+    keyboard = [
+        [InlineKeyboardButton("📡 وضعیت ربات",   callback_data='admin:bot_status')],
+        [InlineKeyboardButton("💾 پشتیبان‌گیری", callback_data='backup:menu')],
+    ]
+    if uid is None or uid == ADMIN_ID:
+        keyboard.append([
+            InlineKeyboardButton("⚙️ تنظیمات ربات", callback_data='admin:settings'),
+            InlineKeyboardButton("💙 حمایت مالی",   callback_data='admin:donation_manage'),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📋 لاگ فعالیت", callback_data='admin:audit_log'),
+            InlineKeyboardButton("📥 خروجی اکسل", callback_data='admin:export_excel'),
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    await query.edit_message_text(
+        "⚙️ <b>تنظیمات و سیستم</b>\n━━━━━━━━━━━━━━━━",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def show_admin_main(message, uid: int = None):
@@ -214,6 +276,7 @@ ROOT_ONLY_ACTIONS = {
     'poll_type', 'poll_confirm', 'poll_cancel',
     'donation_manage', 'donation_toggle', 'set_donation_link',
     'remove_donation_link',  # حمایت مالی
+    'cat_users', 'cat_content', 'cat_schedule', 'cat_comm', 'cat_settings',  # منوهای دسته‌بندی‌شده
 }
 
 
@@ -288,6 +351,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _admin_menu(query, uid=uid)
     elif action == 'stats':
         await _show_stats(query)
+
+    # ══════════════════════════════════════════════
+    # 🗂 منوهای دسته‌بندی‌شده پنل ادمین (لایه ناوبری جدید)
+    # ══════════════════════════════════════════════
+    elif action == 'cat_users':
+        await _show_cat_users(query, uid=uid)
+    elif action == 'cat_content':
+        await _show_cat_content(query)
+    elif action == 'cat_schedule':
+        await _show_cat_schedule(query)
+    elif action == 'cat_comm':
+        await _show_cat_comm(query, uid=uid)
+    elif action == 'cat_settings':
+        await _show_cat_settings(query, uid=uid)
 
     elif action == 'bot_status':
         await _show_bot_status(query, context)
@@ -732,7 +809,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('awaiting_search', None)
         await query.edit_message_text(
             "🔍 <b>جستجوی کاربر</b>\n\nنام، شماره دانشجویی یا یوزرنیم را وارد کنید:", parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:main')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:cat_users')]]))
     elif action == 'intakes':
         await _show_intakes(query)
     elif action == 'intake_add':
@@ -769,7 +846,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🗑 لغو", callback_data=f'admin:ca_remove:{a["user_id"]}'),
             ])
         keyboard.append([InlineKeyboardButton("➕ دادن دسترسی", callback_data='admin:ca_grant')])
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')])
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_users')])
         await query.edit_message_text(f"🎓 <b>ادمین‌های محتوا</b> — {len(admins)} نفر", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     elif action == 'ca_grant':
         users = await db.all_users(approved_only=True)
@@ -782,19 +859,19 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.update_user(target_uid, {'role': 'content_admin'})
         await safe_send(context.bot, target_uid, "🎓 <b>دسترسی ادمین محتوا به شما داده شد!</b>", parse_mode='HTML', reply_markup=content_admin_keyboard())
         await query.answer("✅ دسترسی داده شد!", show_alert=True)
-        await _admin_menu(query, uid=uid)
+        await _show_cat_users(query, uid=uid)
     elif action == 'ca_remove':
         target_uid = int(parts[2])
         await db.update_user(target_uid, {'role': 'student'})
         await safe_send(context.bot, target_uid, "⚠️ دسترسی ادمین محتوای شما لغو شد.", reply_markup=main_keyboard())
         await query.answer("↩️ دسترسی لغو شد!", show_alert=True)
-        await _admin_menu(query, uid=uid)
+        await _show_cat_users(query, uid=uid)
     elif action == 'qbank_manage':
         await query.edit_message_text("🧪 <b>مدیریت بانک سوال</b>", parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📁 مشاهده فایل‌ها", callback_data='admin:qbank_list')],
                 [InlineKeyboardButton("📤 آپلود فایل جدید", callback_data='admin:qbank_upload')],
-                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_content')],
             ]))
     elif action == 'qbank_upload':
         lessons = await db.get_lessons()
@@ -1016,7 +1093,7 @@ async def _broadcast_main(query, context):
             callback_data=f'admin:bc_intake:{code}'
         )])
 
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')])
     await query.edit_message_text(
         "📢 <b>ارسال همگانی</b>\n\n"
         "━━━━━━━━━━━━━━━━\n"
@@ -1172,7 +1249,7 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
             f"⏰ ارسال خواهد شد در: <b>{t_str} دیگر</b>\n"
             f"🕐 حدوداً ساعت: <b>{send_time}</b>",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')]]))
         return
 
     context.user_data['bc_sending'] = True
@@ -1192,7 +1269,7 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         await status_msg.edit_text(
             "⚠️ <b>هیچ مخاطبی برای این هدف پیدا نشد.</b>\n\nپیامی ارسال نشد.",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')]]))
         return
 
     async def _progress(done, total_n, sent_n, failed_n, blocked_n):
@@ -1239,7 +1316,7 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         f"❌ سایر خطاها: <b>{other_failed} نفر</b>\n"
         f"📊 مجموع مخاطبان: <b>{total} نفر</b>",
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')]]))
 
 
 async def _scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1553,7 +1630,7 @@ async def _show_bot_status(query, context):
         text, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin:bot_status")],
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="admin:main")],
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="admin:cat_settings")],
         ])
     )
 
@@ -1617,7 +1694,7 @@ async def _show_users_list(query, context, page: int = 0, group: str = None, int
     keyboard.append([InlineKeyboardButton("🔽 فیلتر", callback_data='admin:users_filter'), InlineKeyboardButton("🔍 جستجو", callback_data='admin:search_user')])
     if group or intake:
         keyboard.append([InlineKeyboardButton("❌ حذف فیلتر", callback_data='admin:uf_clear')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')])
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -1698,14 +1775,14 @@ async def _show_pending(query):
     pending = await db.pending_users()
     if not pending:
         await query.edit_message_text("✅ هیچ کاربر در انتظاری وجود ندارد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')]]))
         return
     keyboard = []
     for u in pending:
         uid = u['user_id']
         keyboard.append([InlineKeyboardButton(f"👤 {u.get('name','')} | {u.get('student_id','') or 'بدون شماره'} | گروه {u.get('group','')}", callback_data=f'admin:user_detail:{uid}')])
         keyboard.append([InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{uid}'), InlineKeyboardButton("❌ رد", callback_data=f'admin:reject:{uid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')])
     await query.edit_message_text(f"⏳ <b>کاربران در انتظار</b> — {len(pending)} نفر", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -1713,7 +1790,7 @@ async def _pending_questions(query):
     questions = await db.pending_questions()
     if not questions:
         await query.edit_message_text("✅ هیچ سوال در انتظاری وجود ندارد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_content')]]))
         return
     keyboard = []
     for q in questions[:8]:
@@ -1733,7 +1810,7 @@ async def _pending_questions(query):
             InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve_q:{qid}'),
             InlineKeyboardButton("🗑 رد",    callback_data=f'admin:reject_q:{qid}'),
         ])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_content')])
     await query.edit_message_text(
         f"⏳ <b>سوالات در انتظار تأیید</b> — {len(questions)} سوال\n━━━━━━━━━━━━━━━━",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1780,7 +1857,7 @@ async def _show_notif_manage(query):
         [InlineKeyboardButton("📝 تاریخچه: یادآوری امتحان", callback_data='admin:notif_history:exam_reminder')],
         [InlineKeyboardButton("🧪 تاریخچه: سوال روزانه",   callback_data='admin:notif_history:daily_question')],
         [InlineKeyboardButton("📋 همه اجراهای اخیر",        callback_data='admin:notif_history')],
-        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')],
     ]
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1935,7 +2012,7 @@ async def _show_settings(query):
         [InlineKeyboardButton("🎓 تنظیم گروه لاگ محتوا", callback_data='admin:set_log_group_content')],
         [InlineKeyboardButton("📊 تنظیم کانال نظرسنجی", callback_data='admin:set_poll_channel')],
         [InlineKeyboardButton(channel_label, callback_data='admin:channel_lock')],
-        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')],
     ]
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1967,7 +2044,7 @@ async def _show_donation_manage(query):
     ]
     if link:
         keyboard.append([InlineKeyboardButton("🗑 حذف لینک", callback_data='admin:remove_donation_link')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')])
 
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -2027,7 +2104,7 @@ async def _show_audit_log(query, category: str, min_severity: str = None, module
             InlineKeyboardButton("🟠 HIGH+" + (" ✅" if min_severity == 'HIGH' else ""), callback_data='admin:audit_log:HIGH'),
             InlineKeyboardButton("🔴 CRITICAL" + (" ✅" if min_severity == 'CRITICAL' else ""), callback_data='admin:audit_log:CRITICAL'),
         ],
-        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')],
     ]
     await query.edit_message_text(
         text[:4000], parse_mode='HTML',
@@ -2134,13 +2211,13 @@ async def _export_excel(query, context):
         )
         await query.edit_message_text(
             "✅ فایل اکسل ارسال شد!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')]])
         )
     except Exception as e:
         logger.error(f"_export_excel error: {e}")
         await query.edit_message_text(
             f"❌ خطا در ساخت فایل: {e}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')]])
         )
 
 
@@ -2157,7 +2234,7 @@ async def _show_intakes(query):
             InlineKeyboardButton("🗑", callback_data=f'admin:intake_del:{code}'),
         ])
     keyboard.append([InlineKeyboardButton("➕ افزودن ورودی جدید", callback_data='admin:intake_add')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')])
     await query.edit_message_text(
         "📅 <b>مدیریت ورودی‌های دانشجویی</b>\n\n━━━━━━━━━━━━━━━━\n✅=فعال | ❌=غیرفعال | 🔄=تغییر | 🗑=حذف",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2196,7 +2273,7 @@ async def _show_roles(query):
                 f"🗑 حذف نقش {name}", callback_data=f'admin:role_remove:{target_uid}'
             )])
     keyboard.append([InlineKeyboardButton("➕ افزودن نقش جدید", callback_data='admin:role_add_pick')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')])
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -2244,7 +2321,7 @@ async def _poll_main(query, context):
         channel_txt = f"✅ کانال تنظیم شده: <code>{channel_id}</code>"
         keyboard = [
             [InlineKeyboardButton("📊 ساخت نظرسنجی جدید", callback_data='admin:poll_create')],
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')],
         ]
     else:
         channel_txt = (
@@ -2256,7 +2333,7 @@ async def _poll_main(query, context):
         )
         keyboard = [
             [InlineKeyboardButton("⚙️ رفتن به تنظیمات ربات", callback_data='admin:settings')],
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')],
         ]
     await query.edit_message_text(
         f"📊 <b>نظرسنجی کانال</b>\n━━━━━━━━━━━━━━━━\n\n{channel_txt}",
@@ -2355,7 +2432,7 @@ async def _poll_send(query, context):
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 نظرسنجی جدید", callback_data='admin:poll_create')],
-                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')],
             ])
         )
     except Exception as e:
@@ -2627,13 +2704,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(f"❌ کاربری با «{text}» پیدا نشد.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔍 جستجوی مجدد", callback_data='admin:search_user'),
-                    InlineKeyboardButton("🔙 پنل ادمین", callback_data='admin:main'),
+                    InlineKeyboardButton("🔙 پنل ادمین", callback_data='admin:cat_users'),
                 ]]))
             return True
         keyboard = [[InlineKeyboardButton(
             f"{'✅' if u.get('approved') else '⏳'} {u.get('name','')} | {u.get('student_id','') or u.get('username','N/A')}",
             callback_data=f'admin:user_detail:{u["user_id"]}')] for u in users]
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')])
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_users')])
         await update.message.reply_text(f"🔍 <b>{len(users)} نتیجه برای «{text}»:</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
         return True
 
