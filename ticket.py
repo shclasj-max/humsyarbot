@@ -519,7 +519,7 @@ async def _admin_manage(query, context):
         )])
 
     keyboard.append([InlineKeyboardButton("🔍 جستجوی تیکت", callback_data='ticket:admin_search')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')])
 
     await query.edit_message_text(
         f"🎫 <b>مدیریت تیکت‌ها</b>\n"
