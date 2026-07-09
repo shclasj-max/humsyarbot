@@ -294,7 +294,7 @@ async def _show_reports_dashboard(query, status_filter: str = None):
             query,
             f"📋 گزارشات ({status_fa}): هیچ موردی یافت نشد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')
+                InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_content')
             ]])
         )
         return
@@ -305,7 +305,7 @@ async def _show_reports_dashboard(query, status_filter: str = None):
         icon = {'new': '🆕', 'reviewing': '🔍', 'resolved': '✅', 'rejected': '❌'}.get(r['status'], '❔')
         label = f"{icon} #{rid} — {db.REPORT_REASONS.get(r['reason'], r['reason'])}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f'report:view:{rid}')])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:main')])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_content')])
     await _safe_edit(
         query,
         f"📋 <b>گزارشات — {status_fa}</b>\n━━━━━━━━━━━━━━━━",
