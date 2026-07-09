@@ -62,7 +62,7 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         _clear(context)
 
     from_admin = action.endswith('_admin')
-    back_main  = 'admin:main' if from_admin else 'ca:main'
+    back_main  = 'admin:cat_content' if from_admin else 'ca:main'
 
     # ════ منوی اصلی ════
     if action == 'main':
@@ -472,8 +472,9 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             "و بدون نیاز به تأیید، مستقیم در بانک سوال قرار می‌گیرند.",
             parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
-    elif action == 'faq':
-        await _show_faq(query)
+    elif action in ('faq', 'faq_admin'):
+        context.user_data['ca_from_admin'] = from_admin
+        await _show_faq(query, back=back_main)
 
     elif action == 'add_faq_prompt':
         context.user_data['ca_mode'] = 'add_faq'
@@ -815,7 +816,7 @@ async def _show_ref_book_files(query, context, bid):
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def _show_faq(query):
+async def _show_faq(query, back='ca:main'):
     faqs = await db.faq_get_all()
     kb   = []
     for f in faqs[:15]:
@@ -825,7 +826,7 @@ async def _show_faq(query):
             InlineKeyboardButton("🗑", callback_data=f'ca:del_faq:{fid}'),
         ])
     kb.append([InlineKeyboardButton("➕ سوال جدید", callback_data='ca:add_faq_prompt')])
-    kb.append([InlineKeyboardButton("🔙 بازگشت",   callback_data='ca:main')])
+    kb.append([InlineKeyboardButton("🔙 بازگشت",   callback_data=back)])
     await query.edit_message_text(
         f"❓ <b>سوالات متداول</b> — {len(faqs)} سوال",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
