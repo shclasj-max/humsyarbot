@@ -355,6 +355,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'stats':
         await _show_stats(query)
 
+    elif action == 'stats_users':
+        await _show_stats_users(query)
+
+    elif action == 'stats_content':
+        await _show_stats_content(query)
+
+    elif action == 'stats_questions':
+        await _show_stats_questions(query)
+
+    elif action == 'stats_tickets':
+        await _show_stats_tickets(query)
+
+    elif action == 'stats_notif':
+        await _show_stats_notif(query)
+
     # ══════════════════════════════════════════════
     # 🗂 منوهای دسته‌بندی‌شده پنل ادمین (لایه ناوبری جدید)
     # ══════════════════════════════════════════════
@@ -1668,24 +1683,215 @@ async def _show_bot_status(query, context):
     )
 
 
+def _mini_bar(value: int, max_value: int, width: int = 10) -> str:
+    """نمودار میله‌ای متنی ساده برای نمایش روند در تلگرام (بدون نیاز به تصویر)"""
+    if max_value <= 0:
+        return "░" * width
+    filled = round((value / max_value) * width)
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
+
+
 async def _show_stats(query):
+    """
+    صفحه‌ی خلاصه‌ی آمار — یک نگاه کلی سریع به کل ربات + دکمه‌های ورود
+    به هر بخش برای جزئیات کامل. اعداد این صفحه تقریبی و برای مرور
+    سریع‌اند؛ عدد دقیق و کامل هر بخش در زیرصفحه‌ی مخصوص خودش است.
+    """
     s = await db.global_stats()
     text = (
-        "📊 <b>آمار سیستم</b>\n━━━━━━━━━━━━━━━━\n\n"
-        f"👥 کاربران تأیید: <b>{s['users']}</b>  |  ⏳ منتظر: <b>{s['pending']}</b>\n"
-        f"🆕 جدید این هفته: <b>{s.get('new_users_week',0)}</b>\n"
-        f"🎓 ادمین محتوا: <b>{s.get('content_admins',0)}</b>\n\n"
-        f"🔬 <b>علوم پایه:</b>\n"
-        f"  📖 درس: <b>{s.get('bs_lessons',0)}</b>  📌 جلسه: <b>{s.get('bs_sessions',0)}</b>  📁 فایل: <b>{s.get('bs_content',0)}</b>\n\n"
-        f"📚 <b>رفرنس‌ها:</b>\n"
-        f"  📖 درس: <b>{s.get('ref_subjects',0)}</b>  📘 کتاب: <b>{s.get('ref_books',0)}</b>\n\n"
-        f"🧪 بانک سوال: <b>{s['questions']}</b>  📁 فایل: <b>{s.get('qbank_files',0)}</b>\n"
-        f"🎫 تیکت‌های باز: <b>{s.get('open_tickets',0)}</b>"
+        "📊 <b>آمار سیستم — نمای کلی</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"👥 کاربران تأیید: <b>{s['users']}</b>  |  ⏳ منتظر تأیید: <b>{s['pending']}</b>\n"
+        f"🆕 جدید این هفته: <b>{s.get('new_users_week', 0)}</b>\n\n"
+        f"🔬 محتوای علوم پایه: <b>{s.get('bs_content', 0)}</b> فایل در <b>{s.get('bs_lessons', 0)}</b> درس\n"
+        f"📚 رفرنس‌ها: <b>{s.get('ref_books', 0)}</b> کتاب در <b>{s.get('ref_subjects', 0)}</b> درس\n"
+        f"🧪 بانک سوال: <b>{s['questions']}</b> سوال تأییدشده\n"
+        f"🎫 تیکت‌های باز: <b>{s.get('open_tickets', 0)}</b>\n\n"
+        "برای آمار کامل و جزئی هر بخش، از دکمه‌های زیر استفاده کنید 👇"
     )
     await query.edit_message_text(text, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👥 آمار کاربران", callback_data='admin:stats_users'),
+                InlineKeyboardButton("📚 آمار محتوا",   callback_data='admin:stats_content'),
+            ],
+            [
+                InlineKeyboardButton("🧪 آمار بانک سوال", callback_data='admin:stats_questions'),
+                InlineKeyboardButton("🎫 آمار تیکت‌ها",   callback_data='admin:stats_tickets'),
+            ],
+            [InlineKeyboardButton("🔔 سلامت اعلان‌های خودکار", callback_data='admin:stats_notif')],
+            [InlineKeyboardButton("🖥 وضعیت سرور/ربات", callback_data='admin:bot_status')],
             [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats')],
             [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
+        ]))
+
+
+async def _show_stats_users(query):
+    """آمار جزئی کاربران: رشد، فعالیت، تفکیک گروه/ورودی، نقش‌های فرعی"""
+    d = await db.stats_dashboard_users()
+
+    growth_max = max([c for _, c in d['growth_7d']] or [1])
+    growth_lines = "\n".join(
+        f"  {date}  {_mini_bar(cnt, growth_max, 8)}  <b>{cnt}</b>"
+        for date, cnt in d['growth_7d']
+    )
+
+    intake_lines = "\n".join(
+        f"  • {label}: <b>{cnt}</b>" for label, cnt in d['by_intake'][:8]
+    ) or "  —"
+
+    role_label = {
+        'support': '🎫 پشتیبان', 'content_admin': '🎓 مدیر محتوا (کلی)',
+        'content_scoped': '📅 مدیر محتوا (محدود)', 'broadcaster': '📢 مسئول اطلاعیه',
+        'reviewer': '🤓 خرخون', 'bot_admin': '👮 ادمین ربات',
+    }
+    role_lines = "\n".join(
+        f"  • {role_label.get(r, r)}: <b>{c}</b>" for r, c in d['sub_admin_roles'].items()
+    ) or "  —"
+
+    text = (
+        "👥 <b>آمار جزئی کاربران</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"✅ تأییدشده: <b>{d['total_approved']}</b>   ⏳ منتظر تأیید: <b>{d['total_pending']}</b>\n"
+        f"🆕 امروز: <b>{d['new_today']}</b>  |  ۷ روز اخیر: <b>{d['new_week']}</b>  |  ۳۰ روز اخیر: <b>{d['new_month']}</b>\n\n"
+        f"📈 <b>روند ثبت‌نام ۷ روز اخیر:</b>\n{growth_lines}\n\n"
+        f"🟢 فعال امروز: <b>{d['active_today']}</b>   🟢 فعال این هفته: <b>{d['active_week']}</b>\n"
+        f"😴 غیرفعال ۱۴+ روز: <b>{d['inactive_14d']}</b>   😴 غیرفعال ۳۰+ روز: <b>{d['inactive_30d']}</b>\n"
+        f"🚫 بلاک‌کرده ربات را: <b>{d['blocked_bot']}</b>\n\n"
+        f"🏷 <b>گروه:</b> گروه ۱: <b>{d['group1']}</b>  |  گروه ۲: <b>{d['group2']}</b>  |  بدون گروه: <b>{d['group_unset']}</b>\n\n"
+        f"📅 <b>تفکیک بر اساس ورودی:</b>\n{intake_lines}\n\n"
+        f"👮 <b>نقش‌های فرعی ادمین:</b>\n{role_lines}\n"
+        f"🎓 ادمین محتوای کلی: <b>{d['content_admins']}</b>"
+    )
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats_users')],
+            [InlineKeyboardButton("🔙 بازگشت به آمار", callback_data='admin:stats')],
+        ]))
+
+
+async def _show_stats_content(query):
+    """آمار جزئی محتوا: علوم پایه به‌تفکیک نوع، رفرنس به‌تفکیک زبان، دانلودها"""
+    d = await db.stats_dashboard_content()
+
+    bs_type_lines = "\n".join(
+        f"  • {label}: <b>{cnt}</b>" for label, cnt in d['bs_types'].items()
+    ) or "  —"
+    ref_lang_lines = "\n".join(
+        f"  • {label}: <b>{cnt}</b>" for label, cnt in d['ref_langs'].items()
+    ) or "  —"
+    top_qbank_lines = "\n".join(
+        f"  • {lesson}: <b>{cnt}</b> فایل" for lesson, cnt in d['top_qbank_lessons']
+    ) or "  —"
+
+    total_downloads = d['bs_downloads'] + d['ref_downloads'] + d['qbank_downloads']
+
+    text = (
+        "📚 <b>آمار جزئی محتوا</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"🔬 <b>علوم پایه</b> — {d['bs_lessons']} درس، {d['bs_sessions']} جلسه، "
+        f"{d['bs_total_content']} فایل\n{bs_type_lines}\n\n"
+        f"📚 <b>رفرنس‌ها</b> — {d['ref_subjects']} درس، {d['ref_books']} کتاب، "
+        f"{d['ref_total_files']} فایل\n{ref_lang_lines}\n\n"
+        f"❓ سوالات متداول (FAQ): <b>{d['faq_count']}</b>\n\n"
+        f"🧪 <b>بانک سوال</b> — <b>{d['qbank_files']}</b> فایل\n"
+        f"پرفایل‌ترین درس‌ها:\n{top_qbank_lines}\n\n"
+        f"⬇️ <b>مجموع دانلود کل ربات: {total_downloads}</b>\n"
+        f"  • علوم پایه: {d['bs_downloads']}  |  رفرنس: {d['ref_downloads']}  |  بانک سوال: {d['qbank_downloads']}"
+    )
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats_content')],
+            [InlineKeyboardButton("🔙 بازگشت به آمار", callback_data='admin:stats')],
+        ]))
+
+
+async def _show_stats_questions(query):
+    """آمار جزئی بانک سوال: دقت پاسخ‌دهی، پرسوال‌ترین درس‌ها، سخت‌ترین سوالات"""
+    d = await db.stats_dashboard_questions()
+
+    diff_lines = "\n".join(
+        f"  • {label}: <b>{cnt}</b>" for label, cnt in d['by_difficulty'].items()
+    ) or "  —"
+    top_lesson_lines = "\n".join(
+        f"  • {lesson}: <b>{cnt}</b> سوال" for lesson, cnt in d['top_lessons']
+    ) or "  —"
+
+    if d['hardest_questions']:
+        hardest_lines = "\n".join(
+            f"  {i+1}. {h['question']}...\n"
+            f"      ({h['lesson']} / {h['topic']}) — نرخ خطا: <b>{h['wrong_rate']}٪</b> "
+            f"از {h['attempts']} تلاش"
+            for i, h in enumerate(d['hardest_questions'])
+        )
+    else:
+        hardest_lines = "  داده کافی نیست (حداقل ۵ تلاش برای هر سوال لازم است)"
+
+    text = (
+        "🧪 <b>آمار جزئی بانک سوال</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"✅ تأییدشده: <b>{d['approved']}</b>   ⏳ در انتظار بررسی: <b>{d['pending']}</b>\n\n"
+        f"📊 <b>تفکیک سطح دشواری:</b>\n{diff_lines}\n\n"
+        f"📖 <b>پرسوال‌ترین درس‌ها:</b>\n{top_lesson_lines}\n\n"
+        f"🎯 <b>دقت کلی پاسخ‌دهی کاربران: {d['accuracy']}٪</b>\n"
+        f"  (از مجموع <b>{d['total_attempts']}</b> پاسخ، <b>{d['total_correct']}</b> صحیح بوده)\n\n"
+        f"😵 <b>سخت‌ترین سوالات (بیشترین نرخ خطا):</b>\n{hardest_lines}"
+    )
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats_questions')],
+            [InlineKeyboardButton("🔙 بازگشت به آمار", callback_data='admin:stats')],
+        ]))
+
+
+async def _show_stats_tickets(query):
+    """آمار جزئی پشتیبانی"""
+    d = await db.stats_dashboard_tickets()
+    close_rate = round(d['closed'] / d['total'] * 100, 1) if d['total'] else 0
+    text = (
+        "🎫 <b>آمار جزئی تیکت‌های پشتیبانی</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"📂 باز: <b>{d['open']}</b>   ✅ بسته‌شده: <b>{d['closed']}</b>   "
+        f"جمع کل: <b>{d['total']}</b>\n"
+        f"📈 نرخ رسیدگی کلی: <b>{close_rate}٪</b>\n\n"
+        f"🆕 تیکت جدید این هفته: <b>{d['new_week']}</b>\n"
+        f"🆕 تیکت جدید این ماه: <b>{d['new_month']}</b>\n"
+        f"✅ بسته‌شده در ۷ روز اخیر: <b>{d['closed_week']}</b>"
+    )
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats_tickets')],
+            [InlineKeyboardButton("🔙 بازگشت به آمار", callback_data='admin:stats')],
+        ]))
+
+
+async def _show_stats_notif(query):
+    """سلامت اعلان‌های خودکار — بر اساس ۱۰ اجرای اخیر هر job"""
+    d = await db.stats_dashboard_notif()
+    job_labels = {
+        'exam_reminder':  '🔔 یادآوری امتحان',
+        'daily_question': '📝 سوال روزانه',
+        'new_resources':  '📦 اعلان منابع جدید',
+    }
+    status_icon = {'ok': '✅', 'error': '❌', 'success': '✅'}
+    blocks = []
+    for job, info in d.items():
+        label = job_labels.get(job, job)
+        if not info:
+            blocks.append(f"<b>{label}</b>\n  — هنوز اجرا نشده")
+            continue
+        rate = round(
+            info['total_sent'] / (info['total_sent'] + info['total_failed']) * 100, 1
+        ) if (info['total_sent'] + info['total_failed']) else 0
+        icon = status_icon.get(info['last_status'], 'ℹ️')
+        blocks.append(
+            f"<b>{label}</b>\n"
+            f"  {icon} آخرین اجرا: {info['last_at'] or '—'}  "
+            f"(موفق: {info['last_sent']}، ناموفق: {info['last_failed']})\n"
+            f"  📊 نرخ موفقیت {info['runs_checked']} اجرای اخیر: <b>{rate}٪</b>"
+        )
+    text = "🔔 <b>سلامت اعلان‌های خودکار</b>\n━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(blocks)
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📜 تاریخچه کامل اعلان‌ها", callback_data='admin:notif_history')],
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:stats_notif')],
+            [InlineKeyboardButton("🔙 بازگشت به آمار", callback_data='admin:stats')],
         ]))
 
 
