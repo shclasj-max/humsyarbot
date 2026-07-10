@@ -189,7 +189,7 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
 #    همه‌جای بات یکسان بماند (مثلاً ویدیو همیشه 🎥، ویس همیشه 🎙). فقط
 #    'audio' به‌عنوان alias برای 'voice' نگه داشته شده برای سازگاری با
 #    محتوای قدیمی که ممکن است این مقدار را داشته باشد.
-_RESOURCE_ICONS = {**CONTENT_ICONS, 'audio': CONTENT_ICONS.get('voice', '🎙')}
+_RESOURCE_ICONS = {**CONTENT_ICONS, 'audio': CONTENT_ICONS.get('voice', '🎙'), 'ref': '📖'}
 _DEFAULT_RESOURCE_ICON = '📎'
 
 
@@ -204,17 +204,25 @@ async def _build_new_resources_text(new_items: list) -> str:
       • توضیح فایل عیناً همان چیزی است که ادمین تایپ کرده (شامل هر
         اعتبار/نام تیم که خودش در انتهای توضیح نوشته) — بدون افزودن
         هیچ برچسب/فلش مصنوعی اضافه که معنای مستقلی ندارد
+      • FIX جدید: علاوه بر محتوای علوم‌پایه (bs_content)، فایل‌های
+        رفرنس (ref_files) هم پشتیبانی می‌شوند — هرکدام بسته به
+        '_source' از تابع full-path مخصوص خودشان خوانده می‌شوند.
     """
     by_lesson: dict = {}
     lesson_order: list = []
 
     for item in new_items:
-        path = await db.bs_get_content_full_path(str(item['_id']))
+        source = item.get('_source', 'bs_content')
+        if source == 'ref_files':
+            path = await db.ref_get_file_full_path(str(item['_id']))
+        else:
+            path = await db.bs_get_content_full_path(str(item['_id']))
         lesson_name = path.get('lesson_name') or 'سایر'
         if lesson_name not in by_lesson:
             by_lesson[lesson_name] = []
             lesson_order.append(lesson_name)
-        icon = _RESOURCE_ICONS.get(path.get('content_type', ''), _DEFAULT_RESOURCE_ICON)
+        content_type = 'ref' if source == 'ref_files' else path.get('content_type', '')
+        icon = _RESOURCE_ICONS.get(content_type, _DEFAULT_RESOURCE_ICON)
         desc = html.escape(path.get('description') or path.get('topic') or 'بدون عنوان')
         by_lesson[lesson_name].append(f"{icon} {desc}")
 
@@ -278,7 +286,10 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
                 failed_ids.append(u['user_id'])
             await asyncio.sleep(0.05)
 
-        await db.mark_resources_notified([item['_id'] for item in new_items])
+        bs_ids  = [item['_id'] for item in new_items if item.get('_source', 'bs_content') == 'bs_content']
+        ref_ids = [item['_id'] for item in new_items if item.get('_source') == 'ref_files']
+        await db.mark_resources_notified(bs_ids)
+        await db.mark_ref_files_notified(ref_ids)
         await db.set_setting('resource_notif_last_sent', datetime.now().isoformat())
         await db.notif_run_finish(run_id, sent, failed, len(users))
         if failed_ids:
@@ -1013,6 +1024,15 @@ def build_application() -> Application:
 async def post_init(application: Application):
     await db.ensure_indexes()
     logger.info("✅ ایندکس‌های دیتابیس آماده شدند")
+
+    # FIX جدید: یک‌بار (idempotent) رفرنس‌های قدیمی را «قبلاً دیده‌شده»
+    # علامت می‌زند تا با اضافه‌شدن ref_files به سیستم نوتیف منابع جدید،
+    # اولین اجرای job یک‌جا سیل نوتیف قدیمی نفرستد. خطای احتمالی این
+    # مرحله نباید مانع بالا آمدن ربات شود.
+    try:
+        await db.migrate_mark_existing_ref_files_notified()
+    except Exception as e:
+        logger.error(f"migrate_mark_existing_ref_files_notified error: {e}")
 
     # FIX: گارد ایمن — اگر JobQueue نصب نباشد، ربات کرش نکند
     if application.job_queue is not None:
