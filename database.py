@@ -377,16 +377,65 @@ class DB:
     # ══════════════════════════════════════════════════
 
     async def get_unnotified_resources(self) -> list:
-        """محتوای جدیدی که هنوز برای آن نوتیف ارسال نشده"""
-        return await self.bs_content.find({'notif_sent': {'$ne': True}}).to_list(200)
+        """
+        محتوای جدیدی که هنوز برای آن نوتیف ارسال نشده.
+        FIX جدید: علاوه بر bs_content (منابع علوم‌پایه)، فایل‌های
+        رفرنس (ref_files) هم اضافه شدند — طبق تصمیم صریح ادمین.
+        بانک سوال (qbank_files) عمداً اضافه نشده و وارد این سیستم
+        نمی‌شود. هر آیتم با کلید داخلی '_source' مشخص می‌شود که از
+        کدام کالکشن آمده، تا هم متن نوتیف و هم علامت‌گذاری نهایی
+        بدانند با کدام کالکشن طرفند.
+        """
+        bs_items = await self.bs_content.find({'notif_sent': {'$ne': True}}).to_list(200)
+        for it in bs_items:
+            it['_source'] = 'bs_content'
+
+        ref_items = await self.ref_files.find({'notif_sent': {'$ne': True}}).to_list(200)
+        for it in ref_items:
+            it['_source'] = 'ref_files'
+
+        return bs_items + ref_items
 
     async def mark_resources_notified(self, content_ids: list):
-        """علامت‌گذاری محتوای ارسال‌شده تا دوباره اعلام نشود"""
+        """علامت‌گذاری محتوای علوم‌پایه ارسال‌شده تا دوباره اعلام نشود"""
         if not content_ids:
             return
         await self.bs_content.update_many(
             {'_id': {'$in': [ObjectId(c) if isinstance(c, str) else c for c in content_ids]}},
             {'$set': {'notif_sent': True}}
+        )
+
+    async def mark_ref_files_notified(self, file_ids: list):
+        """FIX جدید: علامت‌گذاری فایل‌های رفرنس ارسال‌شده — موازی و
+        مستقل از mark_resources_notified، تا هیچ تغییری روی منطق
+        فعلی bs_content اعمال نشود."""
+        if not file_ids:
+            return
+        await self.ref_files.update_many(
+            {'_id': {'$in': [ObjectId(c) if isinstance(c, str) else c for c in file_ids]}},
+            {'$set': {'notif_sent': True}}
+        )
+
+    async def migrate_mark_existing_ref_files_notified(self):
+        """
+        FIX جدید (یک‌بار در post_init اجرا می‌شود، idempotent):
+        رفرنس‌هایی که از قبل توی دیتابیس بودند و فیلد notif_sent
+        ندارند، به‌عنوان «قبلاً دیده‌شده» علامت می‌خورند — تا اولین
+        اجرای job بعد از این آپدیت، یک‌جا سیل نوتیف قدیمی نفرستد.
+        فقط رفرنس‌هایی که از این به بعد آپلود/جایگزین می‌شوند وارد
+        صف نوتیف واقعی می‌شوند.
+        """
+        already_done = await self.get_setting('ref_notif_migration_done', False)
+        if already_done:
+            return
+        result = await self.ref_files.update_many(
+            {'notif_sent': {'$exists': False}},
+            {'$set': {'notif_sent': True}}
+        )
+        await self.set_setting('ref_notif_migration_done', True)
+        logger.info(
+            f"📖 مهاجرت یک‌باره نوتیف رفرنس‌ها: {result.modified_count} فایل قدیمی "
+            f"به‌عنوان قبلاً-دیده‌شده علامت خورد"
         )
 
     async def bs_get_content_item(self, cid: str):
@@ -608,11 +657,16 @@ class DB:
 
     async def ref_add_file(self, book_id: str, lang: str, file_id: str,
                            volume: int = 1, description: str = ''):
+        # FIX جدید: notif_sent اضافه شد تا این فایل وارد صف نوتیف
+        # «منابع جدید» (همون jobـی که برای bs_content کار می‌کند) بشود.
+        # چه فایل کاملاً جدید باشد چه جایگزین‌شدن یک جلد/زبان موجود،
+        # از نظر دانشجو محتوای تازه است و باید در صف قرار بگیرد.
         existing = await self.ref_files.find_one({'book_id': book_id, 'lang': lang, 'volume': volume})
         if existing:
             await self.ref_files.update_one({'_id': existing['_id']}, {'$set': {
                 'file_id': file_id, 'description': description,
                 'uploaded_at': datetime.now().isoformat(),
+                'notif_sent': False,
             }})
             return str(existing['_id'])
         count = await self.ref_files.count_documents({'book_id': book_id})
@@ -620,8 +674,33 @@ class DB:
             'book_id': book_id, 'lang': lang, 'volume': volume,
             'description': description, 'file_id': file_id,
             'uploaded_at': datetime.now().isoformat(), 'downloads': 0, 'order': count,
+            'notif_sent': False,
         })
         return str(r.inserted_id)
+
+    async def ref_get_file_full_path(self, fid: str) -> dict:
+        """
+        FIX جدید: زنجیره‌ی کامل یک فایل رفرنس — موضوع، کتاب، جلد، زبان.
+        دقیقاً هم‌الگو با bs_get_content_full_path؛ برای نوتیف «منابع
+        جدید» استفاده می‌شود تا فایل‌های رفرنس هم بتوانند گروه‌بندی و
+        نمایش داده شوند.
+        """
+        item = await self.ref_get_file(fid)
+        if not item:
+            return {}
+        book = await self.ref_get_book(item.get('book_id', ''))
+        subject = await self.ref_get_subject(book.get('subject_id', '')) if book else None
+        lang_label = '🇮🇷 فارسی' if item.get('lang') == 'fa' else '🌐 لاتین'
+        vol = item.get('volume', 1)
+        return {
+            'content':      item,
+            'book':         book or {},
+            'subject':      subject or {},
+            'lesson_name':  subject.get('name', '') if subject else '',
+            'topic':        book.get('name', '') if book else '',
+            'content_type': 'ref',
+            'description':  item.get('description') or f"{book.get('name','') if book else ''} — جلد {vol} — {lang_label}",
+        }
 
     async def ref_get_file(self, fid: str):
         try:
