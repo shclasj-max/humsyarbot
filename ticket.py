@@ -35,12 +35,32 @@ SUBJECTS = [
 #  Callback اصلی
 # ══════════════════════════════════════════════════
 
+USER_TICKET_ACTIONS = {
+    'main', 'new', 'subject', 'preview_confirm', 'preview_cancel',
+    'list', 'view', 'reply_user',
+}
+
+
 async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
-    await query.answer()
     uid    = update.effective_user.id
     parts  = query.data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
+
+    # FIX جدید (باگ اسپم تیکت): کاربر حذف‌شده/بلاک‌شده ممکن است هنوز
+    # دکمه‌ی شیشه‌ای قدیمی «تیکت جدید» یا «مشاهده‌ی تیکت» را در چت
+    # قبلی‌اش داشته باشد. بدون این چک می‌توانست با لمس همان دکمه،
+    # بدون هیچ رکوردی در دیتابیس، تیکت خالی/اسپم بسازد.
+    if action in USER_TICKET_ACTIONS and uid != ADMIN_ID:
+        u = await db.get_user(uid)
+        if not u or not u.get('approved'):
+            await query.answer(
+                "⚠️ حساب شما یافت نشد یا هنوز تأیید نشده. لطفاً با /start ثبت‌نام کنید.",
+                show_alert=True
+            )
+            return
+
+    await query.answer()
 
     if action == 'main':
         await _ticket_main(query, uid)
@@ -397,6 +417,15 @@ async def _do_create_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     query   = update.callback_query
     uid     = update.effective_user.id
     user    = await db.get_user(uid)
+
+    # FIX جدید: لایه‌ی دوم دفاعی — حتی اگر مسیر دیگری (context.user_data
+    # آویزون) به این تابع برسد، بدون رکورد معتبر کاربر هیچ تیکتی ساخته
+    # نمی‌شود.
+    if not user or not user.get('approved'):
+        context.user_data.clear()
+        await query.answer("⚠️ حساب شما یافت نشد. لطفاً با /start ثبت‌نام کنید.", show_alert=True)
+        return
+
     subject = context.user_data.get('ticket_subject', 'سوال')
     text    = context.user_data.get('ticket_draft', '')
 
