@@ -29,6 +29,18 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── کاربر جدید ──
     if not user:
+        # FIX جدید: بلاک کامل — کاربرانی که با آیدی عددی‌شان بلاک شده‌اند
+        # (نه فقط حذف) حتی اجازه‌ی دیدن دکمه‌ی «شروع ثبت‌نام» را ندارند.
+        if await db.is_blacklisted(uid):
+            context.user_data.clear()
+            await update.message.reply_text(
+                "🚫 <b>دسترسی مسدود است</b>\n\n"
+                "حساب شما توسط مدیریت ربات مسدود شده و امکان ثبت‌نام مجدد وجود ندارد.\n"
+                "در صورت اعتراض، از طریق راه‌های ارتباطی خارج از ربات با مدیریت در تماس باشید.",
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+
         context.user_data.clear()
         await update.message.reply_text(
             f"🩺 <b>به ربات آموزشی پزشکی خوش آمدید!</b>\n\n"
@@ -95,6 +107,15 @@ async def register_start_callback(update: Update, context: ContextTypes.DEFAULT_
     data  = query.data
 
     if data == 'register:start':
+        uid = update.effective_user.id
+        # FIX جدید: لایه‌ی دوم دفاعی — اگر کاربر بعد از دیدن دکمه‌ی
+        # «شروع ثبت‌نام» و قبل از لمسش بلاک شده باشد.
+        if await db.is_blacklisted(uid):
+            context.user_data.clear()
+            await query.edit_message_text(
+                "🚫 حساب شما توسط مدیریت ربات مسدود شده و امکان ثبت‌نام ندارید."
+            )
+            return ConversationHandler.END
         context.user_data['reg_step'] = 'name'
         await query.edit_message_text(
             "📝 <b>مرحله ۱ از ۲ — نام و نام خانوادگی</b>\n\n"
@@ -203,6 +224,17 @@ async def _after_intake_step(update, context, uid, name, group, intake, username
             await update.message.reply_text(text, parse_mode='HTML', reply_markup=kb)
         return STEP_STUDENT_ID
 
+    # FIX جدید: لایه‌ی دوم دفاعی در برابر بلاک — حتی اگر کاربری بین
+    # نمایش دکمه‌ی «شروع ثبت‌نام» و رسیدن به همین نقطه بلاک شده باشد.
+    if await db.is_blacklisted(uid):
+        context.user_data.clear()
+        msg = "🚫 حساب شما توسط مدیریت مسدود شده و امکان ثبت‌نام ندارید."
+        if query:
+            await query.edit_message_text(msg)
+        else:
+            await update.message.reply_text(msg)
+        return ConversationHandler.END
+
     await db.create_user(uid, name, '', group, username, intake=intake)
     return await _finish_registration(update, context, uid, name, group, intake, username)
 
@@ -238,6 +270,12 @@ async def step_student_id_handler(update: Update, context: ContextTypes.DEFAULT_
             parse_mode='HTML', reply_markup=kb
         )
         await _show_dashboard(update, context)
+        return ConversationHandler.END
+
+    # FIX جدید: لایه‌ی دوم دفاعی در برابر بلاک (نگاه کنید به _after_intake_step)
+    if await db.is_blacklisted(uid):
+        context.user_data.clear()
+        await update.message.reply_text("🚫 حساب شما توسط مدیریت مسدود شده و امکان ثبت‌نام ندارید.")
         return ConversationHandler.END
 
     await db.create_user(uid, name, sid, group, username, intake=intake)
