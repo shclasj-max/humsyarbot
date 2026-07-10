@@ -20,6 +20,29 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     text = update.message.text.strip()
 
+    # ══════════════════════════════════════════════════
+    # 🛡 بررسی کاربر — همیشه اول از همه اجرا می‌شود
+    # ══════════════════════════════════════════════════
+    # FIX باگ مهم: قبلاً این چک بعد از همه‌ی شاخه‌های حالت‌محور
+    # (ticket_mode، ca_mode، creating_question، awaiting_search) بود.
+    # یعنی اگر کاربری وسط یک گفتگو (مثلاً نوشتن تیکت) حذف/بلاک می‌شد،
+    # context.user_data['ticket_mode'] هنوز روی حافظه‌ی مکالمه باقی
+    # می‌ماند و پیام بعدی‌اش مستقیم به ticket_message_handler می‌رفت —
+    # بدون اینکه اصلاً کاربر در دیتابیس وجود داشته باشد. نتیجه: تیکت
+    # با نام/شماره‌دانشجویی خالی ثبت می‌شد و کاربر حذف‌شده همچنان
+    # می‌توانست بی‌نهایت تیکت (اسپم) بفرستد. با انتقال این چک به همین‌جا
+    # —قبل از هر شاخه‌ی دیگر— هیچ حالت آویزونی دیگر قابل‌دور زدن نیست.
+    user = await db.get_user(uid)
+    if not user:
+        context.user_data.clear()   # پاک‌سازی هر state آویزون (ticket_mode و مشابه)
+        await update.message.reply_text(
+            "لطفاً ابتدا /start را بزنید تا ثبت‌نام کنید."
+        )
+        return
+    if not user.get('approved') and uid != ADMIN_ID:
+        await update.message.reply_text("⏳ دسترسی شما هنوز تأیید نشده است.")
+        return
+
     # ── حالت‌های خاص ادمین ──
     # profile_edit برای همه کاربران
     if context.user_data.get('mode') == 'profile_edit':
@@ -82,17 +105,6 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_search'):
         from search import search_handler
         return await search_handler(update, context)
-
-    # ── بررسی کاربر ──
-    user = await db.get_user(uid)
-    if not user:
-        await update.message.reply_text(
-            "لطفاً ابتدا /start را بزنید تا ثبت‌نام کنید."
-        )
-        return
-    if not user.get('approved') and uid != ADMIN_ID:
-        await update.message.reply_text("⏳ دسترسی شما هنوز تأیید نشده است.")
-        return
 
     # ── مسیریابی دکمه‌های منو ──
     await _route_menu_button(update, context, text, uid, user)
