@@ -53,6 +53,11 @@ class DB:
         self.settings     = _db['bot_settings']     # تنظیمات کلی + گروه‌های لاگ + maintenance
         self.notif_runs   = _db['notif_runs']       # FIX جدید: لاگ وضعیت ارسال نوتیف‌ها
         self.content_reports = _db['content_reports']  # FIX جدید: گزارش سوال/جزوه
+        # FIX جدید: بلک‌لیست بلاک کامل — بر اساس آیدی عددی تلگرام (ثابت و
+        # غیرقابل تغییر)، برخلاف یوزرنیم که کاربر می‌تواند عوضش کند.
+        # کاربر بلاک‌شده هم از دیتابیس حذف می‌شود و هم دیگر نمی‌تواند
+        # با همان آیدی دوباره ثبت‌نام کند.
+        self.blacklist    = _db['blacklist']
         self.admin_roles  = _db['admin_roles']      # FIX جدید: سطوح دسترسی چندگانه ادمین
         self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
 
@@ -120,6 +125,36 @@ class DB:
 
     async def delete_user(self, uid: int):
         await self.users.delete_one({'user_id': uid})
+
+    async def block_user(self, uid: int, reason: str = '', blocked_by: int = None,
+                          blocked_by_name: str = '') -> None:
+        """
+        FIX جدید — بلاک کامل: برخلاف delete_user که فقط رکورد را پاک
+        می‌کند و کاربر می‌تواند فردا دوباره با همان آیدی ثبت‌نام کند،
+        این متد هم حذف می‌کند و هم آیدی عددی تلگرام (ثابت، برخلاف
+        یوزرنیم) را در بلک‌لیست ثبت می‌کند تا ثبت‌نام مجدد مسدود شود.
+        """
+        await self.users.delete_one({'user_id': uid})
+        await self.blacklist.update_one(
+            {'_id': uid},
+            {'$set': {
+                'blocked_at':      datetime.now().isoformat(),
+                'blocked_by':      blocked_by,
+                'blocked_by_name': blocked_by_name,
+                'reason':          reason,
+            }},
+            upsert=True,
+        )
+
+    async def unblock_user(self, uid: int) -> bool:
+        r = await self.blacklist.delete_one({'_id': uid})
+        return r.deleted_count > 0
+
+    async def is_blacklisted(self, uid: int) -> bool:
+        return await self.blacklist.find_one({'_id': uid}) is not None
+
+    async def get_blacklist(self, limit: int = 200) -> list:
+        return await self.blacklist.find({}).sort('blocked_at', -1).to_list(limit)
 
     async def all_users(self, approved_only: bool = True):
         q = {'approved': True} if approved_only else {}
@@ -1117,6 +1152,10 @@ class DB:
     async def global_stats(self) -> dict:
         week_ago  = (datetime.now() - timedelta(days=7)).isoformat()
         new_users = await self.users.count_documents({'registered_at': {'$gt': week_ago}})
+        # FIX جدید: online_30m و total_downloads هم اینجا اضافه شد تا
+        # نمای کلی سریع پنل ادمین (admin:stats) بدون فراخوانی جداگانه
+        # این دو متریک تعامل/سلامت را هم در یک نگاه نشان دهد.
+        dl_pipeline = [{'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
         vals = await asyncio.gather(
             self.users.count_documents({'approved': True}),
             self.users.count_documents({'approved': False}),
@@ -1129,13 +1168,22 @@ class DB:
             self.ref_books.count_documents({}),
             self.tickets.count_documents({'status': 'open'}),
             self.users.count_documents({'role': 'content_admin'}),
+            self.count_active_users(30),
+            self.bs_content.aggregate(dl_pipeline).to_list(1),
+            self.ref_files.aggregate(dl_pipeline).to_list(1),
         )
         keys = [
             'users','pending','questions','qbank_files',
             'bs_lessons','bs_sessions','bs_content',
             'ref_subjects','ref_books','open_tickets','content_admins',
+            'online_30m',
         ]
-        d = dict(zip(keys, vals))
+        d = dict(zip(keys, vals[:len(keys)]))
+        bs_dl, ref_dl = vals[len(keys)], vals[len(keys) + 1]
+        d['total_downloads'] = (
+            (bs_dl[0]['total']  if bs_dl  else 0) +
+            (ref_dl[0]['total'] if ref_dl else 0)
+        )
         d['new_users_week'] = new_users
         return d
 
@@ -1242,6 +1290,11 @@ class DB:
         for r in all_roles:
             role_counts[r.get('role', '')] = role_counts.get(r.get('role', ''), 0) + 1
 
+        # FIX جدید: ۳ کاربر برتر (بر اساس جدول برترین‌های dashboard.py)
+        # هم اینجا نمایش داده می‌شود تا ادمین فعال‌ترین کاربران را هم
+        # در کنار آمار رشد/فعالیت ببیند.
+        top_users = await self.get_leaderboard(3)
+
         return {
             'total_approved': total_approved, 'total_pending': total_pending,
             'new_today': new_today, 'new_week': new_week, 'new_month': new_month,
@@ -1251,14 +1304,16 @@ class DB:
             'inactive_14d': inactive_14d, 'inactive_30d': inactive_30d,
             'blocked_bot': blocked_bot, 'content_admins': content_admins,
             'growth_7d': growth_7d, 'by_intake': by_intake,
-            'sub_admin_roles': role_counts,
+            'sub_admin_roles': role_counts, 'top_users': top_users,
         }
 
     async def stats_dashboard_content(self) -> dict:
         """آمار جزئی محتوا: علوم پایه به‌تفکیک نوع، رفرنس به‌تفکیک زبان، دانلودها"""
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
         (bs_lessons, bs_sessions, bs_by_type, ref_subjects, ref_books,
          ref_by_lang, faq_count, qbank_files, top_qbank_lessons,
-         bs_dl_agg, ref_dl_agg, qbank_dl_agg) = await asyncio.gather(
+         bs_dl_agg, ref_dl_agg, qbank_dl_agg, top_downloaded_qbank,
+         new_bs_week, new_ref_week) = await asyncio.gather(
             self.bs_lessons.count_documents({}),
             self.bs_sessions.count_documents({}),
             self.bs_content.aggregate(
@@ -1284,6 +1339,11 @@ class DB:
             self.qbank_files.aggregate(
                 [{'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
             ).to_list(1),
+            self.qbank_files.find(
+                {'downloads': {'$gt': 0}}, {'lesson': 1, 'topic': 1, 'downloads': 1}
+            ).sort('downloads', -1).limit(5).to_list(5),
+            self.bs_content.count_documents({'uploaded_at': {'$gt': week_ago}}),
+            self.ref_files.count_documents({'uploaded_at': {'$gt': week_ago}}),
         )
         type_labels = {
             'video': '🎥 ویدیو', 'ppt': '📊 پاورپوینت', 'pdf': '📄 PDF',
@@ -1300,16 +1360,23 @@ class DB:
             'ref_langs': ref_langs, 'ref_total_files': sum(ref_langs.values()),
             'faq_count': faq_count, 'qbank_files': qbank_files,
             'top_qbank_lessons': [(d['_id'] or 'نامشخص', d['count']) for d in top_qbank_lessons],
+            'top_downloaded_qbank': [
+                (f"{d.get('lesson','نامشخص')} / {d.get('topic','')}".strip(' /'), d.get('downloads', 0))
+                for d in top_downloaded_qbank
+            ],
             'bs_downloads': (bs_dl_agg[0]['total'] if bs_dl_agg else 0),
             'ref_downloads': (ref_dl_agg[0]['total'] if ref_dl_agg else 0),
             'qbank_downloads': (qbank_dl_agg[0]['total'] if qbank_dl_agg else 0),
+            'new_this_week': new_bs_week + new_ref_week,
         }
 
     async def stats_dashboard_questions(self) -> dict:
         """آمار جزئی بانک سوال: دقت پاسخ‌دهی، پرسوال‌ترین درس‌ها، سخت‌ترین سوالات"""
-        (q_approved, q_pending, by_diff, by_lesson, totals, hardest) = await asyncio.gather(
+        (q_approved, q_pending, q_by_bot, q_by_users, by_diff, by_lesson, totals, hardest) = await asyncio.gather(
             self.questions.count_documents({'approved': True}),
             self.questions.count_documents({'approved': False}),
+            self.questions.count_documents({'approved': True, 'by_bot': True}),
+            self.questions.count_documents({'approved': True, 'by_bot': {'$ne': True}}),
             self.questions.aggregate([
                 {'$match': {'approved': True}},
                 {'$group': {'_id': '$difficulty', 'count': {'$sum': 1}}},
@@ -1352,6 +1419,7 @@ class DB:
 
         return {
             'approved': q_approved, 'pending': q_pending,
+            'by_bot': q_by_bot, 'by_users': q_by_users,
             'by_difficulty': by_difficulty,
             'top_lessons': [(d['_id'] or 'نامشخص', d['count']) for d in by_lesson],
             'total_attempts': total_attempts, 'total_correct': total_correct,
@@ -1362,16 +1430,33 @@ class DB:
         """آمار جزئی پشتیبانی"""
         week_ago  = (datetime.now() - timedelta(days=7)).isoformat()
         month_ago = (datetime.now() - timedelta(days=30)).isoformat()
-        (open_t, closed_t, new_week, new_month, closed_week) = await asyncio.gather(
+        (open_t, closed_t, new_week, new_month, closed_week, resolved_month) = await asyncio.gather(
             self.tickets.count_documents({'status': 'open'}),
             self.tickets.count_documents({'status': 'closed'}),
             self.tickets.count_documents({'created_at': {'$gte': week_ago}}),
             self.tickets.count_documents({'created_at': {'$gte': month_ago}}),
             self.tickets.count_documents({'status': 'closed', 'closed_at': {'$gte': week_ago}}),
+            self.tickets.find({
+                'status': 'closed', 'closed_at': {'$gte': month_ago},
+            }, {'created_at': 1, 'closed_at': 1}).to_list(500),
         )
+        # FIX جدید: میانگین زمان رسیدگی — بر مبنای تیکت‌های بسته‌شده‌ی
+        # ۳۰ روز اخیر، چون created_at/closed_at رشته‌ی isoformat‌اند و
+        # محاسبه در پایتون از aggregation با فرمت ناهمگون مطمئن‌تر است.
+        durations_h = []
+        for t in resolved_month:
+            try:
+                c0 = datetime.fromisoformat(t['created_at'])
+                c1 = datetime.fromisoformat(t['closed_at'])
+                durations_h.append((c1 - c0).total_seconds() / 3600)
+            except Exception:
+                continue
+        avg_resolution_h = round(sum(durations_h) / len(durations_h), 1) if durations_h else None
+
         return {
             'open': open_t, 'closed': closed_t, 'total': open_t + closed_t,
             'new_week': new_week, 'new_month': new_month, 'closed_week': closed_week,
+            'avg_resolution_h': avg_resolution_h, 'resolved_sample': len(durations_h),
         }
 
     async def stats_dashboard_notif(self) -> dict:
@@ -1402,6 +1487,212 @@ class DB:
             self.ref_files.count_documents({'uploaded_at': {'$gt': since}}),
         )
         return bs + refs
+
+    async def activity_pulse(self) -> dict:
+        """
+        FIX جدید: نبض فعالیت ربات — حجم کل کنش‌های ثبت‌شده در ۷ روز
+        اخیر و پرترافیک‌ترین ساعت شبانه‌روز، برای نمای کلی داشبورد.
+        timestamp به‌صورت رشته‌ی isoformat ذخیره می‌شود، پس ساعت با
+        substring به‌جای پارس تاریخ کامل استخراج می‌شود (سریع‌تر و
+        مطمئن‌تر روی رشته‌های با دقت میکروثانیه‌ی متغیر).
+        """
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        total_week, by_hour = await asyncio.gather(
+            self.stats_col.count_documents({'timestamp': {'$gt': week_ago}}),
+            self.stats_col.aggregate([
+                {'$match': {'timestamp': {'$gt': week_ago}}},
+                {'$group': {
+                    '_id': {'$substrBytes': ['$timestamp', 11, 2]},
+                    'count': {'$sum': 1},
+                }},
+                {'$sort': {'count': -1}}, {'$limit': 1},
+            ]).to_list(1),
+        )
+        peak_hour, peak_count = (None, 0)
+        if by_hour:
+            peak_hour, peak_count = by_hour[0]['_id'], by_hour[0]['count']
+        return {
+            'total_actions_week': total_week,
+            'peak_hour': peak_hour, 'peak_hour_count': peak_count,
+        }
+
+    async def admin_insights(self) -> dict:
+        """
+        FIX جدید — «مرکز هوش ربات»: به‌جای اینکه ادمین خودش بین چند
+        صفحه‌ی آمار بگردد تا مشکلات را پیدا کند، این متد با چند قانون
+        ساده (rule-based) روی داده‌های واقعی، خودش هشدارهای قابل‌اقدام
+        و پیش‌بینی رشد هفته‌ی بعد را تولید می‌کند. هیچ داده‌ای شبیه‌سازی
+        نمی‌شود — همه از همان کالکشن‌های موجود محاسبه می‌شود.
+        """
+        now        = datetime.now()
+        h48        = (now - timedelta(hours=48)).isoformat()
+        d14        = (now - timedelta(days=14)).isoformat()
+        d3         = (now - timedelta(days=3)).isoformat()
+
+        (
+            pending_old, oldest_pending,
+            tickets_old, oldest_ticket,
+            bad_questions,
+            inactive_admins,
+            all_sessions, content_session_ids,
+        ) = await asyncio.gather(
+            self.users.count_documents({'approved': False, 'registered_at': {'$lt': h48}}),
+            self.users.find({'approved': False}).sort('registered_at', 1).to_list(1),
+            self.tickets.count_documents({'status': 'open', 'created_at': {'$lt': h48}}),
+            self.tickets.find({'status': 'open'}).sort('created_at', 1).to_list(1),
+            self.questions.count_documents({
+                'approved': True, 'attempt_count': {'$gte': 5},
+                '$expr': {'$gte': [
+                    {'$divide': [
+                        {'$subtract': ['$attempt_count', '$correct_count']},
+                        '$attempt_count',
+                    ]}, 0.7,
+                ]},
+            }),
+            self.users.find({
+                'role': 'content_admin',
+                '$or': [{'last_active': {'$lt': d14}}, {'last_active': {'$exists': False}}],
+            }, {'name': 1}).to_list(20),
+            self.bs_sessions.find({'created_at': {'$lt': d3}}, {'_id': 1}).to_list(500),
+            self.bs_content.distinct('session_id'),
+        )
+
+        oldest_pending_h = None
+        if oldest_pending:
+            try:
+                oldest_pending_h = round((now - datetime.fromisoformat(oldest_pending[0]['registered_at'])).total_seconds() / 3600)
+            except Exception:
+                pass
+        oldest_ticket_h = None
+        if oldest_ticket:
+            try:
+                oldest_ticket_h = round((now - datetime.fromisoformat(oldest_ticket[0]['created_at'])).total_seconds() / 3600)
+            except Exception:
+                pass
+
+        content_session_ids = set(str(s) for s in content_session_ids)
+        empty_sessions = [s for s in all_sessions if str(s['_id']) not in content_session_ids]
+
+        # ── گزارشات محتوا/سوال بررسی‌نشده ──
+        new_reports = await self.content_reports.count_documents({'status': 'new'})
+
+        # ── فعالیت ادمین‌های فرعی پنل (بر اساس audit_logs) ──
+        # FIX جدید: پرکارترین و کم‌کارترین ادمین‌های فرعی، برای این‌که
+        # ادمین ارشد بفهمد کدام همکار واقعاً از پنل استفاده می‌کند و
+        # کدام مدت‌هاست سراغش نرفته — بدون نیاز به گشتن دستی در لاگ خام.
+        role_docs = await self.get_all_admin_roles()
+        admin_uids = [r['_id'] for r in role_docs]
+        top_admins, stale_admins = [], []
+        if admin_uids:
+            week_ago_iso = (now - timedelta(days=7)).isoformat()
+            week_agg, last_agg, name_docs = await asyncio.gather(
+                self.audit_logs.aggregate([
+                    {'$match': {'timestamp': {'$gt': week_ago_iso}, 'actor.id': {'$in': admin_uids}}},
+                    {'$group': {'_id': '$actor.id', 'count': {'$sum': 1}}},
+                    {'$sort': {'count': -1}},
+                ]).to_list(50),
+                self.audit_logs.aggregate([
+                    {'$match': {'actor.id': {'$in': admin_uids}}},
+                    {'$group': {'_id': '$actor.id', 'last_action': {'$max': '$timestamp'}}},
+                ]).to_list(50),
+                self.users.find({'user_id': {'$in': admin_uids}}, {'user_id': 1, 'name': 1}).to_list(len(admin_uids)),
+            )
+            name_map = {d['user_id']: d.get('name', 'ادمین') for d in name_docs}
+            role_map = {r['_id']: self.ROLE_LABELS.get(r.get('role', ''), r.get('role', '')) for r in role_docs}
+            week_map = {d['_id']: d['count'] for d in week_agg}
+            last_map = {d['_id']: d['last_action'] for d in last_agg}
+
+            for uid_ in admin_uids:
+                nm = name_map.get(uid_, f"ادمین #{uid_}")
+                rl = role_map.get(uid_, '')
+                wk = week_map.get(uid_, 0)
+                last_ts = last_map.get(uid_)
+                if wk > 0:
+                    top_admins.append({'name': nm, 'role': rl, 'count': wk})
+                if last_ts:
+                    try:
+                        days_idle = (now - datetime.fromisoformat(last_ts)).days
+                    except Exception:
+                        days_idle = None
+                else:
+                    days_idle = None  # هرگز فعالیتی ثبت نشده
+                if days_idle is None or days_idle >= 14:
+                    stale_admins.append({'name': nm, 'role': rl, 'days_idle': days_idle})
+            top_admins.sort(key=lambda x: x['count'], reverse=True)
+            top_admins = top_admins[:5]
+
+        # ── روند رشد ۴ هفته‌ی اخیر + پیش‌بینی ساده‌ی هفته‌ی بعد ──
+        week_counts = []
+        for i in range(4):
+            start = (now - timedelta(days=7 * (i + 1))).isoformat()
+            end   = (now - timedelta(days=7 * i)).isoformat()
+            c = await self.users.count_documents({'registered_at': {'$gte': start, '$lt': end}})
+            week_counts.append(c)  # week_counts[0] = این هفته, [3] = ۴ هفته پیش
+        this_week = week_counts[0]
+        prior_avg = round(sum(week_counts[1:]) / 3, 1) if any(week_counts[1:]) else 0
+        slope     = (week_counts[0] - week_counts[3]) / 3 if len(week_counts) == 4 else 0
+        forecast_next_week = max(0, round(this_week + slope))
+        growth_alert = None
+        if prior_avg > 0:
+            change = round((this_week - prior_avg) / prior_avg * 100)
+            if change <= -30:
+                growth_alert = f"📉 افت {abs(change)}٪ در ثبت‌نام این هفته نسبت به میانگین ۳ هفته‌ی قبل"
+            elif change >= 50:
+                growth_alert = f"📈 جهش {change}٪ در ثبت‌نام این هفته نسبت به میانگین ۳ هفته‌ی قبل"
+
+        alerts = []
+        if pending_old:
+            alerts.append({
+                'icon': '⏳', 'title': f"{pending_old} کاربر بیش از ۴۸ ساعت منتظر تأییدند",
+                'detail': f"قدیمی‌ترین: {oldest_pending_h} ساعت پیش" if oldest_pending_h else '',
+                'action': 'admin:pending',
+            })
+        if tickets_old:
+            alerts.append({
+                'icon': '🎫', 'title': f"{tickets_old} تیکت بیش از ۴۸ ساعت بدون پاسخ باز مانده",
+                'detail': f"قدیمی‌ترین: {oldest_ticket_h} ساعت پیش" if oldest_ticket_h else '',
+                'action': 'ticket:manage',
+            })
+        if bad_questions:
+            alerts.append({
+                'icon': '😵', 'title': f"{bad_questions} سوال نرخ خطای ۷۰٪+ دارند و نیاز به بازبینی دارند",
+                'detail': 'حداقل ۵ پاسخ ثبت‌شده برای هرکدام',
+                'action': 'admin:stats_questions',
+            })
+        if inactive_admins:
+            names = "، ".join(a.get('name', 'ادمین') for a in inactive_admins[:5])
+            alerts.append({
+                'icon': '😴', 'title': f"{len(inactive_admins)} ادمین محتوا ۱۴+ روز غیرفعال بوده‌اند",
+                'detail': names, 'action': 'admin:cat_users',
+            })
+        if empty_sessions:
+            alerts.append({
+                'icon': '📭', 'title': f"{len(empty_sessions)} جلسه‌ی علوم پایه هنوز هیچ محتوایی ندارد",
+                'detail': 'حداقل ۳ روز از ساخت‌شان گذشته', 'action': 'admin:cat_content',
+            })
+        if new_reports:
+            alerts.append({
+                'icon': '📋', 'title': f"{new_reports} گزارش محتوا/سوال بررسی‌نشده در صف است",
+                'detail': '', 'action': 'report:manage:all',
+            })
+        if stale_admins:
+            names = "، ".join(
+                f"{a['name']} ({a['days_idle']} روز)" if a['days_idle'] is not None else f"{a['name']} (هرگز)"
+                for a in stale_admins[:5]
+            )
+            alerts.append({
+                'icon': '🕸', 'title': f"{len(stale_admins)} ادمین فرعی پنل ۱۴+ روز از پنل استفاده نکرده‌اند",
+                'detail': names, 'action': 'admin:cat_users',
+            })
+        if growth_alert:
+            alerts.append({'icon': '📊', 'title': growth_alert, 'detail': '', 'action': 'admin:stats_users'})
+
+        return {
+            'alerts': alerts,
+            'week_counts': week_counts, 'this_week': this_week, 'prior_avg': prior_avg,
+            'forecast_next_week': forecast_next_week,
+            'top_admins': top_admins, 'stale_admins': stale_admins,
+        }
 
 
 # instance جهانی
