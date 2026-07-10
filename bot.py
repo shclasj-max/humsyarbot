@@ -55,7 +55,7 @@ from admin import (
     handle_admin_text, BROADCAST
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
-from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send
+from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS
 from profile import profile_callback
 from message_router import route_message
 from basic_science import basic_science_callback
@@ -182,15 +182,14 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── آیکون هر نوع فایل — جایگزین پیشوند متنی «PDF:» / «نمونه سوال:» قبلی؛
-#    آیکون خودش نوع فایل را می‌گوید، پس چشم مستقیم می‌رود سراغ اسم فایل ──
-_RESOURCE_ICONS = {
-    'pdf':   '📄',
-    'video': '🎬',
-    'pptx':  '📊',
-    'test':  '📝',
-    'voice': '🎧',
-    'audio': '🎧',
-}
+#    آیکون خودش نوع فایل را می‌گوید، پس چشم مستقیم می‌رود سراغ اسم فایل.
+#    FIX: به‌جای یک دیکشنری جداگانه و ناهماهنگ، مستقیماً از CONTENT_ICONS
+#    مرکزی (utils.py) خوانده می‌شود — همان چیزی که داشبورد، پنل محتوا و
+#    بخش «منابع علوم پایه» استفاده می‌کنند — تا آیکون هر نوع فایل در
+#    همه‌جای بات یکسان بماند (مثلاً ویدیو همیشه 🎥، ویس همیشه 🎙). فقط
+#    'audio' به‌عنوان alias برای 'voice' نگه داشته شده برای سازگاری با
+#    محتوای قدیمی که ممکن است این مقدار را داشته باشد.
+_RESOURCE_ICONS = {**CONTENT_ICONS, 'audio': CONTENT_ICONS.get('voice', '🎙')}
 _DEFAULT_RESOURCE_ICON = '📎'
 
 
@@ -228,7 +227,7 @@ async def _build_new_resources_text(new_items: list) -> str:
     title  = f"🆕 <b>{len(new_items)} منبع جدید اضافه شد</b>"
     footer = (
         "\n\n📚 مشاهده کامل ← بخش «منابع»\n"
-        "<i>⚙️ خاموش‌کردن: اعلان‌ها ← منابع جدید</i>"
+        "<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← منابع جدید</i>"
     )
 
     # ایمنی: اگر (به‌ندرت) تعداد منابع خیلی زیاد باشد و پیام از سقف
