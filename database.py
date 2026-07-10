@@ -1695,7 +1695,6 @@ class DB:
         }
 
 
-# instance جهانی
     # ══════════════════════════════════════════════════
     #  تنظیمات کلی ربات (bot_settings)
     # ══════════════════════════════════════════════════
@@ -2090,6 +2089,22 @@ class DB:
                     'failed_user_ids': [r['user_id'] for r in records],
                     'failed_targets_detailed': records,
                 }}
+            )
+        except Exception:
+            pass
+
+    async def notif_run_set_message(self, run_id: str, text: str, parse_mode: str = 'HTML'):
+        """
+        FIX حیاتی (بازیابی‌شده): ذخیره‌ی متن واقعی پیامی که در این
+        اجرا ارسال شده — تا دکمه‌ی «تلاش مجدد» در پنل ادمین بتواند
+        همان محتوای واقعی (نه یک پیام کلی جایگزین) را دوباره برای
+        کاربران fail‌شده بفرستد. bot.py این متد را در daily_question_job
+        و new_resources_notif_job صدا می‌زند.
+        """
+        try:
+            await self.notif_runs.update_one(
+                {'_id': ObjectId(run_id)},
+                {'$set': {'message_text': text, 'message_parse_mode': parse_mode}}
             )
         except Exception:
             pass
