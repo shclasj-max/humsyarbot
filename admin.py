@@ -143,6 +143,7 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             f"📊 آمار سیستم  ({s['users']} کاربر | {s.get('open_tickets', 0)} تیکت باز)",
             callback_data='admin:stats'
         )],
+        [InlineKeyboardButton("🧠 مرکز هوش ربات (هشدار و پیش‌بینی)", callback_data='admin:insights')],
         [
             InlineKeyboardButton("👥 کاربران و دسترسی‌ها", callback_data='admin:cat_users'),
             InlineKeyboardButton("📚 محتوای آموزشی",        callback_data='admin:cat_content'),
@@ -175,6 +176,7 @@ async def _show_cat_users(query, uid: int = None):
         [InlineKeyboardButton("🔍 جستجوی کاربر",       callback_data='admin:search_user')],
         [InlineKeyboardButton("📅 مدیریت ورودی‌ها",    callback_data='admin:intakes')],
         [InlineKeyboardButton("🎓 ادمین‌های محتوا",     callback_data='admin:content_admins')],
+        [InlineKeyboardButton("🚫 لیست مسدودها (بلک‌لیست)", callback_data='admin:blacklist_view')],
     ]
     if uid is None or uid == ADMIN_ID:
         keyboard.append([InlineKeyboardButton("🛡 سطوح دسترسی ادمین", callback_data='admin:roles')])
@@ -270,6 +272,7 @@ ROOT_ONLY_ACTIONS = {
     'set_log_group_admin', 'set_log_group_content',
     'export_excel', 'audit_log',
     'confirm_delete_user', 'delete_user',
+    'confirm_block_user', 'block_user', 'unblock_user', 'blacklist_view',  # FIX جدید: بلاک کامل
     'content_admins', 'ca_set', 'ca_remove',
     'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',
     'notif_defaults', 'notif_default_toggle',
@@ -369,6 +372,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == 'stats_notif':
         await _show_stats_notif(query)
+
+    elif action == 'insights':
+        await _show_admin_insights(query)
 
     # ══════════════════════════════════════════════
     # 🗂 منوهای دسته‌بندی‌شده پنل ادمین (لایه ناوبری جدید)
@@ -821,6 +827,59 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tags=['حذف_کاربر']
         )
         await _show_users_list(query, context, 0)
+    elif action == 'confirm_block_user':
+        target_uid = int(parts[2])
+        user = await db.get_user(target_uid)
+        name = user.get('name', '') if user else ''
+        await query.edit_message_text(
+            f"🚫 <b>بلاک کامل کاربر</b>\n\n"
+            f"مطمئنی می‌خواهی <b>{name}</b> (<code>{target_uid}</code>) را بلاک کنی؟\n\n"
+            "⚠️ برخلاف «حذف کامل»، این کاربر هم از دیتابیس حذف می‌شود و هم "
+            "دیگر با همین آیدی عددی <b>نمی‌تواند دوباره ثبت‌نام کند</b> — "
+            "مگر این‌که بعداً از بلک‌لیست خارجش کنی.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🚫 بله، بلاک کن", callback_data=f'admin:block_user:{target_uid}'),
+                InlineKeyboardButton("❌ لغو", callback_data=f'admin:user_detail:{target_uid}'),
+            ]]))
+    elif action == 'block_user':
+        target_uid = int(parts[2])
+        user = await db.get_user(target_uid)
+        name = user.get('name', '') if user else ''
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        await db.block_user(target_uid, blocked_by=uid, blocked_by_name=actor_name)
+        await safe_send(context.bot, target_uid, "🚫 حساب شما مسدود شد و امکان ثبت‌نام مجدد ندارید.")
+        await query.answer(f"🚫 {name} بلاک شد!", show_alert=True)
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "بلاک کامل کاربر", module='Users', severity='HIGH',
+            actor_role=actor_role,
+            target_id=str(target_uid), target_type='user', target_label=name,
+            tags=['بلاک_کامل']
+        )
+        await _show_users_list(query, context, 0)
+    elif action == 'blacklist_view':
+        await _show_blacklist(query)
+    elif action == 'unblock_user':
+        target_uid = int(parts[2])
+        ok = await db.unblock_user(target_uid)
+        if ok:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+            actor_role = await db.get_actor_role_label(uid)
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                "رفع بلاک کاربر", module='Users', severity='WARNING',
+                actor_role=actor_role,
+                target_id=str(target_uid), target_type='user',
+                tags=['رفع_بلاک']
+            )
+            await query.answer("✅ از بلک‌لیست خارج شد.", show_alert=True)
+        else:
+            await query.answer("این آیدی در بلک‌لیست نبود.", show_alert=True)
+        await _show_blacklist(query)
     elif action == 'pending':
         await _show_pending(query)
     elif action == 'search_user':
@@ -1692,25 +1751,91 @@ def _mini_bar(value: int, max_value: int, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+async def _show_admin_insights(query):
+    """
+    🧠 مرکز هوش ربات — جمع‌بندی هوشمندِ rule-based روی داده‌های واقعی:
+    هشدارهای قابل‌اقدام (تأخیر در تأیید/تیکت، سوالات پرخطا، ادمین
+    غیرفعال، محتوای جاافتاده) + روند و پیش‌بینی ساده‌ی رشد هفته‌ی بعد.
+    """
+    d = await db.admin_insights()
+
+    wc = d['week_counts']  # [این‌هفته, ۱هفته‌پیش, ۲هفته‌پیش, ۳هفته‌پیش]
+    wmax = max(wc or [1]) or 1
+    trend_lines = "\n".join(
+        f"  {label}  {_mini_bar(c, wmax, 10)}  <b>{c}</b>"
+        for label, c in zip(['این هفته  ', '۱ هفته پیش', '۲ هفته پیش', '۳ هفته پیش'], wc)
+    )
+
+    if d['alerts']:
+        alert_lines = "\n\n".join(
+            f"{a['icon']} <b>{a['title']}</b>" + (f"\n   └ {a['detail']}" if a['detail'] else '')
+            for a in d['alerts']
+        )
+    else:
+        alert_lines = "✅ در حال حاضر هیچ هشدار فعالی وجود ندارد — همه‌چیز مرتب است."
+
+    medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
+    if d.get('top_admins'):
+        top_admin_lines = "\n".join(
+            f"  {medals[i]} {a['name']} ({a['role']}) — {a['count']} کنش"
+            for i, a in enumerate(d['top_admins'])
+        )
+    else:
+        top_admin_lines = "  — این هفته هیچ فعالیتی از ادمین‌های فرعی ثبت نشده"
+
+    text = (
+        "🧠 <b>مرکز هوش ربات</b>\n━━━━━━━━━━━━━━━━\n"
+        "تحلیل خودکار وضعیت ربات بر اساس داده‌های واقعی؛ بدون نیاز به گشتن دستی بین صفحات.\n\n"
+        "🚨 <b>هشدارهای قابل‌اقدام</b>\n"
+        f"{alert_lines}\n\n"
+        "👑 <b>پرکارترین ادمین‌های فرعی (۷ روز اخیر)</b>\n"
+        f"{top_admin_lines}\n\n"
+        "📈 <b>روند ثبت‌نام ۴ هفته اخیر</b>\n"
+        f"{trend_lines}\n\n"
+        f"🔮 <b>پیش‌بینی هفته‌ی آینده: حدود <u>{d['forecast_next_week']}</u> ثبت‌نام جدید</b>\n"
+        f"  (بر مبنای میانگین {d['prior_avg']} در هفته‌های قبل + روند اخیر)"
+    )
+
+    buttons = []
+    for a in d['alerts']:
+        buttons.append([InlineKeyboardButton(f"{a['icon']} رسیدگی: {a['title'][:28]}", callback_data=a['action'])])
+    buttons.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data='admin:insights')])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
+
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(buttons))
+
+
 async def _show_stats(query):
     """
     صفحه‌ی خلاصه‌ی آمار — یک نگاه کلی سریع به کل ربات + دکمه‌های ورود
     به هر بخش برای جزئیات کامل. اعداد این صفحه تقریبی و برای مرور
     سریع‌اند؛ عدد دقیق و کامل هر بخش در زیرصفحه‌ی مخصوص خودش است.
     """
-    s = await db.global_stats()
+    s, pulse = await asyncio.gather(db.global_stats(), db.activity_pulse())
+
+    peak_txt = "—"
+    if pulse.get('peak_hour') is not None:
+        h = int(pulse['peak_hour'])
+        peak_txt = f"ساعت {h:02d}:۰۰–{(h+1)%24:02d}:۰۰  ({pulse['peak_hour_count']} کنش)"
+
     text = (
         "📊 <b>آمار سیستم — نمای کلی</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"👥 کاربران تأیید: <b>{s['users']}</b>  |  ⏳ منتظر تأیید: <b>{s['pending']}</b>\n"
-        f"🆕 جدید این هفته: <b>{s.get('new_users_week', 0)}</b>\n\n"
+        f"🆕 جدید این هفته: <b>{s.get('new_users_week', 0)}</b>  |  "
+        f"🟢 آنلاین اکنون: <b>{s.get('online_30m', 0)}</b>\n\n"
         f"🔬 محتوای علوم پایه: <b>{s.get('bs_content', 0)}</b> فایل در <b>{s.get('bs_lessons', 0)}</b> درس\n"
         f"📚 رفرنس‌ها: <b>{s.get('ref_books', 0)}</b> کتاب در <b>{s.get('ref_subjects', 0)}</b> درس\n"
         f"🧪 بانک سوال: <b>{s['questions']}</b> سوال تأییدشده\n"
+        f"⬇️ مجموع دانلود کل ربات: <b>{s.get('total_downloads', 0)}</b>\n"
         f"🎫 تیکت‌های باز: <b>{s.get('open_tickets', 0)}</b>\n\n"
+        "⚡ <b>نبض فعالیت (۷ روز اخیر)</b>\n"
+        f"  🔥 مجموع کنش‌های ثبت‌شده: <b>{pulse.get('total_actions_week', 0)}</b>\n"
+        f"  ⏰ پرترافیک‌ترین ساعت: <b>{peak_txt}</b>\n\n"
         "برای آمار کامل و جزئی هر بخش، از دکمه‌های زیر استفاده کنید 👇"
     )
     await query.edit_message_text(text, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧠 مرکز هوش ربات (هشدار و پیش‌بینی)", callback_data='admin:insights')],
             [
                 InlineKeyboardButton("👥 آمار کاربران", callback_data='admin:stats_users'),
                 InlineKeyboardButton("📚 آمار محتوا",   callback_data='admin:stats_content'),
@@ -1749,16 +1874,27 @@ async def _show_stats_users(query):
         f"  • {role_label.get(r, r)}: <b>{c}</b>" for r, c in d['sub_admin_roles'].items()
     ) or "  —"
 
+    medals = ['🥇', '🥈', '🥉']
+    top_lines = "\n".join(
+        f"  {medals[i]} {u.get('name', 'کاربر')} — "
+        f"{int(u.get('correct_answers', 0) or 0)}/{int(u.get('total_answers', 0) or 0)}"
+        for i, u in enumerate(d.get('top_users', []))
+    ) or "  — هنوز فعالیتی ثبت نشده"
+
+    engagement_rate = round(d['active_week'] / d['total_approved'] * 100, 1) if d['total_approved'] else 0
+
     text = (
         "👥 <b>آمار جزئی کاربران</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"✅ تأییدشده: <b>{d['total_approved']}</b>   ⏳ منتظر تأیید: <b>{d['total_pending']}</b>\n"
         f"🆕 امروز: <b>{d['new_today']}</b>  |  ۷ روز اخیر: <b>{d['new_week']}</b>  |  ۳۰ روز اخیر: <b>{d['new_month']}</b>\n\n"
         f"📈 <b>روند ثبت‌نام ۷ روز اخیر:</b>\n{growth_lines}\n\n"
         f"🟢 فعال امروز: <b>{d['active_today']}</b>   🟢 فعال این هفته: <b>{d['active_week']}</b>\n"
+        f"💡 <b>نرخ مشارکت هفتگی: {engagement_rate}٪</b> از کل کاربران\n"
         f"😴 غیرفعال ۱۴+ روز: <b>{d['inactive_14d']}</b>   😴 غیرفعال ۳۰+ روز: <b>{d['inactive_30d']}</b>\n"
         f"🚫 بلاک‌کرده ربات را: <b>{d['blocked_bot']}</b>\n\n"
         f"🏷 <b>گروه:</b> گروه ۱: <b>{d['group1']}</b>  |  گروه ۲: <b>{d['group2']}</b>  |  بدون گروه: <b>{d['group_unset']}</b>\n\n"
         f"📅 <b>تفکیک بر اساس ورودی:</b>\n{intake_lines}\n\n"
+        f"🏆 <b>برترین کاربران:</b>\n{top_lines}\n\n"
         f"👮 <b>نقش‌های فرعی ادمین:</b>\n{role_lines}\n"
         f"🎓 ادمین محتوای کلی: <b>{d['content_admins']}</b>"
     )
@@ -1782,11 +1918,16 @@ async def _show_stats_content(query):
     top_qbank_lines = "\n".join(
         f"  • {lesson}: <b>{cnt}</b> فایل" for lesson, cnt in d['top_qbank_lessons']
     ) or "  —"
+    top_downloaded_lines = "\n".join(
+        f"  {i+1}. {name} — <b>{cnt}</b> دانلود"
+        for i, (name, cnt) in enumerate(d.get('top_downloaded_qbank', []))
+    ) or "  — هنوز دانلودی ثبت نشده"
 
     total_downloads = d['bs_downloads'] + d['ref_downloads'] + d['qbank_downloads']
 
     text = (
         "📚 <b>آمار جزئی محتوا</b>\n━━━━━━━━━━━━━━━━\n\n"
+        f"🆕 منابع جدید این هفته: <b>{d.get('new_this_week', 0)}</b>\n\n"
         f"🔬 <b>علوم پایه</b> — {d['bs_lessons']} درس، {d['bs_sessions']} جلسه، "
         f"{d['bs_total_content']} فایل\n{bs_type_lines}\n\n"
         f"📚 <b>رفرنس‌ها</b> — {d['ref_subjects']} درس، {d['ref_books']} کتاب، "
@@ -1794,6 +1935,7 @@ async def _show_stats_content(query):
         f"❓ سوالات متداول (FAQ): <b>{d['faq_count']}</b>\n\n"
         f"🧪 <b>بانک سوال</b> — <b>{d['qbank_files']}</b> فایل\n"
         f"پرفایل‌ترین درس‌ها:\n{top_qbank_lines}\n\n"
+        f"🏆 <b>پردانلودترین فایل‌های بانک سوال:</b>\n{top_downloaded_lines}\n\n"
         f"⬇️ <b>مجموع دانلود کل ربات: {total_downloads}</b>\n"
         f"  • علوم پایه: {d['bs_downloads']}  |  رفرنس: {d['ref_downloads']}  |  بانک سوال: {d['qbank_downloads']}"
     )
@@ -1808,11 +1950,15 @@ async def _show_stats_questions(query):
     """آمار جزئی بانک سوال: دقت پاسخ‌دهی، پرسوال‌ترین درس‌ها، سخت‌ترین سوالات"""
     d = await db.stats_dashboard_questions()
 
+    diff_max = max(d['by_difficulty'].values() or [1])
     diff_lines = "\n".join(
-        f"  • {label}: <b>{cnt}</b>" for label, cnt in d['by_difficulty'].items()
+        f"  {label}  {_mini_bar(cnt, diff_max, 8)}  <b>{cnt}</b>"
+        for label, cnt in d['by_difficulty'].items()
     ) or "  —"
+    lesson_max = max([c for _, c in d['top_lessons']] or [1])
     top_lesson_lines = "\n".join(
-        f"  • {lesson}: <b>{cnt}</b> سوال" for lesson, cnt in d['top_lessons']
+        f"  {_mini_bar(cnt, lesson_max, 8)}  <b>{cnt}</b>  {lesson}"
+        for lesson, cnt in d['top_lessons']
     ) or "  —"
 
     if d['hardest_questions']:
@@ -1827,7 +1973,8 @@ async def _show_stats_questions(query):
 
     text = (
         "🧪 <b>آمار جزئی بانک سوال</b>\n━━━━━━━━━━━━━━━━\n\n"
-        f"✅ تأییدشده: <b>{d['approved']}</b>   ⏳ در انتظار بررسی: <b>{d['pending']}</b>\n\n"
+        f"✅ تأییدشده: <b>{d['approved']}</b>   ⏳ در انتظار بررسی: <b>{d['pending']}</b>\n"
+        f"  └ 🤖 تولید ربات: <b>{d.get('by_bot', 0)}</b>  |  ✍️ کاربران: <b>{d.get('by_users', 0)}</b>\n\n"
         f"📊 <b>تفکیک سطح دشواری:</b>\n{diff_lines}\n\n"
         f"📖 <b>پرسوال‌ترین درس‌ها:</b>\n{top_lesson_lines}\n\n"
         f"🎯 <b>دقت کلی پاسخ‌دهی کاربران: {d['accuracy']}٪</b>\n"
@@ -1845,11 +1992,18 @@ async def _show_stats_tickets(query):
     """آمار جزئی پشتیبانی"""
     d = await db.stats_dashboard_tickets()
     close_rate = round(d['closed'] / d['total'] * 100, 1) if d['total'] else 0
+    if d.get('avg_resolution_h') is not None:
+        h = d['avg_resolution_h']
+        res_txt = f"<b>{h}</b> ساعت" if h < 48 else f"<b>{round(h/24, 1)}</b> روز"
+        res_line = f"⏱ میانگین زمان رسیدگی (۳۰ روز اخیر): {res_txt}  (بر مبنای {d['resolved_sample']} تیکت)"
+    else:
+        res_line = "⏱ میانگین زمان رسیدگی: داده کافی نیست"
     text = (
         "🎫 <b>آمار جزئی تیکت‌های پشتیبانی</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"📂 باز: <b>{d['open']}</b>   ✅ بسته‌شده: <b>{d['closed']}</b>   "
         f"جمع کل: <b>{d['total']}</b>\n"
-        f"📈 نرخ رسیدگی کلی: <b>{close_rate}٪</b>\n\n"
+        f"📈 نرخ رسیدگی کلی: <b>{close_rate}٪</b>\n"
+        f"{res_line}\n\n"
         f"🆕 تیکت جدید این هفته: <b>{d['new_week']}</b>\n"
         f"🆕 تیکت جدید این ماه: <b>{d['new_month']}</b>\n"
         f"✅ بسته‌شده در ۷ روز اخیر: <b>{d['closed_week']}</b>"
@@ -2005,6 +2159,7 @@ async def _show_user_detail(query, context, target_uid: int):
     else:
         keyboard.append([InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{target_uid}'), InlineKeyboardButton("❌ رد", callback_data=f'admin:reject:{target_uid}')])
     keyboard.append([InlineKeyboardButton("🗑 حذف کامل", callback_data=f'admin:confirm_delete_user:{target_uid}')])
+    keyboard.append([InlineKeyboardButton("🚫 بلاک کامل (حذف + جلوگیری از ثبت‌نام مجدد)", callback_data=f'admin:confirm_block_user:{target_uid}')])
     back_page = context.user_data.get('users_page', 0)
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f'admin:users:{back_page}')])
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2023,6 +2178,35 @@ async def _show_pending(query):
         keyboard.append([InlineKeyboardButton("✅ تأیید", callback_data=f'admin:approve:{uid}'), InlineKeyboardButton("❌ رد", callback_data=f'admin:reject:{uid}')])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_users')])
     await query.edit_message_text(f"⏳ <b>کاربران در انتظار</b> — {len(pending)} نفر", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _show_blacklist(query):
+    """🚫 لیست کاربران بلاک‌شده — با دکمه‌ی رفع بلاک برای هرکدام"""
+    entries = await db.get_blacklist()
+    if not entries:
+        await query.edit_message_text(
+            "🚫 <b>بلک‌لیست</b>\n━━━━━━━━━━━━━━━━\n\nهیچ کاربری بلاک نشده است.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_users')]]))
+        return
+    keyboard = []
+    lines = []
+    for e in entries[:30]:
+        target_uid = e['_id']
+        reason = e.get('reason', '') or 'بدون دلیل ثبت‌شده'
+        by     = e.get('blocked_by_name', '')
+        when   = (e.get('blocked_at', '') or '')[:10]
+        lines.append(f"🆔 <code>{target_uid}</code> — {when}" + (f" — توسط {by}" if by else ''))
+        keyboard.append([
+            InlineKeyboardButton(f"↩️ رفع بلاک {target_uid}", callback_data=f'admin:unblock_user:{target_uid}')
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_users')])
+    text = (
+        f"🚫 <b>بلک‌لیست</b> — {len(entries)} نفر\n━━━━━━━━━━━━━━━━\n\n"
+        + "\n".join(lines) +
+        "\n\n<i>این کاربران با همین آیدی عددی نمی‌توانند دوباره ثبت‌نام کنند.</i>"
+    )
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _pending_questions(query):
