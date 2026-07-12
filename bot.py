@@ -56,6 +56,8 @@ from admin import (
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
 from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS
+from subscription import subscription_callback, screenshot_handler as sub_screenshot_handler
+from subscription_admin import subscription_admin_callback
 from profile import profile_callback
 from message_router import route_message
 from basic_science import basic_science_callback
@@ -299,6 +301,45 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"new_resources_notif_job error: {e}")
 
 
+async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX جدید: جاب روزانه‌ی سیستم اشتراک —
+      ۱) اشتراک‌هایی که تاریخشون گذشته را expired می‌کند و به کاربر خبر می‌دهد
+      ۲) یادآوری پلکانی: ۳ روز قبل و ۱ روز قبل (هرکدام فقط یک‌بار،
+         دقیقاً مثل الگوی یادآوری امتحان)، همراه با دکمه‌ی «تمدید سریع»
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    renew_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تمدید کن", callback_data='sub:back')]])
+    try:
+        expired = await db.sub_expire_due()
+        for s in expired:
+            await safe_send(
+                context.bot, s['_id'],
+                "⌛ <b>اشتراکت تموم شد</b>\n\n"
+                "برای تمدید، دوباره از بخش «📚 منابع» یا «🧪 بانک سوال» اقدام کن.",
+                parse_mode='HTML', reply_markup=renew_kb
+            )
+        if expired:
+            logger.info(f"⌛ اشتراک {len(expired)} کاربر منقضی شد")
+
+        for days_before, flag in ((3, 'reminder_3d_sent'), (1, 'reminder_1d_sent')):
+            expiring = await db.sub_expiring_soon(days_before=days_before, flag_field=flag)
+            for s in expiring:
+                days_left = max(0, (datetime.fromisoformat(s['end_date']) - datetime.now()).days)
+                icon = "🔴" if days_before == 1 else "⏳"
+                await safe_send(
+                    context.bot, s['_id'],
+                    f"{icon} <b>اشتراکت داره تموم می‌شه!</b>\n\n"
+                    f"{days_left} روز دیگه مونده. اگه می‌خوای وقفه نیفته، از حالا تمدید کن.",
+                    parse_mode='HTML', reply_markup=renew_kb
+                )
+                await db.sub_mark_reminder_sent(s['_id'], flag)
+            if expiring:
+                logger.info(f"⏳ یادآوری {days_before}روزه برای {len(expiring)} کاربر ارسال شد")
+    except Exception as e:
+        logger.error(f"subscription_expiry_job error: {e}")
+
+
 async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
     """
     FIX جدید: بکاپ خودکار روزانه. این job هر ساعت اجرا می‌شود و
@@ -447,6 +488,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # ۰. FIX جدید: اسکرین‌شات رسید پرداخت اشتراک
+    if context.user_data.get('sub_mode') == 'awaiting_screenshot' and update.message.photo:
+        return await sub_screenshot_handler(update, context)
 
     # ۱. بکاپ restore
     if uid == ADMIN_ID and context.user_data.get('backup_mode') == 'waiting_restore':
@@ -981,6 +1026,9 @@ def build_application() -> Application:
         # CREATING_Q قابل‌دسترس بود؛ چون آن state حذف شد، اینجا
         # standalone ثبت می‌شود تا فلوی ساخت سوال دست‌نخورده بماند.
         (handle_difficulty_choice, r'^qd:'),
+        # FIX جدید: سیستم اشتراک
+        (subscription_callback,       r'^sub:'),
+        (subscription_admin_callback, r'^suba:'),
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
@@ -1034,6 +1082,12 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"migrate_mark_existing_ref_files_notified error: {e}")
 
+    # FIX جدید: افزودن یک‌باره‌ی سؤالات FAQ اشتراک/کپی‌رایت
+    try:
+        await db.seed_subscription_copyright_faqs()
+    except Exception as e:
+        logger.error(f"seed_subscription_copyright_faqs error: {e}")
+
     # FIX: گارد ایمن — اگر JobQueue نصب نباشد، ربات کرش نکند
     if application.job_queue is not None:
         # یادآوری امتحان — ۰۸:۰۰ تهران (04:30 UTC)
@@ -1075,6 +1129,14 @@ async def post_init(application: Application):
             interval=3600,
             first=180,
             name='auto_backup'
+        )
+
+        # FIX جدید: چک روزانه‌ی انقضای اشتراک + یادآوری ۳ روز قبل —
+        # ۰۹:۱۵ تهران (05:45 UTC)
+        application.job_queue.run_daily(
+            subscription_expiry_job,
+            time=dtime(hour=5, minute=45, tzinfo=timezone.utc),
+            name='subscription_expiry'
         )
 
         logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
