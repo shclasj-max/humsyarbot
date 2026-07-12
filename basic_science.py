@@ -15,10 +15,17 @@ logger = logging.getLogger(__name__)
 
 async def basic_science_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
-    await query.answer()
     data   = query.data
     parts  = data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
+
+    # FIX جدید: دفاع لایه‌دوم — حتی اگه از دکمه‌ی قدیمیِ توی چت وارد بشه
+    if action != 'main_admin':
+        from subscription import has_access
+        if not await has_access(update.effective_user.id):
+            await query.answer("🔒 اول باید اشتراک فعال کنی — از «📚 منابع» شروع کن.", show_alert=True)
+            return
+    await query.answer()
 
     if action == 'main':
         context.user_data['bs_from_admin'] = False
@@ -197,23 +204,32 @@ async def _download_content(query, content_id: str, uid: int):
     report_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("⚠️ گزارش ایراد", callback_data=f'report:resource:{content_id}')
     ]])
+    # FIX جدید: محافظت کپی‌رایت — این پرچم دکمه‌ی فوروارد/ذخیره را
+    # در اپ رسمی تلگرام برای گیرنده غیرفعال می‌کند (کامل ضدگلوله
+    # نیست: اسکرین‌شات را نمی‌گیرد، ولی فوروارد ساده را می‌گیرد)
+    # قابل روشن/خاموش از پنل ادمین → 💳 مدیریت اشتراک
+    protect = await db.get_setting('protect_content_enabled', True)
     try:
         if ctype == 'video':
             await query.message.reply_video(
-                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
+                item['file_id'], caption=caption, parse_mode='HTML',
+                reply_markup=report_kb, protect_content=protect
             )
         elif ctype == 'voice':
             await query.message.reply_voice(
-                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
+                item['file_id'], caption=caption, parse_mode='HTML',
+                reply_markup=report_kb, protect_content=protect
             )
         else:
             await query.message.reply_document(
-                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
+                item['file_id'], caption=caption, parse_mode='HTML',
+                reply_markup=report_kb, protect_content=protect
             )
     except Exception:
         try:
             await query.message.reply_document(
-                item['file_id'], caption=caption, parse_mode='HTML', reply_markup=report_kb
+                item['file_id'], caption=caption, parse_mode='HTML',
+                reply_markup=report_kb, protect_content=protect
             )
         except Exception:
             await query.answer("❌ خطا در ارسال فایل!", show_alert=True)
