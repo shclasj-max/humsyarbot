@@ -251,27 +251,30 @@ async def _build_new_resources_text(new_items: list) -> str:
     return f"{title}\n\n<blockquote>{quote_body}</blockquote>{footer}"
 
 
-async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
+async def _run_new_resources_notif(bot, force: bool = False) -> dict:
     """
-    FIX جدید: نوتیف دسته‌ای منابع جدید — این job هر ساعت اجرا می‌شود
-    اما فقط وقتی واقعاً کار می‌کند که از آخرین ارسال، فاصله‌ی تعیین‌شده
-    در تنظیمات (پیش‌فرض ۲۴ ساعت، قابل تغییر به ۴۸/۷۲ از پنل ادمین)
-    گذشته باشد. این از ارسال تکراری/ناقص جلوگیری می‌کند.
+    FIX جدید: هسته‌ی مشترک نوتیف منابع جدید — هم توسط جاب ساعتی و هم
+    توسط دکمه‌ی «🚀 ارسال فوری» در پنل ادمین صدا زده می‌شود.
+    force=True یعنی از چک فاصله‌ی زمانی (۲۴/۴۸/۷۲ ساعت) رد شو و همین
+    الان بفرست، حتی اگه هنوز وقتش نشده.
+    خروجی یک dict وضعیت برمی‌گرداند تا هم لاگ و هم دکمه‌ی دستی بتوانند
+    نتیجه را نشان بدهند (چند نفر، چند مورد، یا چرا ارسال نشد).
     """
     try:
         interval_hours = await db.get_setting('resource_notif_interval_hours', 24)
         last_sent_str  = await db.get_setting('resource_notif_last_sent', None)
 
-        if last_sent_str:
+        if not force and last_sent_str:
             last_sent = datetime.fromisoformat(last_sent_str)
             elapsed_hours = (datetime.now() - last_sent).total_seconds() / 3600
             if elapsed_hours < interval_hours:
-                return  # هنوز وقتش نشده
+                return {'sent': False, 'reason': 'not_due', 'elapsed_hours': round(elapsed_hours, 1),
+                        'interval_hours': interval_hours}
 
         new_items = await db.get_unnotified_resources()
         if not new_items:
             # حتی اگه چیزی نبود، last_sent را آپدیت نمی‌کنیم — منتظر محتوای واقعی می‌مانیم
-            return
+            return {'sent': False, 'reason': 'no_items'}
 
         run_id = await db.notif_run_start('new_resources')
         text   = await _build_new_resources_text(new_items)
@@ -280,7 +283,7 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
         await db.notif_run_set_message(run_id, text)
         sent, failed, failed_ids = 0, 0, []
         for u in users:
-            ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
+            ok = await safe_send(bot, u['user_id'], text, parse_mode='HTML')
             if ok:
                 sent += 1
             else:
@@ -293,12 +296,25 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
         await db.mark_resources_notified(bs_ids)
         await db.mark_ref_files_notified(ref_ids)
         await db.set_setting('resource_notif_last_sent', datetime.now().isoformat())
+        await db.set_setting('resource_notif_last_error', None)
         await db.notif_run_finish(run_id, sent, failed, len(users))
         if failed_ids:
             await db.notif_run_add_failed(run_id, failed_ids)
         logger.info(f"📚 نوتیف منابع جدید: {len(new_items)} مورد به {sent} نفر ارسال شد")
+        return {'sent': True, 'items': len(new_items), 'users_sent': sent, 'users_failed': failed}
     except Exception as e:
         logger.error(f"new_resources_notif_job error: {e}")
+        try:
+            await db.set_setting('resource_notif_last_error',
+                                  f"{datetime.now().isoformat()} | {e}")
+        except Exception:
+            pass
+        return {'sent': False, 'reason': 'error', 'error': str(e)}
+
+
+async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
+    """FIX جدید: wrapper سبک برای job زمان‌بندی‌شده — هسته‌ی اصلی به _run_new_resources_notif منتقل شد"""
+    await _run_new_resources_notif(context.bot, force=False)
 
 
 async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
