@@ -60,6 +60,12 @@ class DB:
         self.blacklist    = _db['blacklist']
         self.admin_roles  = _db['admin_roles']      # FIX جدید: سطوح دسترسی چندگانه ادمین
         self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
+        # FIX جدید: سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای
+        # در انتظار بررسی، و کدهای تخفیف
+        self.sub_plans     = _db['sub_plans']
+        self.subscriptions = _db['subscriptions']
+        self.sub_payments  = _db['sub_payments']
+        self.discount_codes = _db['discount_codes']
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها
@@ -480,26 +486,46 @@ class DB:
         await self.log(uid, 'bs_download', {'content_id': cid})
 
     async def search_resources(self, query_text: str):
+        """
+        FIX جدید: قبلاً هر آیتم فقط '_session' (شامل topic/teacher) داشت
+        ولی اسم درس (lesson name) روی خود session نیست، روی bs_lessons
+        است — و search.py با فرض غلط r.get('lesson','') می‌خواند که
+        همیشه خالی برمی‌گشت. حالا '_lesson' هم (با کش ساده در همین
+        اجرا، چون چند session می‌توانند lesson_id مشترک داشته باشند)
+        به هر نتیجه اضافه می‌شود.
+        """
         import re
         regex = {'$regex': re.escape(query_text), '$options': 'i'}
         sessions = await self.bs_sessions.find(
             {'$or': [{'topic': regex}, {'teacher': regex}]}
         ).to_list(20)
         result = []
+        lesson_cache: dict = {}
+
+        async def _lesson_for(lesson_id: str) -> dict:
+            if not lesson_id:
+                return {}
+            if lesson_id not in lesson_cache:
+                lesson_cache[lesson_id] = await self.bs_get_lesson(lesson_id) or {}
+            return lesson_cache[lesson_id]
+
         for s in sessions:
             sid = str(s['_id'])
             contents = await self.bs_content.find({'session_id': sid}).to_list(10)
             for c in contents:
                 c['_session'] = s
+                c['_lesson']  = await _lesson_for(s.get('lesson_id', ''))
                 result.append(c)
         direct = await self.bs_content.find({'description': regex}).to_list(10)
         existing_ids = {str(r['_id']) for r in result}
         for c in direct:
             if str(c['_id']) not in existing_ids:
                 try:
-                    c['_session'] = await self.bs_get_session(c.get('session_id', '')) or {}
+                    sess = await self.bs_get_session(c.get('session_id', '')) or {}
                 except Exception:
-                    c['_session'] = {}
+                    sess = {}
+                c['_session'] = sess
+                c['_lesson']  = await _lesson_for(sess.get('lesson_id', ''))
                 result.append(c)
         return result[:15]
 
@@ -1130,6 +1156,28 @@ class DB:
         try:
             await self.faq.delete_one({'_id': ObjectId(fid)})
         except Exception: pass
+
+    async def seed_subscription_copyright_faqs(self):
+        """
+        FIX جدید: چون FAQ این ربات از دیتابیس خوانده می‌شود (نه
+        DEFAULT_FAQS کد)، سؤالات «خرید اشتراک» و «قوانین کپی‌رایت»
+        باید مستقیماً در دیتابیس درج/به‌روزرسانی شوند تا روی نصب فعلی
+        هم دیده شوند. با upsert-by-question اجرا می‌شود (نه فقط
+        یک‌بار) تا هر بار متن قوانین در کد عوض شد، همان دیپلوی بعدی
+        روی دیتابیس واقعی هم به‌روزرسانی شود — بدون بازنویسی سؤالات
+        دیگری که ادمین شخصاً به بقیه‌ی دسته‌ها اضافه کرده.
+        """
+        from faq import DEFAULT_FAQS
+        for cat in ('💳 خرید اشتراک', '⚖️ قوانین و کپی‌رایت'):
+            for question, answer in DEFAULT_FAQS.get(cat, []):
+                existing = await self.faq.find_one({'question': question})
+                if existing:
+                    await self.faq.update_one(
+                        {'_id': existing['_id']}, {'$set': {'answer': answer, 'category': cat}}
+                    )
+                else:
+                    await self.faq_add(question, answer, cat)
+        logger.info("❓ سؤالات FAQ اشتراک/کپی‌رایت همگام‌سازی شدند")
 
     async def faq_get_categories(self):
         return await self.faq.distinct('category') or []
@@ -2394,6 +2442,293 @@ class DB:
         from datetime import datetime
         today_start = datetime.now().strftime('%Y-%m-%dT00:00:00')
         return await self.users.count_documents({'last_active': {'$gte': today_start}})
+
+    # ══════════════════════════════════════════════════════════════
+    #  💳 سیستم اشتراک — FIX جدید
+    #  پلن‌ها (چندتایی) + وضعیت هر کاربر + صف رسیدها + کدهای تخفیف
+    # ══════════════════════════════════════════════════════════════
+
+    # ── پلن‌ها ──
+    async def sub_plan_add(self, name: str, days: int, price: int) -> str:
+        count = await self.sub_plans.count_documents({})
+        r = await self.sub_plans.insert_one({
+            'name': name, 'days': days, 'price': price,
+            'active': True, 'order': count,
+            'created_at': datetime.now().isoformat(),
+        })
+        return str(r.inserted_id)
+
+    async def sub_plan_list(self, only_active: bool = False) -> list:
+        q = {'active': True} if only_active else {}
+        return await self.sub_plans.find(q).sort('order', 1).to_list(50)
+
+    async def sub_plan_get(self, plan_id: str):
+        try:
+            return await self.sub_plans.find_one({'_id': ObjectId(plan_id)})
+        except Exception:
+            return None
+
+    async def sub_plan_update(self, plan_id: str, data: dict) -> bool:
+        try:
+            await self.sub_plans.update_one({'_id': ObjectId(plan_id)}, {'$set': data})
+            return True
+        except Exception:
+            return False
+
+    async def sub_plan_toggle(self, plan_id: str) -> bool:
+        p = await self.sub_plan_get(plan_id)
+        if not p:
+            return False
+        await self.sub_plans.update_one(
+            {'_id': ObjectId(plan_id)}, {'$set': {'active': not p.get('active', True)}}
+        )
+        return True
+
+    async def sub_plan_delete(self, plan_id: str):
+        try:
+            await self.sub_plans.delete_one({'_id': ObjectId(plan_id)})
+        except Exception:
+            pass
+
+    # ── کدهای تخفیف ──
+    async def discount_add(self, code: str, percent: int, max_uses: int = 0,
+                            expires_at: str = None, created_by: int = 0) -> bool:
+        code = code.strip().upper()
+        if await self.discount_codes.find_one({'code': code}):
+            return False
+        await self.discount_codes.insert_one({
+            'code': code, 'percent': max(1, min(100, percent)),
+            'max_uses': max_uses, 'used_count': 0,
+            'expires_at': expires_at, 'active': True,
+            'created_by': created_by, 'created_at': datetime.now().isoformat(),
+        })
+        return True
+
+    async def discount_list(self) -> list:
+        return await self.discount_codes.find({}).sort('created_at', -1).to_list(100)
+
+    async def discount_toggle(self, code: str) -> bool:
+        d = await self.discount_codes.find_one({'code': code.strip().upper()})
+        if not d:
+            return False
+        await self.discount_codes.update_one(
+            {'_id': d['_id']}, {'$set': {'active': not d.get('active', True)}}
+        )
+        return True
+
+    async def discount_delete(self, code: str) -> bool:
+        result = await self.discount_codes.delete_one({'code': code.strip().upper()})
+        return result.deleted_count > 0
+
+    async def discount_validate(self, code: str) -> dict:
+        """
+        اعتبارسنجی کد تخفیف — کد را مصرف نمی‌کند، فقط بررسی می‌کند.
+        خروجی: {'ok': True, 'percent': N} یا {'ok': False, 'reason': '...'}
+        """
+        d = await self.discount_codes.find_one({'code': code.strip().upper()})
+        if not d or not d.get('active'):
+            return {'ok': False, 'reason': 'کد تخفیف معتبر نیست.'}
+        if d.get('expires_at') and d['expires_at'] < datetime.now().isoformat():
+            return {'ok': False, 'reason': 'این کد تخفیف منقضی شده.'}
+        if d.get('max_uses', 0) > 0 and d.get('used_count', 0) >= d['max_uses']:
+            return {'ok': False, 'reason': 'سقف استفاده از این کد تمام شده.'}
+        return {'ok': True, 'percent': d['percent']}
+
+    async def discount_consume(self, code: str):
+        await self.discount_codes.update_one(
+            {'code': code.strip().upper()}, {'$inc': {'used_count': 1}}
+        )
+
+    # ── وضعیت اشتراک هر کاربر (یک سند در هر کاربر، با _id = user_id) ──
+    async def sub_get(self, user_id: int) -> dict:
+        return await self.subscriptions.find_one({'_id': user_id})
+
+    async def sub_is_active(self, user_id: int) -> bool:
+        s = await self.sub_get(user_id)
+        if not s or s.get('status') != 'active':
+            return False
+        return s.get('end_date', '') >= datetime.now().isoformat()
+
+    async def sub_days_left(self, user_id: int) -> int:
+        s = await self.sub_get(user_id)
+        if not s or s.get('status') != 'active' or not s.get('end_date'):
+            return 0
+        try:
+            end = datetime.fromisoformat(s['end_date'])
+            return max(0, (end - datetime.now()).days)
+        except Exception:
+            return 0
+
+    async def sub_activate(self, user_id: int, days: int, plan_name: str,
+                            source: str = 'payment', granted_by: int = 0,
+                            extend: bool = False):
+        """
+        فعال‌سازی/تمدید اشتراک. اگر extend=True و اشتراک فعلی هنوز فعاله،
+        روزها از تاریخ پایان فعلی جمع می‌شوند نه از الان (تا تمدید،
+        روزهای باقی‌مانده را از بین نبرد).
+        """
+        now = datetime.now()
+        s = await self.sub_get(user_id)
+        if extend and s and s.get('status') == 'active' and s.get('end_date', '') > now.isoformat():
+            base = datetime.fromisoformat(s['end_date'])
+        else:
+            base = now
+        end_date = (base + timedelta(days=days)).isoformat()
+        # FIX جدید: total_days برای رسم نوار پیشرفت باقیمانده استفاده می‌شود
+        total_days = max(1, (datetime.fromisoformat(end_date) - base).days) if not extend else days
+        await self.subscriptions.update_one(
+            {'_id': user_id},
+            {'$set': {
+                'status': 'active', 'plan_name': plan_name,
+                'start_date': now.isoformat(), 'end_date': end_date,
+                'source': source, 'granted_by': granted_by,
+                'last_plan_days': days,
+                # FIX جدید: دو فلگ جدا برای یادآوری ۳روزه و ۱روزه
+                'reminder_3d_sent': False, 'reminder_1d_sent': False,
+                'updated_at': now.isoformat(),
+            }},
+            upsert=True
+        )
+        return end_date
+
+    async def sub_revoke(self, user_id: int, reason: str, revoked_by: int) -> bool:
+        result = await self.subscriptions.update_one(
+            {'_id': user_id},
+            {'$set': {
+                'status': 'revoked', 'revoke_reason': reason,
+                'revoked_by': revoked_by, 'revoked_at': datetime.now().isoformat(),
+            }}
+        )
+        return result.matched_count > 0
+
+    async def sub_expire_due(self) -> list:
+        """کاربرانی که تاریخ پایانشان گذشته ولی هنوز status=active مانده"""
+        now_iso = datetime.now().isoformat()
+        due = await self.subscriptions.find(
+            {'status': 'active', 'end_date': {'$lt': now_iso}}
+        ).to_list(500)
+        if due:
+            await self.subscriptions.update_many(
+                {'_id': {'$in': [d['_id'] for d in due]}},
+                {'$set': {'status': 'expired'}}
+            )
+        return due
+
+    async def sub_expiring_soon(self, days_before: int, flag_field: str) -> list:
+        """
+        اشتراک‌های فعالی که کمتر از N روز تا پایانشان مانده و هنوز
+        یادآوری مخصوص همان فلگ (سه‌روزه یا یک‌روزه) را نگرفته‌اند.
+        FIX جدید: دو یادآوری جدا (۳ روز و ۱ روز قبل) — دقیقاً مثل
+        الگوی یادآوری‌های پلکانی امتحان که در ربات وجود دارد.
+        """
+        now = datetime.now()
+        cutoff = (now + timedelta(days=days_before)).isoformat()
+        return await self.subscriptions.find({
+            'status': 'active',
+            'end_date': {'$gte': now.isoformat(), '$lte': cutoff},
+            flag_field: {'$ne': True},
+        }).to_list(500)
+
+    async def sub_mark_reminder_sent(self, user_id: int, flag_field: str):
+        await self.subscriptions.update_one(
+            {'_id': user_id}, {'$set': {flag_field: True}}
+        )
+
+    async def sub_stats(self) -> dict:
+        active  = await self.subscriptions.count_documents({'status': 'active'})
+        expired = await self.subscriptions.count_documents({'status': 'expired'})
+        revoked = await self.subscriptions.count_documents({'status': 'revoked'})
+        pending = await self.sub_payments.count_documents({'status': 'pending'})
+        approved_total = await self.sub_payments.count_documents({'status': 'approved'})
+        rejected_total = await self.sub_payments.count_documents({'status': 'rejected'})
+        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        revenue_total = revenue_month = 0
+        plan_counter: dict = {}
+        async for p in self.sub_payments.find({'status': 'approved'}):
+            amt = p.get('final_price', p.get('price', 0))
+            revenue_total += amt
+            if p.get('reviewed_at', '') >= month_start:
+                revenue_month += amt
+            plan_counter[p.get('plan_name', '-')] = plan_counter.get(p.get('plan_name', '-'), 0) + 1
+        top_plan = max(plan_counter, key=plan_counter.get) if plan_counter else '-'
+        conv_rate = round(approved_total / (approved_total + rejected_total) * 100) if (approved_total + rejected_total) else 0
+        return {
+            'active': active, 'expired': expired, 'revoked': revoked,
+            'pending': pending, 'revenue': revenue_total,
+            'revenue_month': revenue_month,
+            'approved_total': approved_total, 'rejected_total': rejected_total,
+            'top_plan': top_plan, 'conv_rate': conv_rate,
+        }
+
+    # ── صف رسیدهای پرداخت ──
+    async def sub_payment_create(self, user_id: int, plan_id: str, plan_name: str,
+                                  price: int, final_price: int, screenshot_file_id: str,
+                                  discount_code: str = None) -> str:
+        r = await self.sub_payments.insert_one({
+            'user_id': user_id, 'plan_id': plan_id, 'plan_name': plan_name,
+            'price': price, 'final_price': final_price,
+            'discount_code': discount_code,
+            'screenshot_file_id': screenshot_file_id,
+            'status': 'pending', 'submitted_at': datetime.now().isoformat(),
+            'admin_msg_id': None,
+        })
+        return str(r.inserted_id)
+
+    async def sub_payment_get(self, pid: str):
+        try:
+            return await self.sub_payments.find_one({'_id': ObjectId(pid)})
+        except Exception:
+            return None
+
+    async def sub_payment_has_pending(self, user_id: int) -> bool:
+        """FIX جدید: جلوگیری از اسپم رسید — تا رسید قبلی بررسی نشده، جدید قبول نمی‌شود"""
+        return await self.sub_payments.count_documents(
+            {'user_id': user_id, 'status': 'pending'}
+        ) > 0
+
+    async def sub_payment_reject_count(self, user_id: int) -> int:
+        """FIX جدید: تعداد رد قبلی همین کاربر — سیگنال احتمال تخلف/سوءاستفاده برای ادمین"""
+        return await self.sub_payments.count_documents(
+            {'user_id': user_id, 'status': 'rejected'}
+        )
+
+    async def sub_payment_set_admin_msg(self, pid: str, msg_id: int):
+        try:
+            await self.sub_payments.update_one(
+                {'_id': ObjectId(pid)}, {'$set': {'admin_msg_id': msg_id}}
+            )
+        except Exception:
+            pass
+
+    async def sub_payment_decide(self, pid: str, approved: bool, admin_id: int, note: str = ''):
+        try:
+            await self.sub_payments.update_one(
+                {'_id': ObjectId(pid)},
+                {'$set': {
+                    'status': 'approved' if approved else 'rejected',
+                    'reviewed_by': admin_id, 'reviewed_at': datetime.now().isoformat(),
+                    'review_note': note,
+                }}
+            )
+            return True
+        except Exception:
+            return False
+
+    async def sub_payment_list_pending(self) -> list:
+        return await self.sub_payments.find({'status': 'pending'}).sort('submitted_at', 1).to_list(100)
+
+    async def sub_payment_history(self, user_id: int) -> list:
+        """FIX جدید: تاریخچه‌ی کامل پرداخت‌های یک کاربر (هر وضعیتی) — برای «تاریخچه‌ی من»"""
+        return await self.sub_payments.find({'user_id': user_id}).sort('submitted_at', -1).to_list(30)
+
+    async def sub_payment_list_all(self, status: str = None, skip: int = 0, limit: int = 8) -> list:
+        """FIX جدید: مرور کامل همه‌ی رسیدها (هر وضعیتی) با صفحه‌بندی — برای پنل ادمین"""
+        q = {'status': status} if status else {}
+        return await self.sub_payments.find(q).sort('submitted_at', -1).skip(skip).limit(limit).to_list(limit)
+
+    async def sub_payment_count_all(self, status: str = None) -> int:
+        q = {'status': status} if status else {}
+        return await self.sub_payments.count_documents(q)
 
 
 db = DB()
