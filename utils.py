@@ -268,6 +268,10 @@ async def cancel_handler(update, context):
         'ticket_mode', 'mode', 'creating_question',
         'profile_edit', 'awaiting_search', 'search_mode',
         'edit_user', 'backup_mode',
+        # FIX جدید: سیستم اشتراک
+        'sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code',
+        'sub_reject_pid', 'suba_target_uid', 'suba_grant_role',
+        'suba_plan_edit_id', 'suba_grant_list',
     ]
     for key in keys_to_clear:
         context.user_data.pop(key, None)
