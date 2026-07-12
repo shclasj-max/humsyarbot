@@ -65,6 +65,14 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == 'broadcast':
             from admin import admin_broadcast_handler
             return await admin_broadcast_handler(update, context)
+        # FIX جدید: سیستم اشتراک — رد رسید با دلیل
+        if mode == 'sub_reject_reason':
+            from subscription import admin_reject_reason_handler
+            return await admin_reject_reason_handler(update, context)
+        # FIX جدید: سیستم اشتراک — همه‌ی حالت‌های متنی پنل مدیریت اشتراک
+        if mode.startswith('suba_'):
+            from subscription_admin import subscription_admin_text_handler
+            return await subscription_admin_text_handler(update, context)
 
     # ── ویرایش تک‌فیلدی برنامه (بخش اول) ──
     if uid == ADMIN_ID and context.user_data.get('mode') == 'edit_schedule_field':
@@ -106,6 +114,11 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from search import search_handler
         return await search_handler(update, context)
 
+    # FIX جدید: کد تخفیف اشتراک
+    if context.user_data.get('sub_mode') == 'awaiting_discount':
+        from subscription import discount_text_handler
+        return await discount_text_handler(update, context)
+
     # ── مسیریابی دکمه‌های منو ──
     await _route_menu_button(update, context, text, uid, user)
 
@@ -119,6 +132,9 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
         await update.message.reply_text(t, parse_mode='HTML', reply_markup=kb)
 
     elif text == "📚 منابع":
+        from subscription import check_and_show_paywall
+        if not await check_and_show_paywall(update, context, uid):
+            return
         keyboard = [
             [InlineKeyboardButton("🔬 علوم پایه", callback_data='bs:main')],
             [InlineKeyboardButton("📖 رفرنس‌ها",  callback_data='ref:main')],
@@ -133,6 +149,9 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
         )
 
     elif text == "🧪 بانک سوال":
+        from subscription import check_and_show_paywall
+        if not await check_and_show_paywall(update, context, uid):
+            return
         from questions import _main_menu_msg
         await _main_menu_msg(update.message)
 
