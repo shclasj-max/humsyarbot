@@ -14,10 +14,16 @@ logger = logging.getLogger(__name__)
 
 async def references_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
-    await query.answer()
     data   = query.data
     parts  = data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
+
+    # FIX جدید: دفاع لایه‌دوم اشتراک
+    from subscription import has_access
+    if not await has_access(update.effective_user.id):
+        await query.answer("🔒 اول باید اشتراک فعال کنی — از «📚 منابع» شروع کن.", show_alert=True)
+        return
+    await query.answer()
 
     came_from_admin = context.user_data.get('ref_from_admin', False)
 
@@ -270,11 +276,13 @@ async def _download_ref(query, file_id_db, uid):
         ]])
 
     try:
+        protect = await db.get_setting('protect_content_enabled', True)
         await query.message.reply_document(
             item['file_id'],
             caption=caption,
             parse_mode='HTML',
-            reply_markup=back_kb)
+            reply_markup=back_kb,
+            protect_content=protect)
     except Exception as e:
         logger.error(f"ref download error: {e}")
         await query.answer("❌ خطا در ارسال فایل!", show_alert=True)
