@@ -415,13 +415,13 @@ _SOURCE_LABELS = {
 }
 
 
-async def _show_my_status(query, uid: int):
+async def _build_my_status(uid: int):
     from utils import fmt_jalali, progress_bar
     s = await db.sub_get(uid)
     keyboard = []
 
     if not s or s.get('status') not in ('active', 'expired', 'revoked'):
-        text = "🧾 <b>وضعیت اشتراک من</b>\n\n⚠️ فعلاً هیچ اشتراکی نداری."
+        text = "💎 <b>اشتراک ویژه من</b>\n\n⚠️ فعلاً هیچ اشتراکی نداری."
         keyboard.append([InlineKeyboardButton("💳 خرید اشتراک", callback_data='sub:back')])
 
     elif s.get('status') == 'active' and await db.sub_is_active(uid):
@@ -430,13 +430,22 @@ async def _show_my_status(query, uid: int):
         pct        = min(100, round(days_left / total_days * 100))
         bar        = progress_bar(pct)
         source     = _SOURCE_LABELS.get(s.get('source', ''), '—')
+
+        # FIX جدید: تاریخ تأیید (اگه از مسیر پرداخت با رسید فعال شده) هم نشون داده بشه
+        approved_line = ''
+        history = await db.sub_payment_history(uid)
+        approved = next((p for p in history if p['status'] == 'approved'), None)
+        if approved and approved.get('reviewed_at'):
+            approved_line = f"✅ تاریخ تأیید: {fmt_jalali(approved['reviewed_at'])}\n"
+
         text = (
-            "🧾 <b>وضعیت اشتراک من</b>\n"
+            "💎 <b>اشتراک ویژه من</b>\n"
             "━━━━━━━━━━━━━━━━\n"
             f"📦 پلن: <b>{s.get('plan_name','—')}</b>\n"
             f"🎫 منبع: {source}\n"
-            f"📅 شروع: {fmt_jalali(s.get('start_date',''))}\n"
-            f"📅 پایان: {fmt_jalali(s.get('end_date',''))}\n\n"
+            f"📅 تاریخ خرید: {fmt_jalali(s.get('start_date',''))}\n"
+            f"{approved_line}"
+            f"📅 تاریخ انقضا: <b>{fmt_jalali(s.get('end_date',''))}</b>\n\n"
             f"⏳ <b>{days_left} روز</b> باقی‌مانده\n"
             f"<code>[{bar}]</code> {pct}٪"
         )
@@ -444,14 +453,14 @@ async def _show_my_status(query, uid: int):
 
     elif s.get('status') == 'revoked':
         text = (
-            "🧾 <b>وضعیت اشتراک من</b>\n\n"
+            "💎 <b>اشتراک ویژه من</b>\n\n"
             "🚫 اشتراکت لغو شده.\n"
             f"📝 دلیل: {s.get('revoke_reason','—')}\n\n"
             "اگه فکر می‌کنی اشتباهیه، از «🎫 پشتیبانی» با ادمین در تماس باش."
         )
     else:  # expired
         text = (
-            "🧾 <b>وضعیت اشتراک من</b>\n\n"
+            "💎 <b>اشتراک ویژه من</b>\n\n"
             "⌛ آخرین اشتراکت تموم شده.\n"
             f"📦 پلن قبلی: {s.get('plan_name','—')}\n"
             f"📅 تا: {fmt_jalali(s.get('end_date',''))}"
@@ -459,10 +468,22 @@ async def _show_my_status(query, uid: int):
         keyboard.append([InlineKeyboardButton("🔄 تمدید کن", callback_data='sub:back')])
 
     keyboard.append([InlineKeyboardButton("🧾 تاریخچه‌ی پرداخت‌ها", callback_data='sub:my_history')])
+    return text, keyboard
+
+
+async def _show_my_status(query, uid: int):
+    text, keyboard = await _build_my_status(uid)
     try:
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
         await query.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_my_status_msg(update):
+    """FIX جدید: نسخه‌ی پیامی (نه callback) — برای دکمه‌ی «💎 اشتراک ویژه» توی منوی اصلی"""
+    uid = update.effective_user.id
+    text, keyboard = await _build_my_status(uid)
+    await update.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _show_my_history(query, uid: int):
