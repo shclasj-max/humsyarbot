@@ -277,7 +277,7 @@ ROOT_ONLY_ACTIONS = {
     'confirm_block_user', 'block_user', 'unblock_user', 'blacklist_view',  # FIX جدید: بلاک کامل
     'content_admins', 'ca_set', 'ca_remove',
     'notif_manage', 'notif_set_interval', 'notif_history', 'notif_retry',
-    'notif_defaults', 'notif_default_toggle',
+    'notif_defaults', 'notif_default_toggle', 'notif_force_send',
     'channel_lock', 'channel_lock_add', 'channel_lock_remove',  # FIX جدید
     'set_poll_channel',  # کانال نظرسنجی / اطلاع‌رسانی
     'poll_main', 'poll_create', 'poll_add_option', 'poll_done_options',
@@ -576,6 +576,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.set_setting('resource_notif_interval_hours', hours)
         await query.answer(f"✅ فاصله اعلان منابع جدید: هر {hours} ساعت", show_alert=True)
         await _show_notif_manage(query)
+
+    elif action == 'notif_force_send':
+        await _handle_notif_force_send(query)
 
     elif action == 'notif_history':
         job_name = parts[2] if len(parts) > 2 else None
@@ -2130,6 +2133,19 @@ async def _show_user_detail(query, context, target_uid: int):
     uname   = f"@{user['username']}" if user.get('username') else 'ندارد'
     tickets = await db.ticket_get_user(target_uid)
     open_t  = sum(1 for t in tickets if t['status'] == 'open')
+
+    # FIX جدید: وضعیت اشتراک هم اینجا نشون داده بشه، نه فقط توی پنل اشتراک جدا
+    sub = await db.sub_get(target_uid)
+    if sub and sub.get('status') == 'active' and await db.sub_is_active(target_uid):
+        sub_days = await db.sub_days_left(target_uid)
+        sub_line = f"💳 اشتراک: ✅ فعال — {sub_days} روز مانده ({sub.get('plan_name','-')})"
+    elif sub and sub.get('status') == 'revoked':
+        sub_line = f"💳 اشتراک: 🚫 لغوشده ({sub.get('revoke_reason','-')})"
+    elif sub and sub.get('status') == 'expired':
+        sub_line = "💳 اشتراک: ⌛ منقضی‌شده"
+    else:
+        sub_line = "💳 اشتراک: ⚠️ نداره"
+
     text = (
         f"👤 <b>پروفایل کاربر</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"📛 نام: <b>{user.get('name','')}</b>\n"
@@ -2139,7 +2155,8 @@ async def _show_user_detail(query, context, target_uid: int):
         f"🆔 آیدی: <code>{target_uid}</code>\n"
         f"🔘 وضعیت: {status}  |  نقش: {role_t}\n"
         f"📅 ورودی: <b>{user.get('intake','') or 'ثبت نشده'}</b>\n"
-        f"📅 ثبت‌نام: {user.get('registered_at','')[:10]}\n\n"
+        f"📅 ثبت‌نام: {user.get('registered_at','')[:10]}\n"
+        f"{sub_line}\n\n"
         f"📊 <b>آمار:</b>\n"
         f"  📥 دانلود: {stats['downloads']}  🧪 سوال: {stats['total_answers']}  ✅ صحیح: {stats['correct_answers']}\n"
         f"  📈 درصد: {stats['percentage']}%  🔥 هفتگی: {stats['week_activity']}\n"
@@ -2151,6 +2168,7 @@ async def _show_user_detail(query, context, target_uid: int):
             InlineKeyboardButton("✏️ ویرایش گروه", callback_data=f'admin:edit_group:{target_uid}'),
         ],
         [InlineKeyboardButton("📅 ویرایش ورودی", callback_data=f'admin:edit_intake:{target_uid}')],
+        [InlineKeyboardButton("💳 مدیریت اشتراک این کاربر", callback_data=f'suba:user:{target_uid}')],
     ]
     if user.get('role','student') == 'student':
         keyboard.append([InlineKeyboardButton("🎓 دادن دسترسی محتوا", callback_data=f'admin:ca_set:{target_uid}')])
@@ -2259,15 +2277,35 @@ async def _show_qbank_list(query):
 async def _show_notif_manage(query):
     """
     FIX جدید: مدیریت اعلان‌ها از پنل ادمین — تنظیم فاصله زمانی
-    اعلان منابع جدید + دسترسی به تاریخچه ارسال هر job.
+    اعلان منابع جدید + دسترسی به تاریخچه ارسال هر job + دکمه‌ی
+    ارسال فوری (بدون نیاز به صبر تا پایان بازه) + تشخیص خطای اخیر.
     """
+    from utils import fmt_jalali
     interval = await db.get_setting('resource_notif_interval_hours', 24)
     pending  = await db.get_unnotified_resources()
+    last_sent_str = await db.get_setting('resource_notif_last_sent', None)
+    last_error    = await db.get_setting('resource_notif_last_error', None)
+
+    if last_sent_str:
+        last_sent_dt = datetime.fromisoformat(last_sent_str)
+        elapsed_h = round((datetime.now() - last_sent_dt).total_seconds() / 3600, 1)
+        remaining_h = round(interval - elapsed_h, 1)
+        timing_line = (
+            f"🕐 آخرین ارسال: {fmt_jalali(last_sent_str)} ({elapsed_h} ساعت پیش)\n"
+            + (f"⏭ ارسال بعدی: حدود {remaining_h} ساعت دیگه\n" if remaining_h > 0
+               else "⏭ الان وقتشه، منتظر اجرای بعدی job (حداکثر تا ۱ ساعت دیگه) یا بزن «ارسال فوری»\n")
+        )
+    else:
+        timing_line = "🕐 هنوز هیچ ارسالی ثبت نشده.\n"
+
+    error_line = f"\n🔴 <b>آخرین خطا:</b> {last_error}\n" if last_error else ""
 
     text = (
         "📢 <b>مدیریت اعلان‌ها</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"📚 <b>فاصله اعلان منابع جدید:</b> هر {interval} ساعت\n"
-        f"⏳ منابع در انتظار اعلام: <b>{len(pending)}</b> مورد\n\n"
+        f"⏳ منابع در انتظار اعلام: <b>{len(pending)}</b> مورد\n"
+        f"{timing_line}"
+        f"{error_line}\n"
         "━━━━━━━━━━━━━━━━\n"
         "برای مشاهده تاریخچه ارسال هر دسته از اعلان‌ها، یکی را انتخاب کنید:"
     )
@@ -2277,6 +2315,7 @@ async def _show_notif_manage(query):
             InlineKeyboardButton("48 ساعت" + (" ✅" if interval == 48 else ""), callback_data='admin:notif_set_interval:48'),
             InlineKeyboardButton("72 ساعت" + (" ✅" if interval == 72 else ""), callback_data='admin:notif_set_interval:72'),
         ],
+        [InlineKeyboardButton(f"🚀 ارسال فوری الان ({len(pending)} مورد در صف)", callback_data='admin:notif_force_send')],
         [InlineKeyboardButton("⚙️ وضعیت پیش‌فرض اعلان‌ها (همه کاربران)", callback_data='admin:notif_defaults')],
         [InlineKeyboardButton("📚 تاریخچه: منابع جدید",   callback_data='admin:notif_history:new_resources')],
         [InlineKeyboardButton("📝 تاریخچه: یادآوری امتحان", callback_data='admin:notif_history:exam_reminder')],
@@ -2285,6 +2324,25 @@ async def _show_notif_manage(query):
         [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_comm')],
     ]
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _handle_notif_force_send(query):
+    """FIX جدید: ارسال فوری منابع جدید — بدون نیاز به صبر تا پایان بازه‌ی ۲۴/۴۸/۷۲ ساعته"""
+    from bot import _run_new_resources_notif
+    # توجه: admin_callback از قبل یک‌بار query.answer() را صدا زده،
+    # پس اینجا دوباره answer() نمی‌زنیم (تلگرام اجازه‌ی answer دوم را نمی‌دهد)
+    result = await _run_new_resources_notif(query.get_bot(), force=True)
+    if result.get('sent'):
+        msg = (f"✅ ارسال فوری انجام شد.\n{result['items']} مورد به {result['users_sent']} نفر "
+               f"ارسال شد (ناموفق: {result['users_failed']}).")
+    elif result.get('reason') == 'no_items':
+        msg = "ℹ️ چیزی در صف نیست که ارسال بشه."
+    elif result.get('reason') == 'error':
+        msg = f"❌ خطا در ارسال: {result.get('error','نامشخص')[:200]}"
+    else:
+        msg = "⚠️ ارسال نشد."
+    await query.message.reply_text(msg)
+    await _show_notif_manage(query)
 
 
 async def _show_notif_defaults(query):
