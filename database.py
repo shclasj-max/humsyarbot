@@ -2734,5 +2734,13 @@ class DB:
         q = {'status': status} if status else {}
         return await self.sub_payments.count_documents(q)
 
+    async def sub_list_by_status(self, status: str = 'active', skip: int = 0, limit: int = 10) -> list:
+        """FIX جدید: لیست مشترکین بر اساس وضعیت — برای صفحه‌ی «لیست مشترکین» پنل ادمین"""
+        return await self.subscriptions.find({'status': status}) \
+            .sort('end_date', 1).skip(skip).limit(limit).to_list(limit)
+
+    async def sub_count_by_status(self, status: str = 'active') -> int:
+        return await self.subscriptions.count_documents({'status': status})
+
 
 db = DB()
