@@ -1159,17 +1159,21 @@ class DB:
 
     async def seed_subscription_copyright_faqs(self):
         """
-        FIX جدید: چون FAQ این ربات از دیتابیس خوانده می‌شود (نه
-        DEFAULT_FAQS کد)، سؤالات «خرید اشتراک» و «قوانین کپی‌رایت»
-        باید مستقیماً در دیتابیس درج/به‌روزرسانی شوند تا روی نصب فعلی
-        هم دیده شوند. با upsert-by-question اجرا می‌شود (نه فقط
-        یک‌بار) تا هر بار متن قوانین در کد عوض شد، همان دیپلوی بعدی
-        روی دیتابیس واقعی هم به‌روزرسانی شود — بدون بازنویسی سؤالات
-        دیگری که ادمین شخصاً به بقیه‌ی دسته‌ها اضافه کرده.
+        FIX مهم: faq.py._get_faq_data فقط وقتی دیتابیس FAQ کاملاً
+        خالیه از DEFAULT_FAQS (فallback کد) استفاده می‌کند؛ به محض
+        این‌که دیتابیس حتی یک سؤال داشته باشد، فقط همان چیزی که در
+        دیتابیس است نمایش داده می‌شود و بقیه‌ی دسته‌ها (که فقط در کد
+        بودند) کلاً از دید کاربر محو می‌شوند.
+        قبلاً این تابع فقط دو دسته‌ی جدید («خرید اشتراک»،
+        «قوانین و کپی‌رایت») را درج می‌کرد — که همین باعث شد بقیه‌ی
+        دسته‌ها (علوم پایه، رفرنس، بانک سوال، برنامه، پروفایل، تیکت،
+        مشکلات فنی) روی نصب واقعی ناپدید شوند. حالا همه‌ی دسته‌های
+        DEFAULT_FAQS را sync می‌کند (upsert-by-question، سؤالات
+        دستیِ ادمین در دسته‌های دیگر دست‌نخورده می‌مانند).
         """
         from faq import DEFAULT_FAQS
-        for cat in ('💳 خرید اشتراک', '⚖️ قوانین و کپی‌رایت'):
-            for question, answer in DEFAULT_FAQS.get(cat, []):
+        for cat, items in DEFAULT_FAQS.items():
+            for question, answer in items:
                 existing = await self.faq.find_one({'question': question})
                 if existing:
                     await self.faq.update_one(
@@ -1177,7 +1181,7 @@ class DB:
                     )
                 else:
                     await self.faq_add(question, answer, cat)
-        logger.info("❓ سؤالات FAQ اشتراک/کپی‌رایت همگام‌سازی شدند")
+        logger.info("❓ همه‌ی سؤالات پیش‌فرض FAQ همگام‌سازی شدند")
 
     async def faq_get_categories(self):
         return await self.faq.distinct('category') or []
