@@ -252,6 +252,8 @@ async def _show_cat_settings(query, uid: int = None):
             InlineKeyboardButton("📋 لاگ فعالیت", callback_data='admin:audit_log'),
             InlineKeyboardButton("📥 خروجی اکسل", callback_data='admin:export_excel'),
         ])
+        # FIX جدید: سیستم اشتراک — فقط ادمین ارشد
+        keyboard.append([InlineKeyboardButton("💳 مدیریت اشتراک", callback_data='suba:main')])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
     await query.edit_message_text(
         "⚙️ <b>تنظیمات و سیستم</b>\n━━━━━━━━━━━━━━━━",
