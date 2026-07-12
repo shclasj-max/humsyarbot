@@ -16,7 +16,7 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 PROFILE_EDIT_WAITING = 70  # نگه داشته برای سازگاری با bot.py
 
 
-def _profile_text(user: dict, stats: dict, open_tickets: int) -> str:
+def _profile_text(user: dict, stats: dict, open_tickets: int, sub_line: str = '') -> str:
     role_map = {
         'student':       '🧑‍🎓 دانشجو',
         'content_admin': '🎓 ادمین محتوا',
@@ -41,7 +41,9 @@ def _profile_text(user: dict, stats: dict, open_tickets: int) -> str:
         f"👥 <b>گروه:</b>  گروه {user.get('group', '')}\n"
         f"📱 <b>یوزرنیم:</b>  {uname}\n"
         f"🎭 <b>نقش:</b>  {role_icon}\n"
-        f"📅 <b>ثبت‌نام:</b>  {reg_date}\n\n"
+        f"📅 <b>ثبت‌نام:</b>  {reg_date}\n"
+        + (f"{sub_line}" if sub_line else "") +
+        "\n"
         "━━━━━━━━━━━━━━━━\n"
         "📊 <b>آمار تحصیلی</b>\n\n"
         f"🧪 سوال پاسخ داده: <b>{stats.get('total_answers', 0)}</b>\n"
@@ -66,6 +68,8 @@ def _profile_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("👥 تغییر گروه",  callback_data='profile:edit_group'),
             InlineKeyboardButton("📅 تغییر ورودی", callback_data='profile:edit_intake'),
         ],
+        # FIX جدید: دسترسی به جزئیات کامل اشتراک از پروفایل
+        [InlineKeyboardButton("🧾 جزئیات اشتراک", callback_data='sub:my_status')],
         [InlineKeyboardButton("🔄 بروزرسانی",     callback_data='profile:refresh')],
         [InlineKeyboardButton("🔙 داشبورد",        callback_data='dashboard:refresh')],
     ])
@@ -95,8 +99,10 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await query.edit_message_text("❌ کاربر پیدا نشد.")
             return
+        from subscription import sub_status_line
+        sub_line = await sub_status_line(uid)
         await query.edit_message_text(
-            _profile_text(user, stats, open_t),
+            _profile_text(user, stats, open_t, sub_line),
             parse_mode='HTML',
             reply_markup=_profile_keyboard()
         )
@@ -269,8 +275,10 @@ async def show_profile_msg(update: Update):
     if not user:
         await update.message.reply_text("❌ کاربر پیدا نشد.")
         return
+    from subscription import sub_status_line
+    sub_line = await sub_status_line(uid)
     await update.message.reply_text(
-        _profile_text(user, stats, open_t),
+        _profile_text(user, stats, open_t, sub_line),
         parse_mode='HTML',
         reply_markup=_profile_keyboard()
     )
