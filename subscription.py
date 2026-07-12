@@ -148,6 +148,14 @@ async def _show_payment_details(query, context, plan_id: str):
     price = plan['price']
     discount_code = context.user_data.get('sub_discount_code')
     final_price = context.user_data.get('sub_final_price', price)
+
+    # FIX جدید: کد تخفیف ۱۰۰٪ = رایگان کامل — نیازی به رسید/اسکرین‌شات
+    # نیست، همون لحظه فعال می‌شه (منطقاً چیزی برای پرداخت نمانده که
+    # عکسش گرفته شود).
+    if final_price <= 0:
+        await _activate_free_via_discount(query, context, plan, discount_code)
+        return
+
     discount_line = ''
     if discount_code:
         discount_line = f"🎟 کد <code>{discount_code}</code> اعمال شد\n"
@@ -175,6 +183,34 @@ async def _show_payment_details(query, context, plan_id: str):
     ]
     context.user_data['sub_mode'] = 'awaiting_screenshot'
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _activate_free_via_discount(query, context, plan: dict, discount_code: str):
+    """FIX جدید: مسیر کد تخفیف ۱۰۰٪ — بدون رسید، بدون بررسی ادمین، فعال‌سازی آنی"""
+    uid = query.from_user.id
+    for k in ('sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code'):
+        context.user_data.pop(k, None)
+
+    await db.sub_activate(uid, plan['days'], plan['name'], source='payment',
+                           granted_by=0, extend=True)
+    if discount_code:
+        await db.discount_consume(discount_code)
+        # ثبت به‌عنوان یک تراکنش approved با مبلغ صفر — برای آمار و تاریخچه
+        pid = await db.sub_payment_create(
+            user_id=uid, plan_id=str(plan['_id']), plan_name=plan['name'],
+            price=plan['price'], final_price=0, screenshot_file_id='',
+            discount_code=discount_code,
+        )
+        await db.sub_payment_decide(pid, approved=True, admin_id=0, note='کد تخفیف ۱۰۰٪ — خودکار')
+
+    days_left = await db.sub_days_left(uid)
+    text = (
+        f"🎉 <b>اشتراکت با کد تخفیف رایگان فعال شد!</b>\n\n"
+        f"📦 پلن: {plan['name']}\n"
+        f"⏳ {days_left} روز اعتبار داری\n\n"
+        f"از بخش «👤 پروفایل» هر وقت خواستی می‌تونی باقیمونده رو چک کنی."
+    )
+    await query.edit_message_text(text, parse_mode='HTML')
 
 
 # ══════════════════════════════════════════════════
