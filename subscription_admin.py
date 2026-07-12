@@ -60,6 +60,7 @@ async def _show_main(query):
          InlineKeyboardButton("💳 شماره کارت", callback_data='suba:card')],
         [InlineKeyboardButton(f"📥 صف در انتظار ({stats['pending']})", callback_data='suba:pending'),
          InlineKeyboardButton("📜 تاریخچه‌ی کامل", callback_data='suba:history:all:0')],
+        [InlineKeyboardButton(f"📋 لیست مشترکین فعال ({stats['active']})", callback_data='suba:subscribers:0')],
         [InlineKeyboardButton("👤 مدیریت اشتراک کاربر", callback_data='suba:user_search')],
         [InlineKeyboardButton("🎟 کدهای تخفیف", callback_data='suba:discounts')],
         [InlineKeyboardButton("🎁 اعطای رایگان دسته‌جمعی", callback_data='suba:grant')],
@@ -278,6 +279,43 @@ async def _resend_payment_for_review(query, context, pid):
         InlineKeyboardButton("❌ رد", callback_data=f"sub:rej:{pid}"),
     ]])
     await query.message.reply_photo(p['screenshot_file_id'], caption=caption, parse_mode='HTML', reply_markup=kb)
+
+
+# ══════════════════════════════════════════════════
+#  📋 لیست کامل مشترکین فعال (قابل مرور، نه فقط جستجو)
+# ══════════════════════════════════════════════════
+
+_SUBSCRIBERS_PAGE_SIZE = 10
+
+
+async def _show_subscribers_list(query, page: int):
+    from utils import fmt_jalali
+    total = await db.sub_count_by_status('active')
+    items = await db.sub_list_by_status('active', skip=page * _SUBSCRIBERS_PAGE_SIZE, limit=_SUBSCRIBERS_PAGE_SIZE)
+
+    lines = [f"📋 <b>مشترکین فعال</b> ({total} نفر)\n━━━━━━━━━━━━━━━━"]
+    keyboard = []
+    if not items:
+        lines.append("فعلاً هیچ مشترک فعالی نیست.")
+    for s in items:
+        uid = s['_id']
+        user = await db.get_user(uid)
+        name = user.get('name', str(uid)) if user else str(uid)
+        days_left = await db.sub_days_left(uid)
+        soon = "🔴" if days_left <= 3 else "✅"
+        lines.append(f"{soon} {name} — {s.get('plan_name','-')} — {days_left} روز مانده (تا {fmt_jalali(s.get('end_date',''))})")
+        keyboard.append([InlineKeyboardButton(f"👤 {name[:25]}", callback_data=f"suba:user:{uid}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", callback_data=f'suba:subscribers:{page-1}'))
+    if (page + 1) * _SUBSCRIBERS_PAGE_SIZE < total:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", callback_data=f'suba:subscribers:{page+1}'))
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("🔍 جستجو در مشترکین", callback_data='suba:user_search')])
+    keyboard.append(_back())
+    await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # ══════════════════════════════════════════════════
@@ -699,6 +737,8 @@ async def subscription_admin_callback(update: Update, context: ContextTypes.DEFA
         await _resend_payment_for_review(query, context, parts[2])
     elif action == 'history':
         await _show_history(query, parts[2], int(parts[3]))
+    elif action == 'subscribers':
+        await _show_subscribers_list(query, int(parts[2]))
 
     elif action == 'user_search':
         await _prompt_user_search(query, context)
