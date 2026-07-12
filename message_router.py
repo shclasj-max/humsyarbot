@@ -167,6 +167,25 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
         from profile import show_profile_msg
         await show_profile_msg(update)
 
+    elif text == "💎 اشتراک ویژه":
+        from subscription import show_my_status_msg
+        await show_my_status_msg(update)
+
+    elif text == "💙 حمایت مالی":
+        donation_enabled = await db.get_setting('donation_enabled', False)
+        donation_link    = await db.get_setting('donation_link', None)
+        if donation_enabled and donation_link:
+            await update.message.reply_text(
+                "💙 <b>حمایت مالی از هامزیار</b>\n\n"
+                "اگه دلت می‌خواد به ادامه‌دار بودن و پیشرفت این ربات کمک کنی، "
+                "می‌تونی از لینک زیر حمایت کنی. هر مقداری، بزرگ باشه یا کوچیک، "
+                "قدردانی می‌شه 🙏",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💙 حمایت مالی", url=donation_link)]])
+            )
+        else:
+            await update.message.reply_text("💙 این بخش فعلاً فعال نیست.")
+
     elif text == "🔔 اعلان‌ها":
         from notifications import show_notif_settings
         await show_notif_settings(update.message, uid)
