@@ -66,11 +66,19 @@ async def _main_menu_msg(message):
 
 async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
-    await query.answer()
     data   = query.data
     parts  = data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
     uid    = update.effective_user.id
+
+    # FIX جدید: دفاع لایه‌دوم اشتراک — اکشن‌های ca_* (بررسی سوال توسط
+    # ادمین محتوا) از این گیت مستثنی‌اند، چون کار مدیریتی است نه مصرف محتوا
+    if not action.startswith('ca_'):
+        from subscription import has_access
+        if not await has_access(uid):
+            await query.answer("🔒 اول باید اشتراک فعال کنی — از «🧪 بانک سوال» شروع کن.", show_alert=True)
+            return
+    await query.answer()
 
     # ── منوی اصلی ──
     if action == 'main':
@@ -106,10 +114,11 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await db.inc_qbank_download(fid, uid)
         caption = (f"📁 <b>بانک سوال</b>\n📚 {item.get('lesson','')} — {item.get('topic','')}\n"
                    f"📝 {item.get('description','')}\n⬇️ {item.get('downloads',0)} دانلود")
+        protect = await db.get_setting('protect_content_enabled', True)
         try:
-            await query.message.reply_document(item['file_id'], caption=caption, parse_mode='HTML')
+            await query.message.reply_document(item['file_id'], caption=caption, parse_mode='HTML', protect_content=protect)
         except:
-            try:    await query.message.reply_photo(item['file_id'], caption=caption, parse_mode='HTML')
+            try:    await query.message.reply_photo(item['file_id'], caption=caption, parse_mode='HTML', protect_content=protect)
             except: await query.answer("خطا در ارسال فایل!", show_alert=True)
         return
 
@@ -972,12 +981,14 @@ async def _generate_pdf_v2(query, context, uid, mode: str = 'practice'):
     file_obj.name = fname
 
     try:
+        protect = await db.get_setting('protect_content_enabled', True)
         await query.message.reply_document(
             document=file_obj,
             caption=f"📄 <b>{mode_label} بانک سوال</b>\n📚 {lesson}{t_label}\n🔢 {len(qs)} سوال\n"
                     f"🔖 کد: {meta.exam_code}",
             parse_mode='HTML',
-            filename=fname)
+            filename=fname,
+            protect_content=protect)
         await query.edit_message_text(
             f"✅ فایل PDF ({mode_label}) ارسال شد!\n📚 {lesson}\n🔢 {len(qs)} سوال",
             reply_markup=InlineKeyboardMarkup([
