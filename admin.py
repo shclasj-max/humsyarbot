@@ -110,8 +110,29 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             logger.debug(f"_admin_menu(reviewer): {e}")
         return
 
-    # FIX جدید: ادمین ربات (نماینده) — دسترسی به کاربران، برنامه‌ها، اطلاعیه‌ها
-    if role == 'bot_admin':
+    # FIX جدید: نماینده‌ی ورودی — فقط دسترسی به ثبت نمره (محدود به ورودی خودش)
+    if role == 'grade_rep':
+        scope = role_doc.get('scope_intake', '')
+        keyboard = [
+            [InlineKeyboardButton("📊 ثبت نمره‌ی جدید", callback_data='grades:new')],
+            [InlineKeyboardButton("📋 نمرات ثبت‌شده", callback_data='grades:list:0')],
+        ]
+        text = (
+            f"📊 <b>پنل نمرات — نماینده‌ی ورودی {scope}</b>\n━━━━━━━━━━━━━━━━\n"
+            "شما فقط می‌توانید برای دانشجویان همین ورودی نمره ثبت کنید."
+        )
+        markup = InlineKeyboardMarkup(keyboard)
+        try:
+            if edit and hasattr(query_or_msg, 'edit_message_text'):
+                await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+            else:
+                msg = query_or_msg if hasattr(query_or_msg, 'reply_text') else query_or_msg.message
+                await msg.reply_text(text, parse_mode='HTML', reply_markup=markup)
+        except Exception as e:
+            logger.debug(f"_admin_menu(grade_rep): {e}")
+        return
+
+
         keyboard = [
             [InlineKeyboardButton("👥 مدیریت کاربران",  callback_data='admin:users:0')],
             [
@@ -215,6 +236,7 @@ async def _show_cat_schedule(query):
         ],
         [InlineKeyboardButton("✏️ ویرایش برنامه‌ها", callback_data='schedule:manage_types')],
         [InlineKeyboardButton("🔄 اعلام تغییر زمان (کلاس منعطف)", callback_data='schedule:flex_list')],
+        [InlineKeyboardButton("📊 مدیریت نمرات", callback_data='grades:new')],
         [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')],
     ]
     await query.edit_message_text(
@@ -349,6 +371,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ):
                 await query.answer(
                     "ℹ️ شما دسترسی محدود دارید — کاربران، برنامه‌ها و ارسال همگانی.",
+                    show_alert=True
+                )
+                return
+            # FIX جدید: نماینده‌ی ورودی فقط به پنل نمرات دسترسی دارد
+            # (namespace جدا 'grades:')، هیچ اکشن admin: برایش مجاز نیست
+            if role == 'grade_rep':
+                await query.answer(
+                    "ℹ️ شما دسترسی نماینده دارید — از منوی «📊 پنل نمرات» استفاده کنید.",
                     show_alert=True
                 )
                 return
@@ -633,8 +663,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'role_type':
         role_type = parts[2]
         context.user_data['new_role_type'] = role_type
-        if role_type == 'content_scoped':
-            await _show_role_intake_picker(query)
+        if role_type in ('content_scoped', 'grade_rep'):
+            await _show_role_intake_picker(query, role_type)
         else:
             context.user_data['mode'] = 'add_admin_role'
             await query.edit_message_text(
@@ -651,8 +681,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         intake_code = parts[2]
         context.user_data['new_role_intake'] = intake_code
         context.user_data['mode'] = 'add_admin_role'
+        role_type_label = db.ROLE_LABELS.get(context.user_data.get('new_role_type', ''), 'نقش محدود')
         await query.edit_message_text(
-            "🛡 <b>افزودن مدیر محتوای محدود</b>\n\n"
+            f"🛡 <b>افزودن {role_type_label}</b>\n\n"
             "آیدی عددی تلگرام کاربر را ارسال کنید:",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
@@ -2776,6 +2807,7 @@ async def _show_role_type_picker(query):
         [InlineKeyboardButton("🎓 مدیر محتوا (کلی)",   callback_data='admin:role_type:content_admin')],
         [InlineKeyboardButton("📅 مدیر محتوا (محدود به ورودی)", callback_data='admin:role_type:content_scoped')],
         [InlineKeyboardButton("📢 مسئول اطلاعیه",        callback_data='admin:role_type:broadcaster')],
+        [InlineKeyboardButton("📊 نماینده ورودی (ثبت نمره)", callback_data='admin:role_type:grade_rep')],
         [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:roles')],
     ]
     await query.edit_message_text(
@@ -2784,16 +2816,17 @@ async def _show_role_type_picker(query):
     )
 
 
-async def _show_role_intake_picker(query):
-    """برای content_scoped — انتخاب ورودی که این مدیر فقط به آن دسترسی دارد"""
+async def _show_role_intake_picker(query, role_type: str = 'content_scoped'):
+    """برای content_scoped/grade_rep — انتخاب ورودی که این نقش فقط به آن دسترسی دارد"""
     intakes = await db.get_all_intakes()
     if not intakes:
         await query.answer("❌ هنوز هیچ ورودی‌ای تعریف نشده! اول از «مدیریت ورودی‌ها» اضافه کنید.", show_alert=True)
         return
     keyboard = [[InlineKeyboardButton(i['label'], callback_data=f'admin:role_intake:{i["code"]}')] for i in intakes]
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='admin:role_add_pick')])
+    label = db.ROLE_LABELS.get(role_type, 'نقش محدود به ورودی')
     await query.edit_message_text(
-        "📅 <b>مدیر محتوای محدود</b>\n\nاین مدیر فقط به محتوای کدام ورودی دسترسی داشته باشد؟",
+        f"📅 <b>{label}</b>\n\nاین نقش فقط به کدام ورودی دسترسی داشته باشد؟",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
