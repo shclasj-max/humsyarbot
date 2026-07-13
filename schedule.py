@@ -21,6 +21,34 @@ TYPE_NAMES  = {'class': '📖 کلاس', 'exam': '📝 امتحان', 'makeup': 
 GROUP_ICONS = {'1': '1️⃣', '2': '2️⃣', 'هر دو': '👥', '': '👥'}
 
 
+async def _notify_schedule_deleted(context, item: dict):
+    """
+    FIX جدید: تکمیل چرخه‌ی نوتیف برنامه — تا امروز فقط «اضافه‌شدن» و
+    «ویرایش» به دانشجوها اطلاع داده می‌شد، ولی «حذف‌شدن» (مثلاً لغو یک
+    امتحان یا کلاس جبرانی) هیچ نوتیفی نداشت؛ فقط در لاگ ادمین ثبت
+    می‌شد. این تابع دقیقاً از همان الگوی notif_users/broadcast_message
+    که در _finalize_schedule_add جواب می‌دهد استفاده می‌کند تا رفتار و
+    ظاهر پیام با بقیه‌ی نوتیف‌های برنامه یکدست بماند.
+    """
+    from utils import broadcast_message
+    stype   = item.get('type', 'class')
+    ntype   = {'exam': 'exam', 'makeup': 'makeup'}.get(stype, 'schedule')
+    users   = await db.notif_users(ntype, group=item.get('group'))
+    if not users:
+        return
+    type_fa = TYPE_NAMES.get(stype, stype)
+    g_label = f" | گروه {item.get('group')}" if item.get('group') not in ('هر دو', '', None) else ''
+    jalali_display = fmt_jalali(item.get('date', ''))
+    notif_msg = (
+        f"❌ <b>{type_fa} لغو شد</b>\n\n"
+        f"📚 {item.get('lesson','')}\n"
+        f"👨‍🏫 {item.get('teacher','')}\n"
+        f"📅 {jalali_display}  ⏰ {item.get('time','')}\n"
+        f"📍 {item.get('location','')}{g_label}"
+    )
+    await broadcast_message(context.bot, users, notif_msg)
+
+
 def _days_label(days: int) -> str:
     if days < 0:  return f"({abs(days)} روز پیش)"
     if days == 0: return "⚠️ امروز!"
@@ -292,6 +320,8 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_label=f"{deleted_item.get('lesson','')} — {fmt_jalali(deleted_item.get('date',''))}",
                 tags=['حذف_برنامه']
             )
+            # FIX جدید: اطلاع‌رسانی حذف به دانشجوهای همون گروه
+            await _notify_schedule_deleted(context, deleted_item)
         await _show_delete_list(query)
 
     # ══════════════════════════════════════════════
@@ -364,6 +394,8 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_label=f"{item.get('lesson','')} — {fmt_jalali(item.get('date',''))}",
                 tags=['حذف_برنامه']
             )
+            # FIX جدید: اطلاع‌رسانی حذف به دانشجوهای همون گروه
+            await _notify_schedule_deleted(context, item)
         await _show_manage_list(query, stype)
 
     elif action == 'flex_change' and uid == ADMIN_ID:
@@ -931,6 +963,7 @@ async def show_schedule_main(message: Message, uid: int, user: dict):
             InlineKeyboardButton("⏳ امتحانات نزدیک", callback_data='schedule:upcoming'),
         ],
         [InlineKeyboardButton("👥 تغییر گروه نمایش", callback_data='schedule:group_sel:class')],
+        [InlineKeyboardButton("📊 نمرات من", callback_data='grades:mine')],
     ]
     await message.reply_text(
         f"📅 <b>برنامه و امتحانات</b>\n"
