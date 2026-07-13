@@ -58,6 +58,7 @@ from backup import backup_callback, backup_file_handler, backup_confirm_restore
 from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS
 from subscription import subscription_callback, screenshot_handler as sub_screenshot_handler
 from subscription_admin import subscription_admin_callback
+from grades import grades_callback
 from profile import profile_callback
 from message_router import route_message
 from basic_science import basic_science_callback
@@ -1045,6 +1046,7 @@ def build_application() -> Application:
         # FIX جدید: سیستم اشتراک
         (subscription_callback,       r'^sub:'),
         (subscription_admin_callback, r'^suba:'),
+        (grades_callback,             r'^grades:'),
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
