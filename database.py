@@ -2251,11 +2251,17 @@ class DB:
             return [{'user_id': uid, 'message': msg} for uid in ids]
         return []
 
-
+    async def notif_run_set_message(self, run_id: str, text: str, parse_mode: str = 'HTML'):
         """
-        FIX جدید: ذخیره‌ی متن واقعی پیامی که در این اجرا ارسال شده —
-        تا دکمه‌ی «تلاش مجدد» در پنل ادمین بتواند همان محتوای واقعی
-        (نه یک پیام کلی جایگزین) را دوباره برای کاربران fail‌شده بفرستد.
+        FIX مهم: این متد قبلاً خط تعریفش (async def) به‌طور کامل از کد
+        حذف شده بود — بدنه‌اش به‌عنوان کد مرده زیر get_failed_notif_details
+        باقی مونده بود، پس هیچوقت واقعاً روی کلاس DB تعریف نمی‌شد و هر
+        بار new_resources_notif_job صداش می‌زد با
+        AttributeError: 'DB' object has no attribute 'notif_run_set_message'
+        کرش می‌کرد و کل نوتیف منابع جدید لغو می‌شد.
+        ذخیره‌ی متن واقعی پیامی که در این اجرا ارسال شده — تا دکمه‌ی
+        «تلاش مجدد» در پنل ادمین بتواند همان محتوای واقعی (نه یک پیام
+        کلی جایگزین) را دوباره برای کاربران fail‌شده بفرستد.
         """
         try:
             await self.notif_runs.update_one(
