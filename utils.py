@@ -276,6 +276,8 @@ async def cancel_handler(update, context):
         'sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code',
         'sub_reject_pid', 'suba_target_uid', 'suba_grant_role',
         'suba_plan_edit_id', 'suba_grant_list',
+        'grade_intake_scope', 'grade_lesson', 'grade_exam_title',
+        'grades_lesson_options', 'grade_matched',
     ]
     for key in keys_to_clear:
         context.user_data.pop(key, None)
