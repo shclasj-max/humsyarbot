@@ -66,6 +66,7 @@ class DB:
         self.subscriptions = _db['subscriptions']
         self.sub_payments  = _db['sub_payments']
         self.discount_codes = _db['discount_codes']
+        self.grades         = _db['grades']  # FIX جدید: سیستم نمرات
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها
@@ -1891,6 +1892,7 @@ class DB:
         'broadcaster':    '📢 مسئول اطلاعیه',
         'reviewer':       '🤓 خرخون (بررسی گزارش سوال/جزوه)',   # FIX جدید
         'bot_admin':      '👮 ادمین ربات (نماینده)',            # FIX جدید
+        'grade_rep':      '📊 نماینده ورودی (ثبت نمره)',        # FIX جدید
     }
 
     # ماتریس مجوزها برای هر نقش — استفاده در has_permission
@@ -1901,6 +1903,7 @@ class DB:
         'broadcaster':    {'broadcast'},
         'reviewer':       {'reports_review'},                          # FIX جدید
         'bot_admin':      {'users', 'schedules', 'notifications', 'broadcast'},      # FIX جدید
+        'grade_rep':      {'grades_scoped'},                           # FIX جدید
     }
 
     async def add_admin_role(self, uid: int, role: str, added_by: int,
@@ -2741,6 +2744,83 @@ class DB:
 
     async def sub_count_by_status(self, status: str = 'active') -> int:
         return await self.subscriptions.count_documents({'status': status})
+
+    # ══════════════════════════════════════════════════
+    #  📊 سیستم نمرات — FIX جدید
+    #  نمرات امتحانی هر درس، ثبت‌شده توسط ادمین یا نماینده‌ی ورودی
+    # ══════════════════════════════════════════════════
+
+    @staticmethod
+    def _norm_name(name: str) -> str:
+        """نرمال‌سازی نام برای مقایسه — حذف فاصله‌های اضافه/نیم‌فاصله متفاوت"""
+        return ' '.join((name or '').replace('\u200c', ' ').split()).strip().lower()
+
+    async def find_students_by_name(self, name: str, intake: str = None) -> list:
+        """
+        جست‌وجوی دانشجو با نام (برای ثبت نمره‌ی دسته‌ای).
+        اگه intake داده بشه، فقط همون ورودی جست‌وجو می‌شه (محدودیت نماینده).
+        مقایسه با نرمال‌سازی انجام می‌شود تا فاصله/نیم‌فاصله اذیت نکند.
+        """
+        target = self._norm_name(name)
+        if not target:
+            return []
+        q = {'approved': True}
+        if intake:
+            q['intake'] = intake
+        candidates = await self.users.find(q).to_list(3000)
+        return [u for u in candidates if self._norm_name(u.get('name', '')) == target]
+
+    async def grade_bulk_upsert(self, entries: list, lesson: str, exam_title: str,
+                                 exam_date: str, entered_by: int) -> list:
+        """
+        entries: [{'user_id': int, 'score': float}, ...]
+        برای هر دانشجو، اگه نمره‌ی همین درس+امتحان از قبل ثبت شده بود
+        آپدیت می‌شود (نه رکورد تکراری)، وگرنه درج می‌شود.
+        خروجی: لیست رکوردهای نهایی ثبت‌شده (برای ارسال نوتیف).
+        """
+        now = datetime.now().isoformat()
+        saved = []
+        for e in entries:
+            uid, score = e['user_id'], e['score']
+            existing = await self.grades.find_one({
+                'student_id': uid, 'lesson': lesson, 'exam_title': exam_title
+            })
+            doc = {
+                'student_id': uid, 'lesson': lesson, 'exam_title': exam_title,
+                'exam_date': exam_date, 'score': score, 'entered_by': entered_by,
+                'updated_at': now,
+            }
+            if existing:
+                await self.grades.update_one({'_id': existing['_id']}, {'$set': doc})
+                doc['_is_update'] = True
+            else:
+                doc['created_at'] = now
+                r = await self.grades.insert_one(doc)
+                doc['_id'] = r.inserted_id
+                doc['_is_update'] = False
+            saved.append(doc)
+        return saved
+
+    async def grade_list_for_student(self, uid: int) -> list:
+        return await self.grades.find({'student_id': uid}).sort('exam_date', -1).to_list(200)
+
+    async def grade_list_recent(self, skip: int = 0, limit: int = 10, intake: str = None) -> list:
+        """
+        FIX جدید: مرور نمرات ثبت‌شده‌ی اخیر — اگه intake داده بشه (برای
+        نماینده)، فقط نمرات دانشجویان همون ورودی نشان داده می‌شود.
+        """
+        if not intake:
+            return await self.grades.find({}).sort('created_at', -1).skip(skip).limit(limit).to_list(limit)
+        # چون intake روی خودِ grade نیست (روی کاربره)، اول کاربرهای اون ورودی رو می‌گیریم
+        student_ids = [u['user_id'] async for u in self.users.find({'intake': intake}, {'user_id': 1})]
+        return await self.grades.find({'student_id': {'$in': student_ids}}) \
+            .sort('created_at', -1).skip(skip).limit(limit).to_list(limit)
+
+    async def grade_count_recent(self, intake: str = None) -> int:
+        if not intake:
+            return await self.grades.count_documents({})
+        student_ids = [u['user_id'] async for u in self.users.find({'intake': intake}, {'user_id': 1})]
+        return await self.grades.count_documents({'student_id': {'$in': student_ids}})
 
 
 db = DB()
