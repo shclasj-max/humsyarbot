@@ -74,6 +74,17 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from subscription_admin import subscription_admin_text_handler
             return await subscription_admin_text_handler(update, context)
 
+    # FIX جدید: سیستم نمرات — ثبت نمره، هم برای ADMIN_ID هم برای نقش
+    # «نماینده‌ی ورودی» (grade_rep)؛ به همین دلیل بیرون از بلاک بالا
+    # است که فقط مخصوص ADMIN_ID بود.
+    mode = context.user_data.get('mode', '')
+    if mode == 'grades_exam_title':
+        from grades import handle_exam_title_text
+        return await handle_exam_title_text(update, context)
+    if mode == 'grades_bulk_list':
+        from grades import handle_bulk_list_text
+        return await handle_bulk_list_text(update, context)
+
     # ── ویرایش تک‌فیلدی برنامه (بخش اول) ──
     if uid == ADMIN_ID and context.user_data.get('mode') == 'edit_schedule_field':
         from schedule import handle_edit_schedule_field_text
