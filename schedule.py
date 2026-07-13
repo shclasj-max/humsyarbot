@@ -6,6 +6,8 @@
   ✅ اضافه/حذف توسط ادمین
 """
 import os
+import io
+import asyncio
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -176,6 +178,15 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group_filter = parts[2] if len(parts) > 2 and parts[2] else user_group
         await _show_group_schedule(query, group_filter)
 
+    elif action == 'export_pdf':
+        await _export_schedule_pdf(query, context, user, user_group)
+
+    elif action == 'export_pdf_type':
+        stype        = parts[2] if len(parts) > 2 else 'all'
+        group_filter = parts[3] if len(parts) > 3 and parts[3] else None
+        await _export_schedule_pdf(query, context, user, group_filter or user_group,
+                                    stype=None if stype == 'all' else stype)
+
     # ══════════════════════════════════════════════
     # FIX جدید: فلوی پیش‌نمایش قبل از ثبت برنامه
     # ══════════════════════════════════════════════
@@ -240,7 +251,7 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title        = TYPE_NAMES.get(stype, stype)
         if group_filter:
             title += f" — گروه {group_filter}"
-        await _show_schedule_list(query, items, title)
+        await _show_schedule_list(query, items, title, stype=stype, group_filter=group_filter)
 
     elif action == 'upcoming':
         items    = await db.upcoming_exams(14)
@@ -436,6 +447,10 @@ async def _schedule_main(query, user_group: str):
             InlineKeyboardButton("⏳ امتحانات نزدیک", callback_data='schedule:upcoming'),
         ],
         [InlineKeyboardButton("👥 تغییر گروه نمایش", callback_data='schedule:group_sel:class')],
+        [
+            InlineKeyboardButton("📊 نمرات من", callback_data='grades:mine'),
+            InlineKeyboardButton("📄 خروجی PDF (همه)", callback_data='schedule:export_pdf'),
+        ],
         [InlineKeyboardButton("🔙 بازگشت",           callback_data='dashboard:refresh')],
     ]
     await query.edit_message_text(
@@ -443,6 +458,43 @@ async def _schedule_main(query, user_group: str):
         f"{'👤 گروه شما: ' + g if g else ''}",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _export_schedule_pdf(query, context, user: dict, user_group: str, stype: str = None):
+    """
+    FIX جدید: خروجی PDF شیک — با پارامتر stype قابل محدودسازی به یک
+    نوع مشخص (کلاس/امتحان/جبرانی)، تا هر بخش فقط PDF مخصوص خودش را
+    بسازد و همه‌چیز با هم قاطی نشود. stype=None یعنی «همه‌چیز با هم»
+    (فقط از دکمه‌ی عمومی توی منوی اصلی برنامه در دسترس است).
+    """
+    items = await db.get_schedules(stype=stype, upcoming=True, group=user_group or None)
+    if not items:
+        await query.answer("📭 فعلاً چیزی توی این بخش نیست که خروجی بگیریم.", show_alert=True)
+        return
+
+    await query.answer("⏳ در حال ساخت PDF...")
+    try:
+        from schedule_pdf import generate_schedule_pdf
+        student_name = user.get('name', '') if user else ''
+        pdf_bytes = await asyncio.to_thread(
+            generate_schedule_pdf, items, user_group or 'همه', student_name
+        )
+    except Exception as e:
+        logger.exception("schedule PDF export failed")
+        await query.message.reply_text(f"❌ خطا در ساخت PDF: {e}")
+        return
+
+    type_slug = stype or 'hame'
+    type_label = TYPE_NAMES.get(stype, '📋 همه‌ی برنامه‌ها') if stype else '📋 همه‌ی برنامه‌ها'
+    file_obj = io.BytesIO(pdf_bytes)
+    fname = f"barname_{type_slug}_{user_group or 'hamzyar'}_{datetime.now().strftime('%Y%m%d')}.pdf"
+    file_obj.name = fname
+    await query.message.reply_document(
+        document=file_obj,
+        caption=f"{type_label}\n👥 گروه {user_group or 'همه'}\n🔢 {len(items)} مورد",
+        parse_mode='HTML',
+        filename=fname,
     )
 
 
@@ -518,18 +570,30 @@ async def _show_group_schedule(query, user_group: str):
     if len(text) > 4000:
         text = text[:3900] + "\n\n<i>... برای جزئیات کامل با ادمین هماهنگ کنید</i>"
 
+    keyboard = []
+    all_upcoming_classes = await db.get_schedules(stype='class', upcoming=True, group=user_group or None)
+    if all_upcoming_classes:
+        keyboard.append([InlineKeyboardButton(
+            "📄 خروجی PDF همین بخش (کلاسی)",
+            callback_data=f"schedule:export_pdf_type:class:{user_group or ''}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='schedule:main')])
+
     await query.edit_message_text(
         text, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 بازگشت", callback_data='schedule:main')
-        ]])
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-async def _show_schedule_list(query, items: list, title: str):
-    kb_back = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔙 بازگشت", callback_data='schedule:main')
-    ]])
+async def _show_schedule_list(query, items: list, title: str, stype: str = None, group_filter: str = None):
+    # FIX جدید: دکمه‌ی خروجی PDF مخصوص همین بخش (نه قاطی همه‌ی انواع) —
+    # فقط وقتی نشون داده می‌شه که واقعاً چیزی برای اکسپورت باشه
+    export_cb = f"schedule:export_pdf_type:{stype or 'all'}:{group_filter or ''}"
+    keyboard = []
+    if items:
+        keyboard.append([InlineKeyboardButton("📄 خروجی PDF همین بخش", callback_data=export_cb)])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data='schedule:main')])
+    kb_back = InlineKeyboardMarkup(keyboard)
 
     if not items:
         await query.edit_message_text(
@@ -963,7 +1027,10 @@ async def show_schedule_main(message: Message, uid: int, user: dict):
             InlineKeyboardButton("⏳ امتحانات نزدیک", callback_data='schedule:upcoming'),
         ],
         [InlineKeyboardButton("👥 تغییر گروه نمایش", callback_data='schedule:group_sel:class')],
-        [InlineKeyboardButton("📊 نمرات من", callback_data='grades:mine')],
+        [
+            InlineKeyboardButton("📊 نمرات من", callback_data='grades:mine'),
+            InlineKeyboardButton("📄 خروجی PDF (همه)", callback_data='schedule:export_pdf'),
+        ],
     ]
     await message.reply_text(
         f"📅 <b>برنامه و امتحانات</b>\n"
