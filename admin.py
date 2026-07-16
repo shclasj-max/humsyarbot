@@ -18,7 +18,7 @@ from telegram.error import RetryAfter, Forbidden, BadRequest, TimedOut, NetworkE
 from database import db
 from utils import (
     main_keyboard, content_admin_keyboard, safe_send,
-    send_audit_log, get_keyboard_for_user,
+    send_audit_log, get_keyboard_for_user, fmt_jalali_dt, now_tehran,
 )
 
 logger   = logging.getLogger(__name__)
@@ -1742,7 +1742,7 @@ async def _show_bot_status(query, context):
         online_line = "🟢 آنلاین: داده در دسترس نیست"
 
     s = await db.global_stats()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = fmt_jalali_dt(now_tehran().isoformat())
     lines_t = [
         "📡 <b>وضعیت ربات</b>",
         "━━━━━━━━━━━━━━━━",
@@ -2186,7 +2186,7 @@ async def _show_user_detail(query, context, target_uid: int):
         f"🆔 آیدی: <code>{target_uid}</code>\n"
         f"🔘 وضعیت: {status}  |  نقش: {role_t}\n"
         f"📅 ورودی: <b>{user.get('intake','') or 'ثبت نشده'}</b>\n"
-        f"📅 ثبت‌نام: {user.get('registered_at','')[:10]}\n"
+        f"📅 ثبت‌نام: {fmt_jalali_dt(user.get('registered_at',''), with_time=False)}\n"
         f"{sub_line}\n\n"
         f"📊 <b>آمار:</b>\n"
         f"  📥 دانلود: {stats['downloads']}  🧪 سوال: {stats['total_answers']}  ✅ صحیح: {stats['correct_answers']}\n"
@@ -2246,7 +2246,7 @@ async def _show_blacklist(query):
         target_uid = e['_id']
         reason = e.get('reason', '') or 'بدون دلیل ثبت‌شده'
         by     = e.get('blocked_by_name', '')
-        when   = (e.get('blocked_at', '') or '')[:10]
+        when   = fmt_jalali_dt(e.get('blocked_at', '') or '', with_time=False)
         lines.append(f"🆔 <code>{target_uid}</code> — {when}" + (f" — توسط {by}" if by else ''))
         keyboard.append([
             InlineKeyboardButton(f"↩️ رفع بلاک {target_uid}", callback_data=f'admin:unblock_user:{target_uid}')
@@ -2322,7 +2322,7 @@ async def _show_notif_manage(query):
         elapsed_h = round((datetime.now() - last_sent_dt).total_seconds() / 3600, 1)
         remaining_h = round(interval - elapsed_h, 1)
         timing_line = (
-            f"🕐 آخرین ارسال: {fmt_jalali(last_sent_str)} ({elapsed_h} ساعت پیش)\n"
+            f"🕐 آخرین ارسال: {fmt_jalali_dt(last_sent_str)} ({elapsed_h} ساعت پیش)\n"
             + (f"⏭ ارسال بعدی: حدود {remaining_h} ساعت دیگه\n" if remaining_h > 0
                else "⏭ الان وقتشه، منتظر اجرای بعدی job (حداکثر تا ۱ ساعت دیگه) یا بزن «ارسال فوری»\n")
         )
@@ -2672,7 +2672,7 @@ async def _export_excel(query, context):
                 u.get('user_id', ''), u.get('name', ''), u.get('student_id', '') or '—',
                 u.get('group', ''), u.get('intake', '') or '—', u.get('username', '') or '—',
                 'تأییدشده' if u.get('approved') else 'در انتظار',
-                u.get('registered_at', '')[:10],
+                fmt_jalali_dt(u.get('registered_at', ''), with_time=False),
                 u.get('total_answers', 0), u.get('correct_answers', 0),
             ])
 
@@ -2688,7 +2688,7 @@ async def _export_excel(query, context):
             ws2.append([
                 t.get('ticket_id', ''), t.get('user_name', ''), t.get('subject', ''),
                 'باز' if t.get('status') == 'open' else 'بسته',
-                t.get('created_at', '')[:10],
+                fmt_jalali_dt(t.get('created_at', ''), with_time=False),
             ])
 
         # ── شیت آمار سوالات ──
