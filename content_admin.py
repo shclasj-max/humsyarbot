@@ -573,8 +573,8 @@ async def _show_overview(query):
     # ── نسبت پاسخ صحیح سوالات ──
     q_ratio = f"{round(s['q_by_bot'] / s['q_total'] * 100)}٪ بات" if s['q_total'] else '—'
 
-    from datetime import datetime
-    now = datetime.now().strftime('%H:%M — %Y/%m/%d')
+    from utils import now_tehran
+    now = now_tehran().strftime('%H:%M — %Y/%m/%d')
 
     text = (
         "╔══════════════════════╗\n"
