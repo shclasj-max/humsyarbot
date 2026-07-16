@@ -250,6 +250,55 @@ def fmt_jalali(date_str: str) -> str:
         return date_str
 
 
+def now_tehran() -> 'datetime':
+    """
+    FIX جدید: سرور ربات (Railway) روی UTC اجرا می‌شود، نه وقت تهران.
+    هر جا که «همین الان» باید به وقت تهران باشد (نه محاسبات داخلی که
+    فقط با خودشان مقایسه می‌شوند)، به‌جای datetime.now() از این
+    استفاده شود.
+    """
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)
+
+
+def today_start_utc_str() -> str:
+    """
+    FIX جدید: فیلدهایی مثل last_active/registered_at با
+    datetime.now().isoformat() خام (UTC) ذخیره می‌شوند. برای پیدا کردن
+    «چه کسی از ابتدای امروز (به‌وقت تهران) فعالیت داشته»، باید مرز
+    نیمه‌شب تهران را دوباره به معادل UTC برگرداند تا با مقدار ذخیره‌شده
+    قابل مقایسه باشد — صرفاً گرفتن ساعت تهران کافی نیست چون خودِ
+    ذخیره هنوز UTC است.
+    """
+    from datetime import timedelta
+    tehran_midnight = now_tehran().replace(hour=0, minute=0, second=0, microsecond=0)
+    return (tehran_midnight - timedelta(hours=3, minutes=30)).strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def fmt_jalali_dt(iso_str: str, with_time: bool = True) -> str:
+    """
+    FIX جدید: برای timestampهای سرورساخته (created_at/registered_at/
+    submitted_at/...) که با datetime.now().isoformat() ذخیره شده‌اند —
+    یعنی خام UTC هستند، نه وقت تهران. برخلاف fmt_jalali (که برای
+    تاریخ خالصِ وارد‌شده توسط ادمین/دانشجو، مثل تاریخ امتحان، است و
+    نباید افست بخورد)، این تابع اول ۳:۳۰ ساعت افست تهران را اضافه
+    می‌کند، بعد به شمسی نمایش می‌دهد. در صورت هر خطایی (فرمت نامعتبر و
+    غیره)، بدون کرش به‌صورت امن به ۱۰ کاراکتر خام برمی‌گردد.
+    """
+    from datetime import datetime, timedelta
+    try:
+        raw = (iso_str or '').strip()
+        if not raw:
+            return ''
+        dt = datetime.fromisoformat(raw) + timedelta(hours=3, minutes=30)
+        date_part = fmt_jalali(dt.strftime('%Y-%m-%d'))
+        if with_time:
+            return f"{date_part} — ساعت {dt.strftime('%H:%M')}"
+        return date_part
+    except Exception:
+        return (iso_str or '')[:10]
+
+
 def days_until(date_str: str) -> int:
     try:
         from datetime import datetime
@@ -409,7 +458,7 @@ async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
     sev_meta  = SEVERITY_META.get(severity, SEVERITY_META['INFO'])
     cat_icon  = '🛡' if category == 'admin' else '🎓'
     cat_title = 'گزارش فعالیت مدیریتی' if category == 'admin' else 'گزارش فعالیت محتوا'
-    now_str   = datetime.now().strftime('%Y-%m-%d | %H:%M:%S')
+    now_str   = fmt_jalali_dt(now_tehran().isoformat())
     module_fa = _fa_module(module) if module else ''
 
     lines = [
