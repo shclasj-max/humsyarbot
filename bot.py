@@ -55,7 +55,7 @@ from admin import (
     handle_admin_text, BROADCAST
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
-from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS
+from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS, fmt_jalali
 from subscription import subscription_callback, screenshot_handler as sub_screenshot_handler
 from subscription_admin import subscription_admin_callback
 from grades import grades_callback
@@ -108,7 +108,7 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                     f"🔔 <b>یادآوری امتحان</b>\n\n"
                     f"📚 <b>{exam.get('lesson', '')}</b>\n"
                     f"⏰ {label}\n"
-                    f"📅 تاریخ: {exam.get('date', '')}  ساعت {exam.get('time', '')}\n"
+                    f"📅 تاریخ: {fmt_jalali(exam.get('date', ''))}  ساعت {exam.get('time', '')}\n"
                     f"📍 مکان: {exam.get('location', '')}\n"
                     f"👨‍🏫 استاد: {exam.get('teacher', '')}\n\n"
                     f"<i>⚙️ خاموش‌کردن: 🔔 اعلان‌ها ← یادآوری امتحان</i>"
@@ -306,8 +306,9 @@ async def _run_new_resources_notif(bot, force: bool = False) -> dict:
     except Exception as e:
         logger.error(f"new_resources_notif_job error: {e}")
         try:
+            from utils import now_tehran
             await db.set_setting('resource_notif_last_error',
-                                  f"{datetime.now().isoformat()} | {e}")
+                                  f"{now_tehran().strftime('%Y-%m-%d %H:%M')} (تهران) | {e}")
         except Exception:
             pass
         return {'sent': False, 'reason': 'error', 'error': str(e)}
