@@ -416,7 +416,7 @@ _SOURCE_LABELS = {
 
 
 async def _build_my_status(uid: int):
-    from utils import fmt_jalali, progress_bar
+    from utils import fmt_jalali_dt, progress_bar
     s = await db.sub_get(uid)
     keyboard = []
 
@@ -436,16 +436,16 @@ async def _build_my_status(uid: int):
         history = await db.sub_payment_history(uid)
         approved = next((p for p in history if p['status'] == 'approved'), None)
         if approved and approved.get('reviewed_at'):
-            approved_line = f"✅ تاریخ تأیید: {fmt_jalali(approved['reviewed_at'])}\n"
+            approved_line = f"✅ تاریخ تأیید: {fmt_jalali_dt(approved['reviewed_at'])}\n"
 
         text = (
             "💎 <b>اشتراک ویژه من</b>\n"
             "━━━━━━━━━━━━━━━━\n"
             f"📦 پلن: <b>{s.get('plan_name','—')}</b>\n"
             f"🎫 منبع: {source}\n"
-            f"📅 تاریخ خرید: {fmt_jalali(s.get('start_date',''))}\n"
+            f"📅 تاریخ خرید: {fmt_jalali_dt(s.get('start_date',''), with_time=False)}\n"
             f"{approved_line}"
-            f"📅 تاریخ انقضا: <b>{fmt_jalali(s.get('end_date',''))}</b>\n\n"
+            f"📅 تاریخ انقضا: <b>{fmt_jalali_dt(s.get('end_date',''), with_time=False)}</b>\n\n"
             f"⏳ <b>{days_left} روز</b> باقی‌مانده\n"
             f"<code>[{bar}]</code> {pct}٪"
         )
@@ -463,7 +463,7 @@ async def _build_my_status(uid: int):
             "💎 <b>اشتراک ویژه من</b>\n\n"
             "⌛ آخرین اشتراکت تموم شده.\n"
             f"📦 پلن قبلی: {s.get('plan_name','—')}\n"
-            f"📅 تا: {fmt_jalali(s.get('end_date',''))}"
+            f"📅 تا: {fmt_jalali_dt(s.get('end_date',''), with_time=False)}"
         )
         keyboard.append([InlineKeyboardButton("🔄 تمدید کن", callback_data='sub:back')])
 
@@ -487,7 +487,7 @@ async def show_my_status_msg(update):
 
 
 async def _show_my_history(query, uid: int):
-    from utils import fmt_jalali
+    from utils import fmt_jalali_dt
     history = await db.sub_payment_history(uid)
     status_icons = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
     if not history:
@@ -496,7 +496,7 @@ async def _show_my_history(query, uid: int):
         lines = ["🧾 <b>تاریخچه‌ی پرداخت‌ها</b>\n━━━━━━━━━━━━━━━━"]
         for p in history[:15]:
             icon = status_icons.get(p['status'], '•')
-            date = fmt_jalali(p.get('submitted_at', ''))
+            date = fmt_jalali_dt(p.get('submitted_at', ''))
             lines.append(f"{icon} {p['plan_name']} — {_fmt_price(p['final_price'])} — {date}")
             if p['status'] == 'rejected' and p.get('review_note'):
                 lines.append(f"   ↳ دلیل رد: {p['review_note']}")
