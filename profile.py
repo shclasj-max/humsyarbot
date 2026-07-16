@@ -9,7 +9,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes, ConversationHandler
 from database import db
-from utils import progress_bar, get_rank, fmt_jalali_dt
+from utils import progress_bar, get_rank
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -26,7 +26,7 @@ def _profile_text(user: dict, stats: dict, open_tickets: int, sub_line: str = ''
     rank      = get_rank(stats.get('correct_answers', 0))
     pct       = stats.get('percentage', 0)
     bar       = progress_bar(pct)
-    reg_date  = fmt_jalali_dt(user.get('registered_at', ''), with_time=False) or 'نامشخص'
+    reg_date  = user.get('registered_at', '')[:10] or 'نامشخص'
     uname     = f"@{user['username']}" if user.get('username') else '—'
     sid       = user.get('student_id', '') or '—'
     intake    = user.get('intake', '') or 'ثبت نشده'
@@ -281,4 +281,4 @@ async def show_profile_msg(update: Update):
         _profile_text(user, stats, open_t, sub_line),
         parse_mode='HTML',
         reply_markup=_profile_keyboard()
-    )v
+    )
