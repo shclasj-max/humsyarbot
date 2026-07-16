@@ -1105,9 +1105,10 @@ class DB:
             return False
 
     async def get_schedules(self, stype: str = None, upcoming: bool = True, group: str = None):
+        from utils import now_tehran
         q = {}
         if stype:    q['type'] = stype
-        if upcoming: q['date'] = {'$gte': datetime.now().strftime('%Y-%m-%d')}
+        if upcoming: q['date'] = {'$gte': now_tehran().strftime('%Y-%m-%d')}
         if group:
             q['$or'] = [{'group': group}, {'group': 'هر دو'}, {'group': {'$exists': False}}]
         return await self.schedules.find(q).sort('date', 1).to_list(200)
@@ -1118,8 +1119,9 @@ class DB:
         except Exception: pass
 
     async def upcoming_exams(self, days: int = 7):
-        today  = datetime.now().strftime('%Y-%m-%d')
-        future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+        from utils import now_tehran
+        today  = now_tehran().strftime('%Y-%m-%d')
+        future = (now_tehran() + timedelta(days=days)).strftime('%Y-%m-%d')
         return await self.schedules.find({
             'type': 'exam', 'date': {'$gte': today, '$lte': future},
         }).sort('date', 1).to_list(20)
@@ -1362,8 +1364,9 @@ class DB:
 
     async def stats_dashboard_users(self) -> dict:
         """آمار جزئی کاربران: رشد، فعالیت، گروه/ورودی، نقش‌های فرعی"""
+        from utils import today_start_utc_str
         now          = datetime.now()
-        today_start  = now.strftime('%Y-%m-%dT00:00:00')
+        today_start  = today_start_utc_str()
         week_ago     = (now - timedelta(days=7)).isoformat()
         month_ago    = (now - timedelta(days=30)).isoformat()
 
@@ -2451,9 +2454,9 @@ class DB:
         return await self.users.count_documents({'last_active': {'$gte': cutoff}})
 
     async def count_active_users_today(self) -> int:
-        """تعداد کاربرانی که امروز حداقل یک‌بار فعالیت داشته‌اند"""
-        from datetime import datetime
-        today_start = datetime.now().strftime('%Y-%m-%dT00:00:00')
+        """تعداد کاربرانی که امروز (به وقت تهران) حداقل یک‌بار فعالیت داشته‌اند"""
+        from utils import today_start_utc_str
+        today_start = today_start_utc_str()
         return await self.users.count_documents({'last_active': {'$gte': today_start}})
 
     # ══════════════════════════════════════════════════════════════
