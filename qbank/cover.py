@@ -27,9 +27,8 @@ def _draw_logo(c, cx, cy, r):
 
 def _today_jalali() -> str:
     try:
-        from utils import fmt_jalali
-        from datetime import datetime
-        return fmt_jalali(datetime.now().strftime('%Y-%m-%d'))
+        from utils import fmt_jalali, now_tehran
+        return fmt_jalali(now_tehran().strftime('%Y-%m-%d'))
     except Exception:
         from datetime import datetime
         return datetime.now().strftime('%Y-%m-%d')
