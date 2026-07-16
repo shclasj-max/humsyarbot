@@ -6,6 +6,7 @@
 """
 import os, json, logging, io
 from datetime import datetime
+from utils import fmt_jalali_dt, now_tehran
 from bson import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -61,6 +62,18 @@ async def backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'export_qbank':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
         await _export_section(query, 'qbank')
+
+    elif action == 'export_subscription':
+        await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
+        await _export_section(query, 'subscription')
+
+    elif action == 'export_grades':
+        await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
+        await _export_section(query, 'grades')
+
+    elif action == 'export_access':
+        await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
+        await _export_section(query, 'access')
 
     elif action == 'restore_prompt':
         await query.edit_message_text(
@@ -144,7 +157,7 @@ async def _show_auto_settings(query):
 
 
 async def _show_menu(query):
-    now = datetime.now().strftime('%Y-%m-%d %H:%M')
+    now = fmt_jalali_dt(now_tehran().isoformat())
     auto_on = await db.get_setting('auto_backup_enabled', False)
     auto_hour = await db.get_setting('auto_backup_hour', 3)
     auto_label = f"⏰ بکاپ خودکار: {'فعال — ساعت ' + str(auto_hour) + ':00' if auto_on else 'غیرفعال'}"
@@ -154,6 +167,9 @@ async def _show_menu(query):
          InlineKeyboardButton("📚 علوم پایه",       callback_data='backup:export_content')],
         [InlineKeyboardButton("📖 رفرنس‌ها",        callback_data='backup:export_refs'),
          InlineKeyboardButton("🧪 بانک سوال",       callback_data='backup:export_qbank')],
+        [InlineKeyboardButton("💳 اشتراک و پرداخت", callback_data='backup:export_subscription'),
+         InlineKeyboardButton("📊 نمرات",           callback_data='backup:export_grades')],
+        [InlineKeyboardButton("🔐 دسترسی‌ها و تنظیمات", callback_data='backup:export_access')],
         [InlineKeyboardButton("📥 بازیابی از فایل", callback_data='backup:restore_prompt')],
         [InlineKeyboardButton(auto_label, callback_data='backup:auto_settings')],
         [InlineKeyboardButton("🔙 بازگشت به پنل",   callback_data='admin:cat_settings')],
@@ -248,19 +264,96 @@ async def build_full_backup_data() -> dict:
         'data':        tickets
     }
 
+    # ── FIX جدید: دسترسی‌ها و امنیت — نقش‌های ادمین، بلک‌لیست، ورودی‌ها ──
+    # این‌ها حیاتی‌اند: اگه گم بشن، همه‌ی نقش‌های تفویض‌شده (نماینده‌ها،
+    # مدیران محتوای محدود و...) و لیست کاربران بلاک‌شده از دست می‌ره.
+    admin_roles = await db.admin_roles.find({}).to_list(1000)
+    blacklist   = await db.blacklist.find({}).to_list(5000)
+    intakes     = await db.intakes.find({}).to_list(500)
+    data['sections']['access_control'] = {
+        'description': 'دسترسی‌ها و امنیت — نقش‌های ادمین، بلک‌لیست، ورودی‌ها',
+        'admin_roles': {'count': len(admin_roles), 'data': admin_roles},
+        'blacklist':   {'count': len(blacklist),   'data': blacklist},
+        'intakes':     {'count': len(intakes),     'data': intakes},
+    }
+
+    # ── FIX جدید: سیستم اشتراک — دقیقاً همون چیزی که قبلاً توی بکاپ نبود ──
+    sub_plans     = await db.sub_plans.find({}).to_list(200)
+    subscriptions = await db.subscriptions.find({}).to_list(20000)
+    sub_payments  = await db.sub_payments.find({}).to_list(20000)
+    discount_codes= await db.discount_codes.find({}).to_list(1000)
+    data['sections']['subscription_system'] = {
+        'description': 'سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای پرداخت، کدهای تخفیف',
+        'plans':          {'count': len(sub_plans),      'data': sub_plans},
+        'subscriptions':  {'count': len(subscriptions),  'data': subscriptions},
+        'payments':       {'count': len(sub_payments),   'data': sub_payments},
+        'discount_codes': {'count': len(discount_codes), 'data': discount_codes},
+    }
+
+    # ── FIX جدید: نمرات ──
+    grades = await db.grades.find({}).to_list(20000)
+    data['sections']['grades'] = {
+        'description': 'نمرات ثبت‌شده توسط ادمین/نماینده‌های ورودی',
+        'count':       len(grades),
+        'data':        grades
+    }
+
+    # ── FIX جدید: تنظیمات کلی ربات — یک سند واحد (شماره کارت، کلید
+    # اجباری اشتراک، بازه نوتیف، حالت تعمیر، لینک حمایت مالی و...) ──
+    settings_doc = await db.settings.find_one({'_id': 'global'})
+    data['sections']['settings'] = {
+        'description': 'تنظیمات کلی ربات (یک سند واحد)',
+        'count':       1 if settings_doc else 0,
+        'data':        settings_doc or {},
+    }
+
+    # ── FIX جدید: گزارش‌ها و لاگ‌ها — کمتر حیاتی، ولی برای پیگیری مفیدن ──
+    content_reports = await db.content_reports.find({}).to_list(3000)
+    audit_logs       = await db.audit_logs.find({}).to_list(3000)
+    notif_runs        = await db.notif_runs.find({}).to_list(1000)
+    data['sections']['logs'] = {
+        'description': 'گزارش محتوا، لاگ فعالیت‌های حساس، تاریخچه‌ی اجرای نوتیف‌ها',
+        'content_reports': {'count': len(content_reports), 'data': content_reports},
+        'audit_logs':       {'count': len(audit_logs),       'data': audit_logs},
+        'notif_runs':        {'count': len(notif_runs),        'data': notif_runs},
+    }
+
+    # ── FIX جدید: آمار خام — پاسخ‌های دانشجویان به سوالات ──
+    stats_rows = await db.stats_col.find({}).to_list(20000)
+    answers    = await db.answers.find({}).to_list(30000)
+    data['sections']['stats'] = {
+        'description': 'آمار خام تمرین‌ها — ممکن است در حجم خیلی بالا محدود (cap) شده باشد',
+        'stats':   {'count': len(stats_rows), 'data': stats_rows},
+        'answers': {'count': len(answers),    'data': answers},
+    }
+
     # آمار خلاصه
     data['summary'] = {
-        'users':        len(users),
-        'lessons':      len(lessons),
-        'sessions':     len(sessions),
-        'content_files':len(content),
-        'ref_subjects': len(subjects),
-        'ref_books':    len(books),
-        'ref_files':    len(ref_files),
-        'questions':    len(questions),
-        'schedules':    len(schedules),
-        'faqs':         len(faqs),
-        'tickets':      len(tickets),
+        'users':          len(users),
+        'lessons':        len(lessons),
+        'sessions':       len(sessions),
+        'content_files':  len(content),
+        'ref_subjects':   len(subjects),
+        'ref_books':      len(books),
+        'ref_files':      len(ref_files),
+        'questions':      len(questions),
+        'schedules':      len(schedules),
+        'faqs':           len(faqs),
+        'tickets':        len(tickets),
+        'admin_roles':    len(admin_roles),
+        'blacklist':      len(blacklist),
+        'intakes':        len(intakes),
+        'sub_plans':      len(sub_plans),
+        'subscriptions':  len(subscriptions),
+        'sub_payments':   len(sub_payments),
+        'discount_codes': len(discount_codes),
+        'grades':         len(grades),
+        'settings':       1 if settings_doc else 0,
+        'content_reports':len(content_reports),
+        'audit_logs':     len(audit_logs),
+        'notif_runs':     len(notif_runs),
+        'stats_rows':     len(stats_rows),
+        'answers':        len(answers),
     }
     return data
 
@@ -302,7 +395,7 @@ async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str =
     caption = (
         f"💾 <b>بکاپ خودکار روزانه</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"🕐 {fmt_jalali_dt(now_tehran().isoformat())}\n\n"
         + '\n'.join(stats_lines) +
         f"\n\n📦 حجم: {len(file_bytes)//1024} KB"
     )
@@ -352,6 +445,34 @@ async def _export_section(query, section: str):
             data['questions']   = {'count': len(questions),   'data': questions}
             data['files']       = {'count': len(qbank_files), 'data': qbank_files}
 
+        elif section == 'subscription':
+            sub_plans      = await db.sub_plans.find({}).to_list(200)
+            subscriptions  = await db.subscriptions.find({}).to_list(20000)
+            sub_payments   = await db.sub_payments.find({}).to_list(20000)
+            discount_codes = await db.discount_codes.find({}).to_list(1000)
+            data['description']     = 'سیستم اشتراک — پلن‌ها، وضعیت کاربران، رسیدها، کدهای تخفیف'
+            data['plans']           = {'count': len(sub_plans),      'data': sub_plans}
+            data['subscriptions']   = {'count': len(subscriptions),  'data': subscriptions}
+            data['payments']        = {'count': len(sub_payments),   'data': sub_payments}
+            data['discount_codes']  = {'count': len(discount_codes), 'data': discount_codes}
+
+        elif section == 'grades':
+            grades = await db.grades.find({}).to_list(20000)
+            data['description'] = 'نمرات ثبت‌شده'
+            data['count']       = len(grades)
+            data['data']        = grades
+
+        elif section == 'access':
+            admin_roles  = await db.admin_roles.find({}).to_list(1000)
+            blacklist    = await db.blacklist.find({}).to_list(5000)
+            intakes      = await db.intakes.find({}).to_list(500)
+            settings_doc = await db.settings.find_one({'_id': 'global'})
+            data['description'] = 'دسترسی‌ها (نقش/بلک‌لیست/ورودی) + تنظیمات ربات'
+            data['admin_roles'] = {'count': len(admin_roles), 'data': admin_roles}
+            data['blacklist']   = {'count': len(blacklist),   'data': blacklist}
+            data['intakes']     = {'count': len(intakes),     'data': intakes}
+            data['settings']    = {'count': 1 if settings_doc else 0, 'data': settings_doc or {}}
+
         await _send_json_file(query, data, filename=f'backup_{section}')
 
     except Exception as e:
@@ -394,7 +515,7 @@ async def _send_json_file(query, data: dict, filename: str):
     caption = (
         f"💾 <b>پشتیبان‌گیری موفق</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"🕐 {fmt_jalali_dt(now_tehran().isoformat())}\n\n"
         f"{stats_text}\n\n"
         f"📦 حجم: {len(file_bytes)//1024} KB\n\n"
         f"<i>این فایل را در جای امنی نگه‌دارید.\n"
@@ -488,6 +609,11 @@ async def backup_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"📁 فایل محتوا: {summary.get('content_files',0)}",
                 f"📘 رفرنس کتاب: {summary.get('ref_books',0)}",
                 f"🧪 سوالات: {summary.get('questions',0)}",
+                f"💳 اشتراک‌ها: {summary.get('subscriptions',0)}",
+                f"🧾 رسیدهای پرداخت: {summary.get('sub_payments',0)}",
+                f"📊 نمرات: {summary.get('grades',0)}",
+                f"🔐 نقش‌های ادمین: {summary.get('admin_roles',0)}",
+                f"⚙️ تنظیمات ربات: {'دارد' if summary.get('settings',0) else 'ندارد'}",
             ])
         else:
             count = data.get('count', '?')
@@ -553,13 +679,19 @@ async def backup_confirm_restore(update: Update, context: ContextTypes.DEFAULT_T
 
         result_lines = []
         labels = {
-            'users':         '👥 کاربران',
-            'basic_science': '📘 علوم پایه',
-            'references':    '📚 رفرنس‌ها',
-            'qbank':         '🧪 بانک سوال',
-            'schedules':     '📅 برنامه',
-            'faq':           '❓ FAQ',
-            'tickets':       '🎫 تیکت‌ها',
+            'users':               '👥 کاربران',
+            'basic_science':       '📘 علوم پایه',
+            'references':          '📚 رفرنس‌ها',
+            'qbank':                '🧪 بانک سوال',
+            'schedules':            '📅 برنامه',
+            'faq':                  '❓ FAQ',
+            'tickets':              '🎫 تیکت‌ها',
+            'access_control':       '🔐 دسترسی‌ها (نقش/بلک‌لیست/ورودی)',
+            'subscription_system':  '💳 اشتراک و پرداخت',
+            'grades':                '📊 نمرات',
+            'settings':              '⚙️ تنظیمات ربات',
+            'logs':                  '📋 گزارش‌ها و لاگ‌ها',
+            'stats':                 '📈 آمار خام تمرین‌ها',
         }
         for k, v in restored.items():
             result_lines.append(f"{labels.get(k, k)}: {v} رکورد")
@@ -642,12 +774,12 @@ async def _restore_section(section: str, sec_data: dict) -> int:
         rows = sec_data.get('data', [])
         total += await _upsert_many(db.users, rows)
 
-    elif section == 'basic_science':
+    elif section in ('basic_science', 'content'):
         for sub, col in [('lessons','bs_lessons'),('sessions','bs_sessions'),('content','bs_content')]:
             rows = sec_data.get(sub, {}).get('data', [])
             total += await _upsert_many(getattr(db, col), rows)
 
-    elif section == 'references':
+    elif section in ('references', 'refs'):
         for sub, col in [('subjects','ref_subjects'),('books','ref_books'),('files','ref_files')]:
             rows = sec_data.get(sub, {}).get('data', [])
             total += await _upsert_many(getattr(db, col), rows)
@@ -668,5 +800,49 @@ async def _restore_section(section: str, sec_data: dict) -> int:
     elif section == 'tickets':
         rows = sec_data.get('data', [])
         total += await _upsert_many(db.tickets, rows)
+
+    # ── FIX جدید: بازیابی بخش‌های تازه‌اضافه‌شده — با alias برای هر دو
+    # نامی که ممکنه فایل بکاپ داشته باشه (بکاپ کامل در برابر بکاپ سریع) ──
+    elif section in ('access_control', 'access'):
+        for sub, col in [('admin_roles', 'admin_roles'), ('blacklist', 'blacklist'), ('intakes', 'intakes')]:
+            rows = sec_data.get(sub, {}).get('data', [])
+            total += await _upsert_many(getattr(db, col), rows)
+        # بکاپ سریع «دسترسی‌ها و تنظیمات» شامل settings هم می‌شود
+        settings_data = dict(sec_data.get('settings', {}).get('data', {}) or {})
+        if settings_data:
+            settings_data.pop('_id', None)
+            await db.settings.update_one({'_id': 'global'}, {'$set': settings_data}, upsert=True)
+            total += 1
+
+    elif section in ('subscription_system', 'subscription'):
+        for sub, col in [('plans', 'sub_plans'), ('subscriptions', 'subscriptions'),
+                          ('payments', 'sub_payments'), ('discount_codes', 'discount_codes')]:
+            rows = sec_data.get(sub, {}).get('data', [])
+            total += await _upsert_many(getattr(db, col), rows)
+
+    elif section == 'grades':
+        rows = sec_data.get('data', [])
+        total += await _upsert_many(db.grades, rows)
+
+    elif section == 'settings':
+        # سند تنظیمات یک رکورد واحده (_id='global')، نه لیست — merge
+        # می‌کنیم (نه جایگزینی کامل) تا تنظیماتی که بعد از این بکاپ
+        # روی سرور فعلی ست شده‌اند حذف نشوند.
+        settings_data = dict(sec_data.get('data', {}) or {})
+        if settings_data:
+            settings_data.pop('_id', None)
+            await db.settings.update_one({'_id': 'global'}, {'$set': settings_data}, upsert=True)
+            total += 1
+
+    elif section == 'logs':
+        for sub, col in [('content_reports', 'content_reports'),
+                          ('audit_logs', 'audit_logs'), ('notif_runs', 'notif_runs')]:
+            rows = sec_data.get(sub, {}).get('data', [])
+            total += await _upsert_many(getattr(db, col), rows)
+
+    elif section == 'stats':
+        for sub, col in [('stats', 'stats_col'), ('answers', 'answers')]:
+            rows = sec_data.get(sub, {}).get('data', [])
+            total += await _upsert_many(getattr(db, col), rows)
 
     return total
