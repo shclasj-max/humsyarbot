@@ -11,7 +11,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes
 from database import db
-from utils import fmt_jalali, send_audit_log
+from utils import fmt_jalali, fmt_jalali_dt, send_audit_log
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -629,7 +629,7 @@ async def _show_ticket_detail(query, ticket: dict, is_admin: bool):
             f"👥 گروه: {group or '—'}\n"
             f"📋 موضوع: {ticket.get('subject','')}\n"
             f"🔘 وضعیت: {status_icon}\n"
-            f"📅 تاریخ ثبت: {ticket['created_at'][:10]}\n"
+            f"📅 تاریخ ثبت: {fmt_jalali_dt(ticket['created_at'])}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"💬 <b>پیام اولیه:</b>\n{ticket['message']}\n"
         )
@@ -638,7 +638,7 @@ async def _show_ticket_detail(query, ticket: dict, is_admin: bool):
             f"🎫 <b>تیکت #{tid}</b>\n"
             f"📋 {ticket.get('subject','')}\n"
             f"🔘 {status_icon}\n"
-            f"📅 {ticket['created_at'][:10]}\n"
+            f"📅 {fmt_jalali_dt(ticket['created_at'], with_time=False)}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
             f"💬 <b>پیام شما:</b>\n{ticket['message']}\n"
         )
@@ -647,7 +647,7 @@ async def _show_ticket_detail(query, ticket: dict, is_admin: bool):
     if replies:
         text += f"\n━━━━━━━━━━━━━━━━\n💬 <b>ادامه گفتگو ({len(replies)}):</b>\n"
         for i, r in enumerate(replies, 1):
-            at_str  = r.get('at', '')[:10] if r.get('at') else ''
+            at_str  = fmt_jalali_dt(r.get('at', ''), with_time=False) if r.get('at') else ''
             msg_txt = r.get('text', '')
             # تشخیص فرستنده
             if msg_txt.startswith('[دانشجو]'):
