@@ -47,18 +47,10 @@ def _draw_logo(c, cx, cy, r):
     c.drawCentredString(cx, cy - r * 0.32, rtl("ها"))
 
 
-def _weekday_fa(date_str: str) -> str:
-    try:
-        from utils import jalali_weekday_index, JALALI_WEEK_SAT_FIRST
-        return JALALI_WEEK_SAT_FIRST[jalali_weekday_index(date_str)]
-    except Exception:
-        return ''
-
-
 def _today_jalali() -> str:
     try:
-        from utils import fmt_jalali
-        return fmt_jalali(datetime.now().strftime('%Y-%m-%d'))
+        from utils import fmt_jalali, now_tehran
+        return fmt_jalali(now_tehran().strftime('%Y-%m-%d'))
     except Exception:
         return datetime.now().strftime('%Y-%m-%d')
 
@@ -147,15 +139,26 @@ def _draw_row(c, item: dict, y: float, zebra: bool):
         ly -= 4 * mm
     cx -= w
 
-    # تاریخ (+ روز هفته)
+    # تاریخ (+ روز هفته) — FIX مهم: قبلاً بدون rtl() رسم می‌شد که باعث
+    # به‌هم‌ریختگی/برعکس‌نمایی حروف فارسی می‌شد؛ و چون fmt_jalali() خودش
+    # اسم روز هفته را داخل پرانتز برمی‌گرداند، رسم جداگانه‌ی روز هفته
+    # زیرش باعث افتادن دو متن روی هم می‌شد. حالا فقط یک‌بار، درست‌شکل‌
+    # داده‌شده و با فونت خواناتر رسم می‌شود.
     w = _COL['date']
-    wd = _weekday_fa(item.get('date', ''))
-    c.setFont(MEDIUM, 9)
+    full_date = fmt_jalali(item.get('date', ''))
+    if '(' in full_date:
+        date_part, wd_part = full_date.split('(', 1)
+        date_part = date_part.strip()
+        wd_part = '(' + wd_part
+    else:
+        date_part, wd_part = full_date, ''
+    c.setFont(BOLD, 10)
     c.setFillColor(NAVY_LIGHT)
-    c.drawCentredString(cx - w / 2, mid + 1.8, fa_digits(fmt_jalali(item.get('date', ''))))
-    c.setFont(REGULAR, 7.5)
-    c.setFillColor(GRAY)
-    c.drawCentredString(cx - w / 2, mid - 2.8, rtl(wd))
+    c.drawCentredString(cx - w / 2, mid + 2.3 * mm, rtl(fa_digits(date_part)))
+    if wd_part:
+        c.setFont(REGULAR, 7.5)
+        c.setFillColor(GRAY)
+        c.drawCentredString(cx - w / 2, mid - 3 * mm, rtl(fa_digits(wd_part)))
     cx -= w
 
     # ساعت
