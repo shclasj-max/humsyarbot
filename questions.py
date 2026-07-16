@@ -14,7 +14,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from database import db
-from utils import send_audit_log
+from utils import send_audit_log, fmt_jalali_dt
 
 logger     = logging.getLogger(__name__)
 ADMIN_ID   = int(os.getenv('ADMIN_ID', '0'))
@@ -1453,7 +1453,7 @@ async def _ca_question_view(query, uid: int, qid: str):
         f"📚 {q.get('lesson','')} — {q.get('topic','')}\n"
         f"📊 {diff_txt}  |  {status}\n"
         f"{creator_line}\n"
-        f"📅 {q.get('created_at','')[:10]}\n\n"
+        f"📅 {fmt_jalali_dt(q.get('created_at',''), with_time=False)}\n\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"❓ <b>{q.get('question','')}</b>\n\n"
         f"{opts_text}\n\n"
