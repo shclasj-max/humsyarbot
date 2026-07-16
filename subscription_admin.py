@@ -289,7 +289,7 @@ _SUBSCRIBERS_PAGE_SIZE = 10
 
 
 async def _show_subscribers_list(query, page: int):
-    from utils import fmt_jalali
+    from utils import fmt_jalali_dt
     total = await db.sub_count_by_status('active')
     items = await db.sub_list_by_status('active', skip=page * _SUBSCRIBERS_PAGE_SIZE, limit=_SUBSCRIBERS_PAGE_SIZE)
 
@@ -303,7 +303,7 @@ async def _show_subscribers_list(query, page: int):
         name = user.get('name', str(uid)) if user else str(uid)
         days_left = await db.sub_days_left(uid)
         soon = "🔴" if days_left <= 3 else "✅"
-        lines.append(f"{soon} {name} — {s.get('plan_name','-')} — {days_left} روز مانده (تا {fmt_jalali(s.get('end_date',''))})")
+        lines.append(f"{soon} {name} — {s.get('plan_name','-')} — {days_left} روز مانده (تا {fmt_jalali_dt(s.get('end_date',''), with_time=False)})")
         keyboard.append([InlineKeyboardButton(f"👤 {name[:25]}", callback_data=f"suba:user:{uid}")])
 
     nav_row = []
@@ -404,7 +404,7 @@ async def _quick_activate(query, context, target_uid: int, days: int):
 
 
 async def _show_user_payment_history(query, target_uid: int):
-    from utils import fmt_jalali
+    from utils import fmt_jalali_dt
     history = await db.sub_payment_history(target_uid)
     icons = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
     lines = [f"🧾 <b>تاریخچه‌ی پرداخت کاربر {target_uid}</b>\n━━━━━━━━━━━━━━━━"]
@@ -412,7 +412,7 @@ async def _show_user_payment_history(query, target_uid: int):
         lines.append("هیچ رسیدی ثبت نکرده.")
     for p in history[:15]:
         icon = icons.get(p['status'], '•')
-        date = fmt_jalali(p.get('submitted_at', ''))
+        date = fmt_jalali_dt(p.get('submitted_at', ''))
         lines.append(f"{icon} {p['plan_name']} — {_fmt_price(p['final_price'])} — {date}")
     await query.edit_message_text(
         "\n".join(lines), parse_mode='HTML',
@@ -490,7 +490,7 @@ async def handle_revoke_reason_text(update, context):
 # ══════════════════════════════════════════════════
 
 async def _show_discounts(query):
-    from utils import fmt_jalali
+    from utils import fmt_jalali_dt
     codes = await db.discount_list()
     lines = ["🎟 <b>کدهای تخفیف</b>\n━━━━━━━━━━━━━━━━"]
     keyboard = []
@@ -499,7 +499,7 @@ async def _show_discounts(query):
     for c in codes[:20]:
         mark = "✅" if c.get('active') else "⛔️"
         used = f"{c.get('used_count',0)}/{c['max_uses'] if c.get('max_uses') else '∞'}"
-        exp  = f" — تا {fmt_jalali(c['expires_at'])}" if c.get('expires_at') else ""
+        exp  = f" — تا {fmt_jalali_dt(c['expires_at'], with_time=False)}" if c.get('expires_at') else ""
         lines.append(f"{mark} <code>{c['code']}</code> — {c['percent']}٪ — استفاده: {used}{exp}")
         keyboard.append([
             InlineKeyboardButton(f"{'⛔️' if c.get('active') else '✅'} {c['code']}",
