@@ -11,7 +11,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db
-from utils import fmt_jalali, safe_send
+from utils import fmt_jalali_dt, safe_send
 
 logger = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -244,7 +244,7 @@ async def _build_my_grades_text(uid: int) -> str:
     lines = ["📊 <b>نمرات من</b>\n━━━━━━━━━━━━━━━━"]
     total = 0
     for g in grades:
-        lines.append(f"📚 {g['lesson']} — {g['exam_title']}\n   🎯 <b>{g['score']}/20</b>  |  {fmt_jalali(g.get('exam_date',''))}")
+        lines.append(f"📚 {g['lesson']} — {g['exam_title']}\n   🎯 <b>{g['score']}/20</b>  |  {fmt_jalali_dt(g.get('exam_date',''), with_time=False)}")
         total += g['score']
     avg = round(total / len(grades), 2)
     lines.append(f"\n━━━━━━━━━━━━━━━━\n📈 میانگین کل: <b>{avg}/20</b>")
