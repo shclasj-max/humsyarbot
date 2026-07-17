@@ -569,26 +569,65 @@ async def _show_grant_menu(query):
 async def _prompt_grant_list(query, context):
     context.user_data['mode'] = 'suba_grant_list_ids'
     await query.edit_message_text(
-        "📋 <b>لیست آیدی‌های عددی</b>\n\n"
-        "آیدی‌ها رو با کاما یا خط جدید بفرست (فقط عدد):\n\n"
-        "مثال:\n<code>123456789, 987654321\n555555555</code>",
+        "📋 <b>لیست دانشجویان</b>\n\n"
+        "هر نفر رو توی یه خط جدا بفرست — هرکدوم از این سه حالت می‌تونه باشه:\n"
+        "• آیدی عددی تلگرام\n"
+        "• یوزرنیم (با یا بدون @)\n"
+        "• اسم دقیق ثبت‌شده توی ربات\n\n"
+        "مثال:\n<code>123456789\n@ali_r\nسارا محمدی</code>",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup([_back('suba:grant')])
     )
 
 
 async def handle_grant_list_ids_text(update, context):
-    import re
+    """
+    FIX مهم: قبلاً فقط آیدی عددی قبول می‌کرد و هر چیز دیگه (یوزرنیم،
+    اسم) رو بی‌صدا نادیده می‌گرفت — حتی با split روی فاصله که اسم‌های
+    چندکلمه‌ای رو هم خراب می‌کرد. حالا هر خط می‌تواند آیدی عددی،
+    یوزرنیم (با/بدون @)، یا اسم ثبت‌شده در ربات باشد؛ هر خط جدا پردازش
+    و به کاربر واقعی متصل می‌شود.
+    """
     context.user_data.pop('mode', None)
     raw = update.message.text.strip()
-    ids = [int(x) for x in re.split(r'[,\s]+', raw) if x.strip().isdigit()]
-    if not ids:
-        await update.message.reply_text("❌ هیچ آیدی معتبری پیدا نشد.")
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        await update.message.reply_text("❌ چیزی وارد نشد.")
         return
+
+    resolved, not_found, ambiguous = [], [], []
+    for line in lines:
+        if line.lstrip('+-').isdigit():
+            resolved.append((int(line), line))
+            continue
+        matches = await db.search_users(line)
+        if len(matches) == 1:
+            resolved.append((matches[0]['user_id'], matches[0].get('name', line)))
+        elif len(matches) == 0:
+            not_found.append(line)
+        else:
+            ambiguous.append(line)
+
+    if not resolved:
+        await update.message.reply_text(
+            "❌ هیچ‌کدوم پیدا نشدن. هر خط می‌تونه آیدی عددی، یوزرنیم (با یا بدون @)، "
+            "یا اسم دقیق ثبت‌شده توی ربات باشه."
+        )
+        return
+
+    ids = [uid for uid, _ in resolved]
     context.user_data['suba_grant_list'] = ids
     context.user_data['mode'] = 'suba_grant_list_days'
-    await update.message.reply_text(
-        f"✅ {len(ids)} آیدی ثبت شد.\nحالا چند روز اشتراک رایگان بدیم؟ (فقط عدد)"
-    )
+
+    lines_out = [f"✅ {len(resolved)} نفر پیدا شد:"]
+    lines_out += [f"   • {name}" for _, name in resolved[:15]]
+    if len(resolved) > 15:
+        lines_out.append(f"   … و {len(resolved)-15} نفر دیگر")
+    if ambiguous:
+        lines_out.append(f"\n⚠️ {len(ambiguous)} مورد چند نتیجه داشت (نادیده گرفته شد): " + "، ".join(ambiguous[:5]))
+    if not_found:
+        lines_out.append(f"\n❌ {len(not_found)} مورد پیدا نشد: " + "، ".join(not_found[:5]))
+    lines_out.append("\nحالا چند روز اشتراک رایگان بدیم؟ (فقط عدد)")
+    await update.message.reply_text("\n".join(lines_out))
 
 
 async def handle_grant_list_days_text(update, context):
