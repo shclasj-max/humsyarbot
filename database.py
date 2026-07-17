@@ -209,15 +209,40 @@ class DB:
         return False
 
     async def search_users(self, query_text: str):
+        """
+        FIX مهم: قبلاً فقط name/student_id/username رو با regex می‌گشت —
+        یعنی اگه کسی آیدی عددی تلگرام (user_id) وارد می‌کرد، هیچ‌وقت
+        پیدا نمی‌شد (چون user_id عدده، نه رشته، و اصلاً توی کوئری
+        نبود). حالا هر سه الگو پشتیبانی می‌شه:
+          ۱) آیدی عددی تلگرام (مثلاً 123456789)
+          ۲) یوزرنیم، با یا بدون @ (مثلاً @ali_r یا ali_r)
+          ۳) اسمی که توی ربات ثبت‌نام کرده
+        """
         import re
-        regex = {'$regex': re.escape(query_text), '$options': 'i'}
-        return await self.users.find({
-            '$or': [
-                {'name':       regex},
-                {'student_id': regex},
-                {'username':   regex},
-            ]
-        }).to_list(20)
+        raw = (query_text or '').strip()
+        if not raw:
+            return []
+
+        or_clauses = []
+
+        # ۱) آیدی عددی تلگرام — تطبیق دقیق (نه substring)
+        if raw.lstrip('+-').isdigit():
+            try:
+                or_clauses.append({'user_id': int(raw)})
+            except (ValueError, OverflowError):
+                pass
+
+        # ۲) یوزرنیم — پشتیبانی از هر دو حالت با/بدون @
+        uname = raw.lstrip('@').strip()
+        if uname:
+            or_clauses.append({'username': {'$regex': re.escape(uname), '$options': 'i'}})
+
+        # ۳) اسم ثبت‌شده در ربات + شماره دانشجویی (مثل قبل)
+        regex = {'$regex': re.escape(raw), '$options': 'i'}
+        or_clauses.append({'name': regex})
+        or_clauses.append({'student_id': regex})
+
+        return await self.users.find({'$or': or_clauses}).to_list(20)
 
     async def get_leaderboard(self, limit: int = 10):
         return await self.users.find(
