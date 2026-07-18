@@ -6,7 +6,7 @@
 """
 import os, json, logging, io
 from datetime import datetime
-from utils import fmt_jalali_dt, now_tehran
+from utils import fmt_jalali_dt, now_tehran, now_tehran_str
 from bson import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -157,7 +157,7 @@ async def _show_auto_settings(query):
 
 
 async def _show_menu(query):
-    now = fmt_jalali_dt(now_tehran().isoformat())
+    now = now_tehran_str()
     auto_on = await db.get_setting('auto_backup_enabled', False)
     auto_hour = await db.get_setting('auto_backup_hour', 3)
     auto_label = f"⏰ بکاپ خودکار: {'فعال — ساعت ' + str(auto_hour) + ':00' if auto_on else 'غیرفعال'}"
@@ -395,7 +395,7 @@ async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str =
     caption = (
         f"💾 <b>بکاپ خودکار روزانه</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {fmt_jalali_dt(now_tehran().isoformat())}\n\n"
+        f"🕐 {now_tehran_str()}\n\n"
         + '\n'.join(stats_lines) +
         f"\n\n📦 حجم: {len(file_bytes)//1024} KB"
     )
@@ -515,7 +515,7 @@ async def _send_json_file(query, data: dict, filename: str):
     caption = (
         f"💾 <b>پشتیبان‌گیری موفق</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {fmt_jalali_dt(now_tehran().isoformat())}\n\n"
+        f"🕐 {now_tehran_str()}\n\n"
         f"{stats_text}\n\n"
         f"📦 حجم: {len(file_bytes)//1024} KB\n\n"
         f"<i>این فایل را در جای امنی نگه‌دارید.\n"
