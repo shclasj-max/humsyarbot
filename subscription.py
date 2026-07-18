@@ -11,7 +11,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db
-from utils import ADMIN_ID as _ADMIN_ID_FALLBACK, safe_send
+from utils import ADMIN_ID as _ADMIN_ID_FALLBACK, safe_send, send_audit_log
 
 logger = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0')) or _ADMIN_ID_FALLBACK
@@ -383,6 +383,16 @@ async def _admin_approve(query, context, pid: str):
     except Exception:
         pass
 
+    # FIX جدید: تأیید پرداخت قبلاً هیچ لاگی نداشت — چون مستقیم با پول
+    # سروکار داره باید مثل بقیه‌ی عملیات مالی ثبت بشه
+    await send_audit_log(
+        context.bot, 'admin', 'ادمین ارشد', ADMIN_ID,
+        f"تأیید رسید پرداخت — {payment['plan_name']} ({_fmt_price(payment.get('final_price', 0))})",
+        module='Subscription', severity='INFO',
+        target_id=str(payment['user_id']), target_type='user',
+        target_label=f"کاربر {payment['user_id']}", tags=['تایید_پرداخت']
+    )
+
 
 async def admin_reject_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = context.user_data.pop('sub_reject_pid', None)
@@ -402,6 +412,15 @@ async def admin_reject_reason_handler(update: Update, context: ContextTypes.DEFA
         parse_mode='HTML'
     )
     await update.message.reply_text("❌ رد شد و به دانشجو اطلاع داده شد.")
+
+    # FIX جدید: رد پرداخت هم قبلاً لاگ نمی‌شد
+    await send_audit_log(
+        context.bot, 'admin', 'ادمین ارشد', update.effective_user.id,
+        f"رد رسید پرداخت — {payment['plan_name']} — دلیل: {note}",
+        module='Subscription', severity='INFO',
+        target_id=str(payment['user_id']), target_type='user',
+        target_label=f"کاربر {payment['user_id']}", tags=['رد_پرداخت']
+    )
 
 
 # ══════════════════════════════════════════════════
