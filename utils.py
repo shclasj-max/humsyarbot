@@ -275,6 +275,24 @@ def today_start_utc_str() -> str:
     return (tehran_midnight - timedelta(hours=3, minutes=30)).strftime('%Y-%m-%dT%H:%M:%S')
 
 
+def now_tehran_str(with_time: bool = True) -> str:
+    """
+    FIX مهم: now_tehran() از قبل افست تهران را اعمال کرده است. در چند
+    جا اشتباهاً با fmt_jalali_dt(now_tehran().isoformat()) ترکیب شده
+    بود که باعث می‌شد افست ۳:۳۰ ساعت دوباره روی نتیجه‌ی already-shifted
+    اعمال شود (چون isoformat() یک +00:00 به رشته می‌چسباند و
+    fmt_jalali_dt آن را دوباره UTC خام فرض می‌کند) — یعنی ساعت نمایشی
+    ۷ ساعت جلوتر از UTC واقعی می‌شد، نه ۳:۳۰ ساعت درست. این تابع
+    مستقیماً از روی همان شیء already-shifted فرمت می‌دهد، بدون افست
+    دوباره — برای «همین الان» همیشه از این استفاده شود، نه ترکیب بالا.
+    """
+    nt = now_tehran()
+    date_part = fmt_jalali(nt.strftime('%Y-%m-%d'))
+    if with_time:
+        return f"{date_part} — ساعت {nt.strftime('%H:%M')}"
+    return date_part
+
+
 def fmt_jalali_dt(iso_str: str, with_time: bool = True) -> str:
     """
     FIX جدید: برای timestampهای سرورساخته (created_at/registered_at/
@@ -458,7 +476,7 @@ async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
     sev_meta  = SEVERITY_META.get(severity, SEVERITY_META['INFO'])
     cat_icon  = '🛡' if category == 'admin' else '🎓'
     cat_title = 'گزارش فعالیت مدیریتی' if category == 'admin' else 'گزارش فعالیت محتوا'
-    now_str   = fmt_jalali_dt(now_tehran().isoformat())
+    now_str   = now_tehran_str()
     module_fa = _fa_module(module) if module else ''
 
     lines = [
