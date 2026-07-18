@@ -18,7 +18,7 @@ from telegram.error import RetryAfter, Forbidden, BadRequest, TimedOut, NetworkE
 from database import db
 from utils import (
     main_keyboard, content_admin_keyboard, safe_send,
-    send_audit_log, get_keyboard_for_user, fmt_jalali_dt, now_tehran,
+    send_audit_log, get_keyboard_for_user, fmt_jalali_dt, now_tehran, now_tehran_str,
 )
 
 logger   = logging.getLogger(__name__)
@@ -1742,7 +1742,7 @@ async def _show_bot_status(query, context):
         online_line = "🟢 آنلاین: داده در دسترس نیست"
 
     s = await db.global_stats()
-    now_str = fmt_jalali_dt(now_tehran().isoformat())
+    now_str = now_tehran_str()
     lines_t = [
         "📡 <b>وضعیت ربات</b>",
         "━━━━━━━━━━━━━━━━",
