@@ -11,7 +11,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db
-from utils import fmt_jalali_dt, safe_send
+from utils import fmt_jalali_dt, safe_send, send_audit_log
 
 logger = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -189,6 +189,18 @@ async def _confirm_and_save(query, context):
     await query.edit_message_text(
         f"✅ <b>{len(saved)} نمره ثبت شد.</b>\nبه {sent} نفر نوتیف رفت.",
         parse_mode='HTML'
+    )
+
+    # FIX جدید: قبلاً ثبت نمره هیچ لاگی نداشت — چون مستقیم روی کارنامه‌ی
+    # دانشجو اثر می‌ذاره، باید مثل بقیه‌ی عملیات حساس ثبت بشه
+    actor = await db.get_user(query.from_user.id)
+    actor_name = actor.get('name', 'ادمین/نماینده') if actor else 'ادمین/نماینده'
+    actor_role = await db.get_actor_role_label(query.from_user.id)
+    await send_audit_log(
+        query.get_bot(), 'admin', actor_name, query.from_user.id,
+        f"ثبت دسته‌جمعی نمره ({len(saved)} نفر)", module='Grades', severity='INFO',
+        actor_role=actor_role, target_type='lesson', target_label=f"{lesson} — {exam_title}",
+        tags=['ثبت_نمره']
     )
 
 
