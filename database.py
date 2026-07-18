@@ -2023,6 +2023,8 @@ class DB:
         'Backup':        'بکاپ',
         'System':        'سیستم',
         'Auth':          'ورود/خروج',
+        'Subscription':  'اشتراک',   # FIX جدید
+        'Grades':        'نمرات',    # FIX جدید
     }
 
     async def log_action(self, actor_id: int, actor_name: str, actor_role: str,
