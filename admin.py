@@ -276,6 +276,8 @@ async def _show_cat_settings(query, uid: int = None):
         ])
         # FIX جدید: سیستم اشتراک — فقط ادمین ارشد
         keyboard.append([InlineKeyboardButton("💳 مدیریت اشتراک", callback_data='suba:main')])
+        # 🤖 AiHums — دستیار هوش مصنوعی
+        keyboard.append([InlineKeyboardButton("🤖 مدیریت AiHums", callback_data='ai:main')])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:main')])
     await query.edit_message_text(
         "⚙️ <b>تنظیمات و سیستم</b>\n━━━━━━━━━━━━━━━━",
