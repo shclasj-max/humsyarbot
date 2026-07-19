@@ -577,12 +577,11 @@ async def _show_overview(query):
     now = now_tehran().strftime('%H:%M — %Y/%m/%d')
 
     text = (
-        "╔══════════════════════╗\n"
-        "   📊 <b>داشبورد پنل محتوا</b>\n"
-        "╚══════════════════════╝\n"
+        "📊 <b>داشبورد پنل محتوا</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
         f"<i>🕐 {now}</i>\n\n"
 
-        "━━━━ 📘 <b>علوم پایه</b> ━━━━\n"
+        "📘 <b>علوم پایه</b>\n"
         f"📖 <b>{s['bs_lessons']}</b> درس   "
         f"📌 <b>{s['bs_sessions']}</b> جلسه   "
         f"📁 <b>{s['bs_total']}</b> فایل\n"
@@ -594,7 +593,7 @@ async def _show_overview(query):
         f"  📝 نکات: <b>{s['bs_note']}</b>        "
         f"🧪 تست: <b>{s['bs_test']}</b>\n\n"
 
-        "━━━━ 📚 <b>رفرنس‌ها</b> ━━━━━\n"
+        "📚 <b>رفرنس‌ها</b>\n"
         f"📖 <b>{s['ref_subjects']}</b> درس   "
         f"📘 <b>{s['ref_books']}</b> کتاب   "
         f"📁 <b>{s['ref_files']}</b> فایل\n"
@@ -602,7 +601,7 @@ async def _show_overview(query):
         f"  🇮🇷 فارسی: <b>{s['ref_fa']}</b>   "
         f"🌐 لاتین: <b>{s['ref_en']}</b>\n\n"
 
-        "━━━━ 🧪 <b>بانک سوال</b> ━━━━\n"
+        "🧪 <b>بانک سوال</b>\n"
         f"✅ تأیید شده: <b>{s['q_total']}</b>   "
         f"⏳ انتظار: <b>{s['q_pending']}</b>\n"
         f"<code>[{q_bar}]</code>\n"
@@ -610,7 +609,8 @@ async def _show_overview(query):
         f"👤 کاربران: <b>{s['q_by_users']}</b>\n"
         f"  📊 نسبت تولید توسط بات: <b>{q_ratio}</b>\n\n"
 
-        "━━━━ 📈 <b>کلی</b> ━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "📈 <b>کلی</b>\n"
         f"⬇️ کل دانلودها: <b>{s['total_downloads']}</b>\n"
         f"👥 دانشجویان فعال: <b>{s['users_count']}</b>\n"
     )
