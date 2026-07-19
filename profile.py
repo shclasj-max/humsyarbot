@@ -32,9 +32,8 @@ def _profile_text(user: dict, stats: dict, open_tickets: int, sub_line: str = ''
     intake    = user.get('intake', '') or 'ثبت نشده'
 
     return (
-        "╔══════════════════╗\n"
-        "   👤 <b>پروفایل من</b>\n"
-        "╚══════════════════╝\n\n"
+        "👤 <b>پروفایل من</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
         f"📛 <b>نام:</b>  {user.get('name', '')}\n"
         f"🎓 <b>شماره دانشجویی:</b>  {sid}\n"
         f"📅 <b>ورودی:</b>  {intake}\n"
