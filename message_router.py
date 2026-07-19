@@ -166,6 +166,10 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
         from questions import _main_menu_msg
         await _main_menu_msg(update.message)
 
+    elif text == "🤖 AiHums":
+        from ai_solver import show_ai_intro
+        await show_ai_intro(update, context)
+
     elif text == "❓ سوالات متداول":
         from faq import show_faq_main
         await show_faq_main(update.message)
