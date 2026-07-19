@@ -68,6 +68,8 @@ from content_admin import content_admin_callback, ca_file_handler, ca_text_handl
 from faq import faq_callback
 from ticket import ticket_callback, ticket_message_handler
 from reports import report_callback, handle_report_note_text   # FIX جدید
+from ai_admin import ai_admin_callback, ai_admin_text_handler   # 🤖 AiHums
+from ai_solver import handle_ai_text, handle_ai_photo           # 🤖 AiHums
 from database import db
 
 logging.basicConfig(
@@ -511,6 +513,13 @@ async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get('sub_mode') == 'awaiting_screenshot' and update.message.photo:
         return await sub_screenshot_handler(update, context)
 
+    # 🤖 AiHums — عکس سوال درسی (یا فایل تصویری) در حالت «پرسش از AI»
+    if context.user_data.get('mode') == 'ai_query' and (
+        update.message.photo or
+        (update.message.document and (update.message.document.mime_type or '').startswith('image/'))
+    ):
+        return await handle_ai_photo(update, context)
+
     # ۱. بکاپ restore
     if uid == ADMIN_ID and context.user_data.get('backup_mode') == 'waiting_restore':
         return await backup_file_handler(update, context)
@@ -734,11 +743,15 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     'set_auto_backup_hour', 'report_note', 'ticket_search',
     'set_maintenance_text', 'set_log_group_admin', 'set_log_group_content',
     'add_required_channel', 'edit_schedule_field', 'set_donation_link',
+    # FIX جدید: AiHums — اگر کاربر وسط حالت «پرسش از AI» باشد و دکمه‌ی
+    # دیگری از منو بزند، باید از حالت خارج شود نه اینکه پیامش به‌عنوان
+    # سوال جدید برای هوش مصنوعی ارسال شود.
+    'ai_query',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
     '📅 برنامه', '👤 پروفایل', '🔔 اعلان‌ها', '🎫 پشتیبانی',
-    '🎓 پنل محتوا', '👨\u200d⚕️ پنل ادمین',
+    '🎓 پنل محتوا', '👨\u200d⚕️ پنل ادمین', '🤖 AiHums',
 }
 
 
@@ -815,6 +828,16 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         'set_donation_link',
     ):
         return await handle_admin_text(update, context)
+
+    # ۴d. 🤖 AiHums — تنظیمات پنل ادمین (API Key/مدل/محدودیت/prompt)
+    if uid == ADMIN_ID and context.user_data.get('mode') in (
+        'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
+    ):
+        return await ai_admin_text_handler(update, context)
+
+    # ۴e. 🤖 AiHums — حالت «پرسش از AI» برای هر کاربر تأییدشده
+    if context.user_data.get('mode') == 'ai_query':
+        return await handle_ai_text(update, context)
 
     # ۵. FIX: qbank_awaiting_desc
     if uid == ADMIN_ID and context.user_data.get('mode') == 'qbank_awaiting_desc':
@@ -1048,6 +1071,7 @@ def build_application() -> Application:
         (subscription_callback,       r'^sub:'),
         (subscription_admin_callback, r'^suba:'),
         (grades_callback,             r'^grades:'),
+        (ai_admin_callback,           r'^ai:'),   # 🤖 AiHums — پنل ادمین
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
