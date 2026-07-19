@@ -90,10 +90,15 @@ async def set_ai_setting(key: str, value) -> None:
 async def _call_gemini(api_key: str, model: str, system_prompt: str,
                         text: str = None, image_bytes: bytes = None,
                         image_mime: str = 'image/jpeg', **_) -> str:
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={api_key}"
-    )
+    # FIX: از اواسط ۲۰۲۶ گوگل کلیدهای جدید با پیشوند «AQ.» صادر می‌کند که
+    # با روش قدیمیِ فرستادن کلید در URL (?key=...) کار نمی‌کنند و ۴۰۴/۴۰۳
+    # برمی‌گردانند. روش رسمی و سازگار با هر دو فرمت (چه AIzaSy... قدیمی،
+    # چه AQ.... جدید) فرستادن کلید در هدر x-goog-api-key است.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {
+        'Content-Type':   'application/json',
+        'x-goog-api-key': api_key,
+    }
 
     parts = []
     if image_bytes:
@@ -116,7 +121,7 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
 
     try:
         async with httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, headers=headers, json=payload)
     except httpx.TimeoutException:
         raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
     except httpx.HTTPError as e:
@@ -124,10 +129,10 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
 
     if resp.status_code == 429:
         raise AIQuotaError("سقف رایگان API برای امروز پر شده — کمی بعد دوباره امتحان کن.")
-    if resp.status_code in (400, 401, 403):
+    if resp.status_code in (400, 401, 403, 404):
         raise AIConfigError(
-            "کلید API نامعتبره یا دسترسی لازم رو نداره — ادمین باید از پنل "
-            "AiHums تنظیماتش رو چک کنه."
+            "کلید API نامعتبره، مدل اشتباهه یا دسترسی لازم رو نداره — ادمین باید از پنل "
+            f"AiHums تنظیماتش رو چک کنه. (کد خطا: {resp.status_code})"
         )
     if resp.status_code >= 500:
         raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — کمی بعد دوباره امتحان کن.")
