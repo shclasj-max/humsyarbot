@@ -55,9 +55,10 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("💎 اشتراک ویژه"), KeyboardButton("💙 حمایت مالی")],
-        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
+        [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
+        [KeyboardButton("🎫 پشتیبانی")],
     ], resize_keyboard=True)
 
 
@@ -65,9 +66,10 @@ def content_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("💎 اشتراک ویژه"), KeyboardButton("💙 حمایت مالی")],
-        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
+        [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
+        [KeyboardButton("🎫 پشتیبانی")],
         [KeyboardButton("🎓 پنل محتوا")],
     ], resize_keyboard=True)
 
@@ -76,9 +78,10 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("💎 اشتراک ویژه"), KeyboardButton("💙 حمایت مالی")],
-        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
+        [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
+        [KeyboardButton("🎫 پشتیبانی")],
         [KeyboardButton("👨‍⚕️ پنل ادمین"), KeyboardButton("🎓 پنل محتوا")],
     ], resize_keyboard=True)
 
@@ -91,9 +94,10 @@ def sub_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("📅 برنامه"),       KeyboardButton("👤 پروفایل")],
-        [KeyboardButton("💎 اشتراک ویژه"), KeyboardButton("💙 حمایت مالی")],
-        [KeyboardButton("🔔 اعلان‌ها"),     KeyboardButton("🎫 پشتیبانی")],
+        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
+        [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
+        [KeyboardButton("🎫 پشتیبانی")],
         [KeyboardButton("👨‍⚕️ پنل ادمین")],
     ], resize_keyboard=True)
 
