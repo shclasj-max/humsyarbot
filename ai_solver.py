@@ -26,7 +26,11 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 # ══════════════════════════════════════════════════
 #  پیش‌فرض‌ها — فقط وقتی استفاده می‌شن که ادمین هنوز چیزی ست نکرده
 # ══════════════════════════════════════════════════
-DEFAULT_MODEL  = 'gemini-2.5-flash'
+DEFAULT_MODELS = {
+    'gemini':     'gemini-2.5-flash',
+    'openrouter': 'google/gemma-4-31b-it:free',
+}
+DEFAULT_MODEL  = DEFAULT_MODELS['gemini']   # برای سازگاری با کدهای قبلی
 DEFAULT_LIMIT  = 15   # سقف روزانه‌ی هر کاربر عادی؛ 0 = نامحدود
 DEFAULT_PROMPT = (
     "تو «هوشیار» هستی، دستیار هوش مصنوعیِ ربات همیار (Humsyar) برای "
@@ -66,11 +70,12 @@ class AIConfigError(AIError):
 
 async def get_ai_config() -> dict:
     raw = await db.get_settings_by_prefix('ai_')
+    provider = raw.get('ai_provider', 'gemini')
     return {
         'enabled':       bool(raw.get('ai_enabled', False)),
-        'provider':      raw.get('ai_provider', 'gemini'),
+        'provider':      provider,
         'api_key':       raw.get('ai_api_key', ''),
-        'model':         raw.get('ai_model', DEFAULT_MODEL),
+        'model':         raw.get('ai_model') or DEFAULT_MODELS.get(provider, DEFAULT_MODEL),
         'daily_limit':   int(raw.get('ai_daily_limit', DEFAULT_LIMIT) or 0),
         'system_prompt': raw.get('ai_system_prompt', DEFAULT_PROMPT),
     }
@@ -150,11 +155,73 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         raise AIConfigError(f"مدل پاسخی برنگردوند{f' (دلیل: {reason})' if reason else ''}.")
 
 
+async def _call_openrouter(api_key: str, model: str, system_prompt: str,
+                            text: str = None, image_bytes: bytes = None,
+                            image_mime: str = 'image/jpeg', **_) -> str:
+    """
+    ارائه‌دهنده‌ی جایگزین رایگان (openrouter.ai) — مستقل از مشکل فعلی
+    کلیدهای AQ. گوگل. برای گرفتن کلید: openrouter.ai/keys (بدون کارت).
+    """
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type':  'application/json',
+    }
+
+    content = []
+    if text:
+        content.append({'type': 'text', 'text': text})
+    if image_bytes:
+        b64 = base64.b64encode(image_bytes).decode('utf-8')
+        content.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:{image_mime};base64,{b64}'},
+        })
+    if not content:
+        content.append({'type': 'text', 'text': 'کاربر متن یا عکسی ارسال نکرده.'})
+
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': content},
+        ],
+        'temperature': 0.3,
+        'max_tokens': 1024,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
+    except httpx.HTTPError as e:
+        raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+
+    if resp.status_code == 429:
+        raise AIQuotaError("سقف رایگان API برای امروز پر شده — کمی بعد دوباره امتحان کن.")
+    if resp.status_code in (400, 401, 403, 404):
+        raise AIConfigError(
+            "کلید API نامعتبره، مدل اشتباهه یا دسترسی لازم رو نداره — ادمین باید از پنل "
+            f"AiHums تنظیماتش رو چک کنه. (کد خطا: {resp.status_code})"
+        )
+    if resp.status_code >= 500:
+        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — کمی بعد دوباره امتحان کن.")
+
+    try:
+        resp.raise_for_status()
+        data = resp.json()
+        return data['choices'][0]['message']['content'].strip()
+    except (KeyError, IndexError, ValueError):
+        raise AIConfigError("مدل پاسخی برنگردوند — احتمالاً مدل انتخاب‌شده الان در دسترس نیست.")
+
+
 PROVIDERS = {
-    'gemini': _call_gemini,
-    # نمونه برای بعداً — فقط یک تابع مثل _call_gemini بنویس و اینجا اضافه کن:
-    # 'openrouter': _call_openrouter,
-    # 'openai':     _call_openai,
+    'gemini':     _call_gemini,
+    'openrouter': _call_openrouter,
+    # نمونه برای بعداً — فقط یک تابع مثل _call_gemini/_call_openrouter بنویس
+    # و اینجا اضافه کن:
+    # 'openai': _call_openai,
 }
 
 
