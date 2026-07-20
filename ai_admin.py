@@ -20,11 +20,22 @@ from ai_solver import (
 
 logger = logging.getLogger(__name__)
 
-MODEL_PRESETS = [
-    ('gemini-2.5-flash',      '⚡ Gemini 2.5 Flash (پیشنهادی)'),
-    ('gemini-2.5-flash-lite', '💨 Gemini 2.5 Flash-Lite (سریع‌تر و سبک‌تر)'),
-    ('gemini-2.5-pro',        '🧠 Gemini 2.5 Pro (دقیق‌تر، محدودیت کمتر)'),
-]
+MODEL_PRESETS = {
+    'gemini': [
+        ('gemini-2.5-flash',      '⚡ Gemini 2.5 Flash (پیشنهادی)'),
+        ('gemini-flash-latest',   '🔄 Gemini Flash Latest (اگه بالایی 404 داد)'),
+        ('gemini-2.5-flash-lite', '💨 Gemini 2.5 Flash-Lite (سریع‌تر و سبک‌تر)'),
+        ('gemini-2.5-pro',        '🧠 Gemini 2.5 Pro (دقیق‌تر، محدودیت کمتر)'),
+    ],
+    'openrouter': [
+        ('google/gemma-4-31b-it:free', '⚡ Gemma 4 31B (پیشنهادی، تصویر+متن)'),
+        ('openrouter/free',            '🎲 انتخاب خودکار از مدل‌های رایگان'),
+    ],
+}
+PROVIDER_LABELS = {
+    'gemini':     '🟦 Google Gemini',
+    'openrouter': '🟪 OpenRouter',
+}
 
 
 def _mask_key(key: str) -> str:
@@ -46,7 +57,7 @@ async def show_ai_main(query):
         "🤖 <b>مدیریت AiHums — دستیار هوشمند حل سوال</b>\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"📊 وضعیت: {status_txt}\n"
-        f"🧠 ارائه‌دهنده: <code>{cfg['provider']}</code>\n"
+        f"🧠 ارائه‌دهنده: <code>{PROVIDER_LABELS.get(cfg['provider'], cfg['provider'])}</code>\n"
         f"🧩 مدل: <code>{cfg['model']}</code>\n"
         f"🔑 API Key: <code>{_mask_key(cfg['api_key'])}</code>\n"
         f"👥 محدودیت روزانه: {limit_txt}\n\n"
@@ -55,6 +66,7 @@ async def show_ai_main(query):
     )
     keyboard = [
         [InlineKeyboardButton(toggle_txt, callback_data='ai:toggle')],
+        [InlineKeyboardButton("🔁 تغییر ارائه‌دهنده (Gemini/OpenRouter)", callback_data='ai:pick_provider')],
         [InlineKeyboardButton("🔑 تنظیم / تغییر API Key", callback_data='ai:set_key')],
         [InlineKeyboardButton("🧩 انتخاب مدل", callback_data='ai:pick_model')],
         [InlineKeyboardButton("👥 محدودیت روزانه هر کاربر", callback_data='ai:set_limit')],
@@ -97,12 +109,40 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_ai_main(query)
         return
 
+    if action == 'pick_provider':
+        kb = [[InlineKeyboardButton(label, callback_data=f'ai:set_provider:{key}')]
+              for key, label in PROVIDER_LABELS.items()]
+        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ai:main')])
+        await query.edit_message_text(
+            "🔁 <b>انتخاب ارائه‌دهنده‌ی هوش مصنوعی</b>\n\n"
+            "توجه: با عوض کردن ارائه‌دهنده باید API Key مخصوص همون رو هم "
+            "دوباره تنظیم کنی (کلید Gemini با OpenRouter کار نمی‌کنه و برعکس).\n\n"
+            "🟦 Gemini → کلید از aistudio.google.com/apikey\n"
+            "🟪 OpenRouter → کلید از openrouter.ai/keys",
+            parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
+    if action == 'set_provider':
+        provider = parts[2] if len(parts) > 2 else ''
+        if provider in PROVIDER_LABELS:
+            await set_ai_setting('provider', provider)
+            await set_ai_setting('model', '')  # ریست مدل روی پیش‌فرض همون ارائه‌دهنده
+            await query.answer(f"✅ ارائه‌دهنده روی {PROVIDER_LABELS[provider]} تنظیم شد", show_alert=True)
+        await show_ai_main(query)
+        return
+
     if action == 'set_key':
+        cfg = await get_ai_config()
         context.user_data['mode'] = 'ai_set_key'
+        hint = (
+            "aistudio.google.com/apikey" if cfg['provider'] == 'gemini'
+            else "openrouter.ai/keys"
+        )
         await query.edit_message_text(
             "🔑 <b>تنظیم API Key</b>\n\n"
-            "کلید API رو همین‌جا برام بفرست (مثلاً کلید Gemini از "
-            "aistudio.google.com/apikey).\n\n"
+            f"کلید API مربوط به «{PROVIDER_LABELS.get(cfg['provider'], cfg['provider'])}» رو بفرست "
+            f"(از {hint}).\n\n"
             "<i>بلافاصله بعد از ذخیره، پیامت حذف می‌شه که جایی نمونه.</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='ai:main')]])
@@ -110,12 +150,15 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'pick_model':
+        cfg = await get_ai_config()
+        presets = MODEL_PRESETS.get(cfg['provider'], [])
         kb = [[InlineKeyboardButton(label, callback_data=f'ai:set_model:{model_id}')]
-              for model_id, label in MODEL_PRESETS]
+              for model_id, label in presets]
         kb.append([InlineKeyboardButton("✏️ مدل سفارشی (تایپ دستی)", callback_data='ai:set_model_custom')])
         kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data='ai:main')])
         await query.edit_message_text(
-            "🧩 <b>انتخاب مدل</b>\n\nیکی از مدل‌های آماده رو انتخاب کن یا مدل سفارشی وارد کن:",
+            f"🧩 <b>انتخاب مدل — ارائه‌دهنده‌ی فعلی: {PROVIDER_LABELS.get(cfg['provider'], cfg['provider'])}</b>\n\n"
+            "یکی از مدل‌های آماده رو انتخاب کن یا مدل سفارشی وارد کن:",
             parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb)
         )
         return
