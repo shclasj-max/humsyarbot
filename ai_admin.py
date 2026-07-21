@@ -1,5 +1,5 @@
 """
-🤖 پنل مدیریت AiHums — تنظیمات هوش مصنوعی کاملاً از دیتابیس
+🤖 پنل مدیریت هوشیار — تنظیمات هوش مصنوعی کاملاً از دیتابیس
   (هیچ‌چیز هاردکد نیست). ادمین ارشد می‌تونه از همینجا:
    ✅ روشن/خاموش کنه
    ✅ API Key رو تنظیم/تغییر بده (بدون لمس کد یا env)
@@ -54,14 +54,14 @@ async def show_ai_main(query):
     limit_txt  = "بدون محدودیت" if not limit else f"{limit} سوال در روز / هر کاربر"
 
     text = (
-        "🤖 <b>مدیریت AiHums — دستیار هوشمند حل سوال</b>\n"
+        "🤖 <b>مدیریت هوشیار — دستیار هوشمند حل سوال</b>\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"📊 وضعیت: {status_txt}\n"
         f"🧠 ارائه‌دهنده: <code>{PROVIDER_LABELS.get(cfg['provider'], cfg['provider'])}</code>\n"
         f"🧩 مدل: <code>{cfg['model']}</code>\n"
         f"🔑 API Key: <code>{_mask_key(cfg['api_key'])}</code>\n"
         f"👥 محدودیت روزانه: {limit_txt}\n\n"
-        "<i>دانشجویان با دکمه‌ی «🤖 AiHums» در منوی اصلی، سوال متنی یا "
+        "<i>دانشجویان با دکمه‌ی «🤖 هوشیار» در منوی اصلی، سوال متنی یا "
         "عکس سوال می‌فرستن و طبق همین تنظیمات جواب می‌گیرن.</i>"
     )
     keyboard = [
@@ -100,10 +100,10 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ اول باید یک API Key تنظیم کنی.", show_alert=True)
             return
         await set_ai_setting('enabled', new_val)
-        await query.answer("✅ AiHums فعال شد" if new_val else "✅ AiHums غیرفعال شد", show_alert=True)
+        await query.answer("✅ هوشیار فعال شد" if new_val else "✅ هوشیار غیرفعال شد", show_alert=True)
         await send_audit_log(
             context.bot, 'admin', 'مدیر ارشد', uid,
-            "فعال‌سازی AiHums" if new_val else "غیرفعال‌سازی AiHums",
+            "فعال‌سازی هوشیار" if new_val else "غیرفعال‌سازی هوشیار",
             module='AI', severity='HIGH', actor_role='مدیر ارشد',
         )
         await show_ai_main(query)
@@ -235,7 +235,7 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ai_admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ورودی متنی حالت‌های تنظیمات AiHums (فقط ادمین ارشد)."""
+    """ورودی متنی حالت‌های تنظیمات هوشیار (فقط ادمین ارشد)."""
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         return
@@ -252,7 +252,7 @@ async def ai_admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             pass
         await update.message.reply_text(
             "✅ API Key ذخیره شد (پیامت هم حذف شد که جایی نمونه).\n\n"
-            "حالا از پنل AiHums دکمه‌ی «فعال کردن» رو بزن تا برای کاربرها فعال بشه."
+            "حالا از پنل هوشیار دکمه‌ی «فعال کردن» رو بزن تا برای کاربرها فعال بشه."
         )
         return
 
