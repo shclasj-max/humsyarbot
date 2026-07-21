@@ -55,7 +55,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("🤖 هوشیار"),      KeyboardButton("📅 برنامه")],
         [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
         [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
         [KeyboardButton("🎫 پشتیبانی")],
@@ -66,7 +66,7 @@ def content_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("🤖 هوشیار"),      KeyboardButton("📅 برنامه")],
         [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
         [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
         [KeyboardButton("🎫 پشتیبانی")],
@@ -78,7 +78,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("🤖 هوشیار"),      KeyboardButton("📅 برنامه")],
         [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
         [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
         [KeyboardButton("🎫 پشتیبانی")],
@@ -94,7 +94,7 @@ def sub_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("🩺 داشبورد"),     KeyboardButton("📚 منابع")],
         [KeyboardButton("🧪 بانک سوال"),   KeyboardButton("❓ سوالات متداول")],
-        [KeyboardButton("🤖 AiHums"),      KeyboardButton("📅 برنامه")],
+        [KeyboardButton("🤖 هوشیار"),      KeyboardButton("📅 برنامه")],
         [KeyboardButton("👤 پروفایل"),     KeyboardButton("💎 اشتراک ویژه")],
         [KeyboardButton("💙 حمایت مالی"),  KeyboardButton("🔔 اعلان‌ها")],
         [KeyboardButton("🎫 پشتیبانی")],
