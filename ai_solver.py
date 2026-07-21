@@ -391,6 +391,34 @@ def _footer(limit: int, used: int) -> str:
     return f"\n\n📊 {used}/{limit} سوال امروز"
 
 
+async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                  get_answer_coro, footer_suffix: str = "") -> None:
+    """
+    یه پیام «💭 در حال فکر کردن...» می‌فرسته و وقتی جواب آماده شد، همون پیام رو
+    ادیت می‌کنه به‌جای فرستادن پیام جدید — حس تعاملیِ زنده‌تری به گفتگو می‌ده.
+    """
+    thinking_msg = await update.message.reply_text("💭 در حال فکر کردن...")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+
+    try:
+        answer = await get_answer_coro
+        final_text = f"🤖 {answer}{footer_suffix}"
+    except AIError as e:
+        final_text = f"⚠️ {e}"
+    except Exception:
+        logger.exception("AI error")
+        final_text = "⚠️ مشکلی در ارتباط با سرویس هوش مصنوعی پیش اومد، دوباره امتحان کن."
+
+    if len(final_text) > 4000:  # سقف تلگرام برای طول یک پیام
+        final_text = final_text[:3990] + "…"
+
+    try:
+        await thinking_msg.edit_text(final_text)
+    except Exception:
+        # اگه ادیت به هر دلیلی شکست خورد (مثلاً پیام حذف شده)، حداقل جواب رو جدا بفرست
+        await update.message.reply_text(final_text)
+
+
 async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     text = (update.message.text or '').strip()
@@ -411,15 +439,7 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    try:
-        answer = await ask_ai(text=text)
-        await update.message.reply_text(f"🤖 {answer}{_footer(limit, used)}")
-    except AIError as e:
-        await update.message.reply_text(f"⚠️ {e}")
-    except Exception:
-        logger.exception("AI text error")
-        await update.message.reply_text("⚠️ مشکلی در ارتباط با سرویس هوش مصنوعی پیش اومد، دوباره امتحان کن.")
+    await _answer_with_live_edit(update, context, ask_ai(text=text), _footer(limit, used))
 
 
 async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -451,12 +471,8 @@ async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_bytes = bytes(await tg_file.download_as_bytearray())
     caption     = (update.message.caption or '').strip() or None
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    try:
-        answer = await ask_ai(text=caption, image_bytes=image_bytes, image_mime=mime)
-        await update.message.reply_text(f"🤖 {answer}{_footer(limit, used)}")
-    except AIError as e:
-        await update.message.reply_text(f"⚠️ {e}")
-    except Exception:
-        logger.exception("AI photo error")
-        await update.message.reply_text("⚠️ مشکلی در ارتباط با سرویس هوش مصنوعی پیش اومد، دوباره امتحان کن.")
+    await _answer_with_live_edit(
+        update, context,
+        ask_ai(text=caption, image_bytes=image_bytes, image_mime=mime),
+        _footer(limit, used),
+    )
