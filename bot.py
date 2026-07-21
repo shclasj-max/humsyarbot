@@ -69,7 +69,9 @@ from faq import faq_callback
 from ticket import ticket_callback, ticket_message_handler
 from reports import report_callback, handle_report_note_text   # FIX جدید
 from ai_admin import ai_admin_callback, ai_admin_text_handler   # 🤖 هوشیار
-from ai_solver import handle_ai_text, handle_ai_photo           # 🤖 هوشیار
+from ai_solver import (                                          # 🤖 هوشیار
+    handle_ai_text, handle_ai_photo, ai_user_callback, ai_memory_sweep_job,
+)
 from database import db
 
 logging.basicConfig(
@@ -747,6 +749,14 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     # دیگری از منو بزند، باید از حالت خارج شود نه اینکه پیامش به‌عنوان
     # سوال جدید برای هوش مصنوعی ارسال شود.
     'ai_query',
+    # FIX جدید: همین موضوع برای modeهای پنل مدیریت هوشیار (ادمین) هم
+    # صادق است — قبلاً این‌ها اینجا نبودند، برای همین اگر ادمین وسط
+    # «ویرایش دستور سیستمی» (یا کلید/محدودیت/ریست سهمیه) دکمه‌ی دیگری
+    # از منو می‌زد، متنِ آن دکمه به‌جای ناوبری، به‌عنوان ورودیِ همان
+    # حالتِ نیمه‌کاره ذخیره می‌شد (مثلاً «📚 منابع» به‌عنوان دستور
+    # سیستمیِ جدید ست می‌شد).
+    'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
+    'ai_reset_quota_search',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
@@ -829,9 +839,10 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     ):
         return await handle_admin_text(update, context)
 
-    # ۴d. 🤖 هوشیار — تنظیمات پنل ادمین (API Key/مدل/محدودیت/prompt)
+    # ۴d. 🤖 هوشیار — تنظیمات پنل ادمین (API Key/مدل/محدودیت/prompt/ریست سهمیه)
     if uid == ADMIN_ID and context.user_data.get('mode') in (
         'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
+        'ai_reset_quota_search',
     ):
         return await ai_admin_text_handler(update, context)
 
@@ -1072,6 +1083,7 @@ def build_application() -> Application:
         (subscription_admin_callback, r'^suba:'),
         (grades_callback,             r'^grades:'),
         (ai_admin_callback,           r'^ai:'),   # 🤖 هوشیار — پنل ادمین
+        (ai_user_callback,            r'^aiu:'),  # 🤖 هوشیار — دکمه‌های زیر جواب (گفتگوی جدید/گزارش)
     ]
     for handler, pattern in cbs:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
@@ -1180,6 +1192,17 @@ async def post_init(application: Application):
             subscription_expiry_job,
             time=dtime(hour=5, minute=45, tzinfo=timezone.utc),
             name='subscription_expiry'
+        )
+
+        # FIX جدید: هوشیار — جاروی دوره‌ایِ حافظه‌ی موقتِ مکالمه (RAM)؛
+        # این حافظه خودش هم موقع خوندن TTL رو چک می‌کنه، این job فقط
+        # یه لایه‌ی احتیاطیِ اضافه‌ست تا ورودی‌های خیلی قدیمی بی‌دلیل
+        # توی RAM نمونن.
+        application.job_queue.run_repeating(
+            ai_memory_sweep_job,
+            interval=600,
+            first=300,
+            name='ai_memory_sweep'
         )
 
         logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
