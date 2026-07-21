@@ -243,8 +243,10 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = await db.ai_usage_stats()
         lines = [
             "📊 <b>آمار مصرف هوشیار</b>\n━━━━━━━━━━━━━━━━\n",
-            f"📅 امروز: <b>{stats['total_today']}</b> سوال از <b>{stats['users_today']}</b> کاربر",
-            f"📈 مجموع کل: <b>{stats['total_alltime']}</b> سوال از <b>{stats['users_alltime']}</b> کاربر",
+            f"📅 امروز: <b>{stats['total_today']}</b> سوال از <b>{stats['users_today']}</b> کاربر"
+            f" (~{stats['tokens_today']:,} توکن)",
+            f"📈 مجموع کل: <b>{stats['total_alltime']}</b> سوال از <b>{stats['users_alltime']}</b> کاربر"
+            f" (~{stats['tokens_alltime']:,} توکن)",
         ]
         if stats['top_today']:
             lines.append("\n🏆 پرمصرف‌ترین‌های امروز:")
