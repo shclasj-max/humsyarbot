@@ -2858,5 +2858,73 @@ class DB:
         student_ids = [u['user_id'] async for u in self.users.find({'intake': intake}, {'user_id': 1})]
         return await self.grades.count_documents({'student_id': {'$in': student_ids}})
 
+    # ══════════════════════════════════════════════════
+    #  آمار مصرف هوشیار (AI) — برای پنل ادمین
+    # ══════════════════════════════════════════════════
+
+    async def ai_usage_stats(self, top_n: int = 5) -> dict:
+        """
+        آمار مصرف هوشیار: تعداد سوال امروز/کل، توکن مصرفی امروز/کل، و
+        پرمصرف‌ترین کاربرها. فیلد ai_total_usage (همه‌ی زمان‌ها) و
+        ai_usage_count/ai_usage_date (روزانه) روی خودِ سند کاربر در
+        check_and_consume_quota نگه‌داری می‌شوند؛ ai_total_tokens/
+        ai_tokens_today هم در ai_inc_tokens. اینجا فقط جمع‌بندی‌شان می‌کنیم.
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        rows = await self.users.find(
+            {'$or': [{'ai_total_usage': {'$gt': 0}}, {'ai_usage_date': today}]},
+            {
+                'user_id': 1, 'name': 1, 'ai_usage_count': 1, 'ai_usage_date': 1,
+                'ai_total_usage': 1, 'ai_total_tokens': 1, 'ai_tokens_today': 1,
+            },
+        ).to_list(length=None)
+
+        total_today = users_today = total_alltime = users_alltime = 0
+        tokens_today = tokens_alltime = 0
+        today_list, alltime_list = [], []
+
+        for u in rows:
+            alltime = u.get('ai_total_usage', 0) or 0
+            tokens_alltime += u.get('ai_total_tokens', 0) or 0
+            if alltime > 0:
+                total_alltime += alltime
+                users_alltime += 1
+                alltime_list.append((u.get('name') or '—', u.get('user_id'), alltime))
+
+            if u.get('ai_usage_date') == today:
+                today_count = u.get('ai_usage_count', 0) or 0
+                tokens_today += u.get('ai_tokens_today', 0) or 0
+                if today_count > 0:
+                    total_today += today_count
+                    users_today += 1
+                    today_list.append((u.get('name') or '—', u.get('user_id'), today_count))
+
+        today_list.sort(key=lambda x: x[2], reverse=True)
+        alltime_list.sort(key=lambda x: x[2], reverse=True)
+
+        return {
+            'total_today':   total_today,
+            'users_today':   users_today,
+            'total_alltime': total_alltime,
+            'users_alltime': users_alltime,
+            'tokens_today':   tokens_today,
+            'tokens_alltime': tokens_alltime,
+            'top_today':     today_list[:top_n],
+            'top_alltime':   alltime_list[:top_n],
+        }
+
+    async def ai_inc_tokens(self, uid: int, tokens: int) -> None:
+        """
+        افزایشِ اتمیک (بدون نیاز به خواندن قبلی) توکن مصرفیِ هوشیار برای
+        یک کاربر — هم شمارنده‌ی «امروز» (که موقع رد شدن روز در
+        check_and_consume_quota صفر می‌شود) و هم شمارنده‌ی «کل».
+        """
+        if not tokens:
+            return
+        await self.users.update_one(
+            {'user_id': uid},
+            {'$inc': {'ai_total_tokens': int(tokens), 'ai_tokens_today': int(tokens)}},
+        )
+
 
 db = DB()
