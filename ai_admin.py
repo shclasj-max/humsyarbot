@@ -9,10 +9,12 @@
    ✅ اتصال رو تست کنه
 """
 import logging
+from datetime import datetime
 from html import escape as _esc
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+from database import db
 from utils import ADMIN_ID, send_audit_log
 from ai_solver import (
     get_ai_config, set_ai_setting, ask_ai,
@@ -72,6 +74,8 @@ async def show_ai_main(query):
         [InlineKeyboardButton("🧩 انتخاب مدل", callback_data='ai:pick_model')],
         [InlineKeyboardButton("👥 محدودیت روزانه هر کاربر", callback_data='ai:set_limit')],
         [InlineKeyboardButton("💬 ویرایش دستور سیستمی", callback_data='ai:set_prompt')],
+        [InlineKeyboardButton("📊 آمار مصرف", callback_data='ai:stats')],
+        [InlineKeyboardButton("🔄 ریست سهمیه‌ی یک کاربر", callback_data='ai:reset_quota')],
         [InlineKeyboardButton("🧪 تست اتصال", callback_data='ai:test')],
         [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_settings')],
     ]
@@ -87,6 +91,18 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
+
+    # ⚠️ فیکس باگ ناوبری: قبلاً وقتی مثلاً توی «ویرایش دستور سیستمی» بودی
+    # و دکمه‌ی «❌ لغو» رو می‌زدی، فقط صفحه برمی‌گشت ولی mode توی
+    # user_data پاک نمی‌شد — یعنی ربات هنوز منتظرِ متنِ جدید بود و پیامِ
+    # بعدیت (حتی اگه دکمه‌ی کاملاً نامرتبط دیگه‌ای بود) به‌عنوان ورودیِ
+    # همون حالت قبلی پردازش می‌شد. با پاک کردنِ mode همین‌جا (قبل از هر
+    # اکشنی)، هر بار که روی هر دکمه‌ای توی این پنل بزنی، حالت‌های نیمه‌کاره
+    # قبلی خودش پاک می‌شه؛ اکشن‌هایی که واقعاً به ورودی متنی نیاز دارن
+    # (set_key/set_limit/set_prompt/set_model_custom/reset_quota) بلافاصله
+    # همون‌جا mode مخصوص خودشون رو دوباره ست می‌کنن.
+    context.user_data.pop('mode', None)
+
     parts  = query.data.split(':')
     action = parts[1] if len(parts) > 1 else 'main'
 
@@ -223,6 +239,56 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == 'stats':
+        stats = await db.ai_usage_stats()
+        lines = [
+            "📊 <b>آمار مصرف هوشیار</b>\n━━━━━━━━━━━━━━━━\n",
+            f"📅 امروز: <b>{stats['total_today']}</b> سوال از <b>{stats['users_today']}</b> کاربر",
+            f"📈 مجموع کل: <b>{stats['total_alltime']}</b> سوال از <b>{stats['users_alltime']}</b> کاربر",
+        ]
+        if stats['top_today']:
+            lines.append("\n🏆 پرمصرف‌ترین‌های امروز:")
+            for name, u_id, cnt in stats['top_today']:
+                lines.append(f"• {_esc(str(name))} (<code>{u_id}</code>): {cnt} سوال")
+        if stats['top_alltime']:
+            lines.append("\n🏆 پرمصرف‌ترین‌ها (کل زمان):")
+            for name, u_id, cnt in stats['top_alltime']:
+                lines.append(f"• {_esc(str(name))} (<code>{u_id}</code>): {cnt} سوال")
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='ai:main')]])
+        )
+        return
+
+    if action == 'reset_quota':
+        context.user_data['mode'] = 'ai_reset_quota_search'
+        await query.edit_message_text(
+            "🔄 <b>ریست سهمیه‌ی روزانه‌ی یک کاربر</b>\n\n"
+            "آیدی عددی تلگرام، یوزرنیم یا اسمِ کاربر رو بفرست تا پیداش کنم.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='ai:main')]])
+        )
+        return
+
+    if action == 'do_reset_quota':
+        target_uid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        if not target_uid:
+            await query.answer("⚠️ شناسه‌ی کاربر نامعتبره.", show_alert=True)
+            return
+        await db.update_user(target_uid, {
+            'ai_usage_count': 0,
+            'ai_usage_date':  datetime.now().strftime('%Y-%m-%d'),
+        })
+        await query.answer("✅ سهمیه‌ی امروزِ این کاربر ریست شد.", show_alert=True)
+        await send_audit_log(
+            context.bot, 'admin', 'مدیر ارشد', uid,
+            f"ریست سهمیه‌ی روزانه‌ی هوشیار برای کاربر {target_uid}",
+            module='AI', severity='MEDIUM', actor_role='مدیر ارشد',
+        )
+        await show_ai_main(query)
+        return
+
     if action == 'test':
         cfg = await get_ai_config()
         if not cfg['api_key']:
@@ -288,6 +354,26 @@ async def ai_admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await set_ai_setting('daily_limit', int(text))
         await update.message.reply_text(
             f"✅ محدودیت روزانه روی {text if int(text) else 'نامحدود'} تنظیم شد."
+        )
+        return
+
+    if mode == 'ai_reset_quota_search':
+        context.user_data.pop('mode', None)
+        results = await db.search_users(text)
+        if not results:
+            await update.message.reply_text("❌ کاربری با این مشخصات پیدا نشد.")
+            return
+        kb = [
+            [InlineKeyboardButton(
+                f"{u.get('name') or 'بدون نام'} — {u.get('user_id')}",
+                callback_data=f"ai:do_reset_quota:{u.get('user_id')}",
+            )]
+            for u in results[:10]
+        ]
+        kb.append([InlineKeyboardButton("❌ لغو", callback_data='ai:main')])
+        await update.message.reply_text(
+            "یکی رو انتخاب کن تا سهمیه‌ی امروزش ریست بشه:",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return
 
