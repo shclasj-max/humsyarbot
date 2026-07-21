@@ -10,14 +10,17 @@
      دیتابیس ذخیره می‌شود؛ نیازی به کالکشن جدید نیست).
 """
 import os
+import time
 import base64
 import random
 import asyncio
 import logging
+from html import escape as _esc
+from collections import deque, OrderedDict
 from datetime import datetime
 
 import httpx
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from database import db
@@ -34,6 +37,17 @@ DEFAULT_MODELS = {
 }
 DEFAULT_MODEL  = DEFAULT_MODELS['gemini']   # برای سازگاری با کدهای قبلی
 DEFAULT_LIMIT  = 15   # سقف روزانه‌ی هر کاربر عادی؛ 0 = نامحدود
+MAX_INPUT_CHARS = 2000  # سقف طول متن ورودی کاربر (جلوگیری از هدررفت توکن/هزینه)
+
+# ══════════════════════════════════════════════════
+#  حافظه‌ی موقتِ مکالمه — فقط توی RAM، هیچ‌وقت وارد MongoDB نمی‌شه.
+#  با ~۷۰۰ کاربر (حتی چند برابر بیشتر) حجمش ناچیزه؛ برای جلوگیری از
+#  رشدِ بی‌نهایت هم TTL داره (بی‌فعالیت زیاد → پاک می‌شه) هم یک
+#  job دوره‌ای که هر چند دقیقه یه‌بار موردهای منقضی رو جارو می‌کنه.
+# ══════════════════════════════════════════════════
+MEMORY_TTL_SECONDS   = 20 * 60   # ۲۰ دقیقه بی‌فعالیتی → فراموش کن
+MAX_HISTORY_ITEMS    = 6         # ۶ آیتم = ۳ سوال + ۳ جواب اخیر
+REPORT_CACHE_MAX     = 2000      # سقفِ حافظه‌ی کش «گزارش پاسخ» (هرس LRU)
 DEFAULT_PROMPT = (
     "تو «هوشیار» هستی؛ دستیار هوش مصنوعیِ ربات هامزیار (Humsyar) برای "
     "دانشجویان دانشگاه علوم پزشکی هرمزگان. یه دستیار باحال، خودمونی و "
@@ -100,6 +114,71 @@ class AIConfigError(AIError):
 
 
 # ══════════════════════════════════════════════════
+#  حافظه‌ی موقتِ مکالمه (RAM only, نه دیتابیس)
+# ══════════════════════════════════════════════════
+_conversation_memory: dict = {}   # {uid: {'items': deque, 'last_active': float}}
+
+
+def _get_history(uid: int) -> list:
+    entry = _conversation_memory.get(uid)
+    if not entry:
+        return []
+    if time.time() - entry['last_active'] > MEMORY_TTL_SECONDS:
+        _conversation_memory.pop(uid, None)
+        return []
+    return list(entry['items'])
+
+
+def _remember(uid: int, role: str, text: str) -> None:
+    if not text:
+        return
+    entry = _conversation_memory.setdefault(
+        uid, {'items': deque(maxlen=MAX_HISTORY_ITEMS), 'last_active': time.time()}
+    )
+    entry['items'].append({'role': role, 'text': text[:1500]})
+    entry['last_active'] = time.time()
+
+
+def _clear_memory(uid: int) -> None:
+    _conversation_memory.pop(uid, None)
+
+
+async def ai_memory_sweep_job(context: ContextTypes.DEFAULT_TYPE = None) -> None:
+    """
+    Job دوره‌ای (هر ۱۰ دقیقه، از bot.py صدا زده می‌شه): حافظه‌ی مکالمه‌ی
+    کاربرهایی که مدتی غیرفعال بودن رو جارو می‌کنه — صرفاً یک اقدام
+    احتیاطیِ اضافه، چون _get_history خودش هم موقع خوندن TTL رو چک
+    می‌کنه؛ این job فقط جلوی تجمعِ بی‌مصرفِ ورودی‌های خیلی قدیمی رو
+    توی RAM می‌گیره.
+    """
+    now = time.time()
+    expired = [uid for uid, e in _conversation_memory.items()
+               if now - e['last_active'] > MEMORY_TTL_SECONDS]
+    for uid in expired:
+        _conversation_memory.pop(uid, None)
+
+
+# ══════════════════════════════════════════════════
+#  کشِ «گزارش پاسخ نامناسب» — نگاشتِ (chat_id, message_id) به
+#  متن سوال/جواب، فقط برای چند دقیقه‌ای که دکمه‌ی 🚩 زیر پیام فعاله.
+#  این هم فقط RAM هست، با سقف LRU که رشدش رو محدود می‌کنه.
+# ══════════════════════════════════════════════════
+_report_cache: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _cache_for_report(chat_id: int, message_id: int, uid: int, name: str,
+                       question: str, answer: str) -> None:
+    key = f"{chat_id}:{message_id}"
+    _report_cache[key] = {
+        'uid': uid, 'name': name or '—',
+        'question': question or '—', 'answer': answer or '—',
+    }
+    _report_cache.move_to_end(key)
+    while len(_report_cache) > REPORT_CACHE_MAX:
+        _report_cache.popitem(last=False)
+
+
+# ══════════════════════════════════════════════════
 #  تنظیمات — همه از bot_settings (کلید-مقدار عمومی دیتابیس)
 # ══════════════════════════════════════════════════
 
@@ -129,7 +208,8 @@ async def set_ai_setting(key: str, value) -> None:
 
 async def _call_gemini(api_key: str, model: str, system_prompt: str,
                         text: str = None, image_bytes: bytes = None,
-                        image_mime: str = 'image/jpeg', **_) -> str:
+                        image_mime: str = 'image/jpeg', history: list = None,
+                        **_) -> tuple:
     # FIX: از اواسط ۲۰۲۶ گوگل کلیدهای جدید با پیشوند «AQ.» صادر می‌کند که
     # با روش قدیمیِ فرستادن کلید در URL (?key=...) کار نمی‌کنند و ۴۰۴/۴۰۳
     # برمی‌گردانند. روش رسمی و سازگار با هر دو فرمت (چه AIzaSy... قدیمی،
@@ -139,6 +219,13 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         'Content-Type':   'application/json',
         'x-goog-api-key': api_key,
     }
+
+    # حافظه‌ی موقتِ مکالمه (اگه باشه) رو به‌عنوان turn های قبلی اضافه کن.
+    # Gemini برای پیام‌های خودِ مدل از role='model' استفاده می‌کند.
+    contents = []
+    for item in (history or []):
+        role = 'model' if item.get('role') == 'assistant' else 'user'
+        contents.append({'role': role, 'parts': [{'text': item.get('text', '')}]})
 
     parts = []
     if image_bytes:
@@ -152,16 +239,23 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         parts.append({'text': text})
     if not parts:
         parts.append({'text': 'کاربر متن یا عکسی ارسال نکرده.'})
+    contents.append({'role': 'user', 'parts': parts})
 
     payload = {
         'system_instruction': {'parts': [{'text': system_prompt}]},
-        'contents': [{'role': 'user', 'parts': parts}],
+        'contents': contents,
         'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 1024},
     }
 
     try:
         async with httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = None
+            for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code >= 500 and attempt == 0:
+                    await asyncio.sleep(1.5)
+                    continue
+                break
     except httpx.TimeoutException:
         raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
     except httpx.HTTPError as e:
@@ -181,12 +275,14 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
             f"هوشیار تنظیماتش رو چک کنه. (کد خطا: {resp.status_code})"
         )
     if resp.status_code >= 500:
-        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — کمی بعد دوباره امتحان کن.")
+        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — یه بار دیگه هم امتحان شد ولی جواب نداد؛ کمی بعد دوباره امتحان کن.")
 
     try:
         resp.raise_for_status()
         data = resp.json()
-        return data['candidates'][0]['content']['parts'][0]['text'].strip()
+        answer = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        tokens = int((data.get('usageMetadata') or {}).get('totalTokenCount', 0) or 0)
+        return answer, tokens
     except (KeyError, IndexError, ValueError):
         reason = ''
         try:
@@ -198,7 +294,8 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
 
 async def _call_openrouter(api_key: str, model: str, system_prompt: str,
                             text: str = None, image_bytes: bytes = None,
-                            image_mime: str = 'image/jpeg', **_) -> str:
+                            image_mime: str = 'image/jpeg', history: list = None,
+                            **_) -> tuple:
     """
     ارائه‌دهنده‌ی جایگزین رایگان (openrouter.ai) — مستقل از مشکل فعلی
     کلیدهای AQ. گوگل. برای گرفتن کلید: openrouter.ai/keys (بدون کارت).
@@ -221,19 +318,28 @@ async def _call_openrouter(api_key: str, model: str, system_prompt: str,
     if not content:
         content.append({'type': 'text', 'text': 'کاربر متن یا عکسی ارسال نکرده.'})
 
+    messages = [{'role': 'system', 'content': system_prompt}]
+    for item in (history or []):
+        role = 'assistant' if item.get('role') == 'assistant' else 'user'
+        messages.append({'role': role, 'content': item.get('text', '')})
+    messages.append({'role': 'user', 'content': content})
+
     payload = {
         'model': model,
-        'messages': [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': content},
-        ],
+        'messages': messages,
         'temperature': 0.3,
         'max_tokens': 1024,
     }
 
     try:
         async with httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = None
+            for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code >= 500 and attempt == 0:
+                    await asyncio.sleep(1.5)
+                    continue
+                break
     except httpx.TimeoutException:
         raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
     except httpx.HTTPError as e:
@@ -256,12 +362,14 @@ async def _call_openrouter(api_key: str, model: str, system_prompt: str,
             f"هوشیار تنظیماتش رو چک کنه. (کد خطا: {resp.status_code})"
         )
     if resp.status_code >= 500:
-        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — کمی بعد دوباره امتحان کن.")
+        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — یه بار دیگه هم امتحان شد ولی جواب نداد؛ کمی بعد دوباره امتحان کن.")
 
     try:
         resp.raise_for_status()
         data = resp.json()
-        return data['choices'][0]['message']['content'].strip()
+        answer = data['choices'][0]['message']['content'].strip()
+        tokens = int((data.get('usage') or {}).get('total_tokens', 0) or 0)
+        return answer, tokens
     except (KeyError, IndexError, ValueError):
         raise AIConfigError("مدل پاسخی برنگردوند — احتمالاً مدل انتخاب‌شده الان در دسترس نیست.")
 
@@ -276,7 +384,11 @@ PROVIDERS = {
 
 
 async def ask_ai(text: str = None, image_bytes: bytes = None,
-                  image_mime: str = 'image/jpeg') -> str:
+                  image_mime: str = 'image/jpeg', history: list = None) -> tuple:
+    """
+    برمی‌گرداند (answer_text, tokens_used). history اختیاریه: لیستی از
+    {'role': 'user'|'assistant', 'text': ...} برای حفظ سیاق مکالمه‌ی اخیر.
+    """
     cfg = await get_ai_config()
     if not cfg['enabled']:
         raise AIConfigError("بخش هوش مصنوعی فعلاً توسط مدیریت غیرفعال است.")
@@ -287,13 +399,14 @@ async def ask_ai(text: str = None, image_bytes: bytes = None,
     if not fn:
         raise AIConfigError(f"ارائه‌دهنده‌ی «{cfg['provider']}» پشتیبانی نمی‌شود.")
 
-    answer = await fn(
+    answer, tokens = await fn(
         api_key=cfg['api_key'], model=cfg['model'],
         system_prompt=cfg['system_prompt'],
         text=text, image_bytes=image_bytes, image_mime=image_mime,
+        history=history or [],
     )
     _guard_against_meta_leak(answer, cfg)
-    return answer
+    return answer, tokens
 
 
 # نشانه‌های شناخته‌شده‌ی «نشتِ فراداده»: بعضی مدل‌های رایگان (مخصوصاً وقتی
@@ -331,21 +444,48 @@ async def check_and_consume_quota(uid: int) -> tuple:
     """
     برمی‌گرداند (allowed, used_after, limit).
     ادمین ارشد همیشه نامحدود است؛ daily_limit=0 یعنی نامحدود برای همه.
+    در هر دو حالت، ai_total_usage (مصرف کل، برای آمار پنل ادمین) هم
+    یک واحد بالا می‌رود. اگه روز عوض شده باشه، ai_tokens_today هم صفر
+    می‌شه (خودِ record_token_usage بعد از جواب گرفتن رویش $inc می‌زند).
     """
     cfg   = await get_ai_config()
     limit = cfg['daily_limit']
+    today = datetime.now().strftime('%Y-%m-%d')
+    user  = await db.get_user(uid) or {}
+    total_before = user.get('ai_total_usage', 0) or 0
+    is_new_day   = user.get('ai_usage_date') != today
+
     if uid == ADMIN_ID or limit <= 0:
+        update = {'ai_total_usage': total_before + 1, 'ai_usage_date': today}
+        if is_new_day:
+            update['ai_tokens_today'] = 0
+        await db.update_user(uid, update)
         return True, 0, 0
 
-    user  = await db.get_user(uid) or {}
-    today = datetime.now().strftime('%Y-%m-%d')
-    used  = user.get('ai_usage_count', 0) if user.get('ai_usage_date') == today else 0
+    used = user.get('ai_usage_count', 0) if not is_new_day else 0
 
     if used >= limit:
         return False, used, limit
 
-    await db.update_user(uid, {'ai_usage_date': today, 'ai_usage_count': used + 1})
+    update = {
+        'ai_usage_date':  today,
+        'ai_usage_count': used + 1,
+        'ai_total_usage': total_before + 1,
+    }
+    if is_new_day:
+        update['ai_tokens_today'] = 0
+    await db.update_user(uid, update)
     return True, used + 1, limit
+
+
+async def record_token_usage(uid: int, tokens: int) -> None:
+    """بعد از دریافت جواب صدا زده می‌شه؛ توکن مصرفی رو (امروز + کل) اضافه می‌کنه."""
+    if not tokens:
+        return
+    try:
+        await db.ai_inc_tokens(uid, tokens)
+    except Exception:
+        logger.exception("ثبت توکن مصرفی هوشیار ناموفق بود")
 
 
 # ══════════════════════════════════════════════════
@@ -488,19 +628,25 @@ async def _animate_while_waiting(thinking_msg, context: ContextTypes.DEFAULT_TYP
 
 
 async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                  get_answer_coro, footer_suffix: str = "") -> None:
+                                  get_answer_coro, footer_suffix: str,
+                                  uid: int, question_label: str) -> None:
     """
     یه پیامِ بامزه‌ی «در حال فکر کردن» می‌فرسته و وقتی جواب آماده شد، همون
     پیام رو ادیت می‌کنه — حس تعاملیِ زنده‌تری به گفتگو می‌ده. اگه جواب دیر
     برسه، پیام رو با عبارت‌های بامزه‌تر یکی‌یکی عوض می‌کنه.
+    اگه جواب موفق بود: توی حافظه‌ی موقتِ مکالمه ثبتش می‌کنه، توکن مصرفی رو
+    به دیتابیس اضافه می‌کنه، و زیرِ پیام دو دکمه می‌ذاره («گفتگوی جدید» و
+    «گزارش این جواب»).
     """
     thinking_msg = await update.message.reply_text(random.choice(THINKING_PHRASES))
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action='typing')
 
+    answer_text = None
+    tokens = 0
     try:
-        answer = await _animate_while_waiting(thinking_msg, context, chat_id, get_answer_coro)
-        final_text = f"🤖 {answer}{footer_suffix}"
+        answer_text, tokens = await _animate_while_waiting(thinking_msg, context, chat_id, get_answer_coro)
+        final_text = f"🤖 {answer_text}{footer_suffix}"
     except AIError as e:
         final_text = f"⚠️ {e}"
     except Exception:
@@ -510,11 +656,38 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
     if len(final_text) > 4000:  # سقف تلگرام برای طول یک پیام
         final_text = final_text[:3990] + "…"
 
+    reply_markup = None
+    if answer_text:
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🆕 گفتگوی جدید", callback_data="aiu:newchat"),
+            InlineKeyboardButton("🚩 گزارش این جواب", callback_data=f"aiu:report:{chat_id}:{thinking_msg.message_id}"),
+        ]])
+
     try:
-        await thinking_msg.edit_text(final_text)
+        await thinking_msg.edit_text(final_text, reply_markup=reply_markup)
     except Exception:
         # اگه ادیت به هر دلیلی شکست خورد (مثلاً پیام حذف شده)، حداقل جواب رو جدا بفرست
-        await update.message.reply_text(final_text)
+        await update.message.reply_text(final_text, reply_markup=reply_markup)
+
+    if tokens:
+        await record_token_usage(uid, tokens)
+
+    if answer_text:
+        _remember(uid, 'user', question_label)
+        _remember(uid, 'assistant', answer_text)
+        _cache_for_report(
+            chat_id, thinking_msg.message_id, uid,
+            update.effective_user.full_name, question_label, answer_text,
+        )
+
+
+# ══════════════════════════════════════════════════
+#  قفل هم‌زمانی — جلوگیری از اینکه یک کاربر قبل از تمام‌شدن جواب سوال
+#  قبلی‌اش، سوال دومی بفرسته و دو تا درخواست هم‌زمان برای AI اجرا بشه
+#  (هم هزینه‌ی اضافه داره، هم می‌تونه باعث به‌هم‌ریختن پیامِ در حال ادیت
+#  بشه چون هر دو تا درخواست دارن روی یک thinking_msg کار می‌کنن).
+# ══════════════════════════════════════════════════
+_busy_users: set = set()
 
 
 async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,6 +702,17 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤖 بخش هوش مصنوعی توسط مدیریت غیرفعال شد.")
         return
 
+    if len(text) > MAX_INPUT_CHARS:
+        await update.message.reply_text(
+            f"✍️ سوالت یه‌کم طولانیه (بیشتر از {MAX_INPUT_CHARS} کاراکتر). "
+            "لطفاً خلاصه‌ترش کن یا فقط بخش اصلی سوال رو بفرست."
+        )
+        return
+
+    if uid in _busy_users:
+        await update.message.reply_text("⏳ صبر کن جواب سوال قبلی‌ت آماده بشه، بعد این یکی رو بفرست 🙂")
+        return
+
     allowed, used, limit = await check_and_consume_quota(uid)
     if not allowed:
         await update.message.reply_text(
@@ -537,7 +721,15 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await _answer_with_live_edit(update, context, ask_ai(text=text), _footer(limit, used))
+    _busy_users.add(uid)
+    try:
+        history = _get_history(uid)
+        await _answer_with_live_edit(
+            update, context, ask_ai(text=text, history=history),
+            _footer(limit, used), uid, text,
+        )
+    finally:
+        _busy_users.discard(uid)
 
 
 async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -558,6 +750,18 @@ async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return  # نوع فایل پشتیبانی‌نشده — نادیده گرفته می‌شود
 
+    caption = (update.message.caption or '').strip() or None
+    if caption and len(caption) > MAX_INPUT_CHARS:
+        await update.message.reply_text(
+            f"✍️ توضیحِ زیر عکس یه‌کم طولانیه (بیشتر از {MAX_INPUT_CHARS} کاراکتر). "
+            "لطفاً خلاصه‌ترش کن."
+        )
+        return
+
+    if uid in _busy_users:
+        await update.message.reply_text("⏳ صبر کن جواب سوال قبلی‌ت آماده بشه، بعد این یکی رو بفرست 🙂")
+        return
+
     allowed, used, limit = await check_and_consume_quota(uid)
     if not allowed:
         await update.message.reply_text(
@@ -567,10 +771,56 @@ async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     image_bytes = bytes(await tg_file.download_as_bytearray())
-    caption     = (update.message.caption or '').strip() or None
+    question_label = caption or "[یک سوال به‌صورت عکس فرستاد]"
 
-    await _answer_with_live_edit(
-        update, context,
-        ask_ai(text=caption, image_bytes=image_bytes, image_mime=mime),
-        _footer(limit, used),
-    )
+    _busy_users.add(uid)
+    try:
+        history = _get_history(uid)
+        await _answer_with_live_edit(
+            update, context,
+            ask_ai(text=caption, image_bytes=image_bytes, image_mime=mime, history=history),
+            _footer(limit, used), uid, question_label,
+        )
+    finally:
+        _busy_users.discard(uid)
+
+
+# ══════════════════════════════════════════════════
+#  دکمه‌های زیرِ جواب («🆕 گفتگوی جدید» / «🚩 گزارش این جواب») —
+#  callback_data با پیشوند aiu: (برای هر کاربری، برخلاف ai: که مخصوص
+#  پنل ادمینه).
+# ══════════════════════════════════════════════════
+
+async def ai_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = update.effective_user.id
+    parts  = query.data.split(':')
+    action = parts[1] if len(parts) > 1 else ''
+
+    if action == 'newchat':
+        _clear_memory(uid)
+        await query.answer("✅ حافظه‌ی مکالمه پاک شد؛ از اول شروع کن 🙂", show_alert=True)
+        return
+
+    if action == 'report':
+        key  = f"{parts[2]}:{parts[3]}" if len(parts) > 3 else ''
+        info = _report_cache.get(key)
+        if not info:
+            await query.answer("⚠️ این پیام قدیمیه و دیگه قابل گزارش نیست.", show_alert=True)
+            return
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    "🚩 <b>گزارش پاسخ نامناسب هوشیار</b>\n\n"
+                    f"👤 کاربر: {_esc(str(info['name']))} (<code>{info['uid']}</code>)\n\n"
+                    f"❓ سوال:\n{_esc(info['question'][:800])}\n\n"
+                    f"🤖 پاسخ:\n{_esc(info['answer'][:1500])}",
+                    parse_mode='HTML',
+                )
+            except Exception:
+                logger.exception("گزارش پاسخ هوشیار به ادمین ارسال نشد")
+        await query.answer("✅ گزارش شد، ممنون از دقتت 🙏", show_alert=True)
+        return
+
+    await query.answer()
