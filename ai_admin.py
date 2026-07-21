@@ -9,6 +9,7 @@
    ✅ اتصال رو تست کنه
 """
 import logging
+from html import escape as _esc
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -195,10 +196,27 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == 'set_prompt':
         context.user_data['mode'] = 'ai_set_prompt'
         cfg = await get_ai_config()
+
+        # ⚠️ فیکس باگ «Message_too_long»: اگه ادمین قبلاً یه دستور سیستمیِ
+        # خیلی طولانی ست کرده باشه، نمایش کاملش توی همین پیام از سقف ۴۰۹۶
+        # کاراکتریِ تلگرام رد می‌شه و edit_message_text با خطا شکست می‌خوره
+        # (که بعد به‌صورت «خطای ربات» به ادمین گزارش می‌شه). این‌جا متن رو
+        # هم escape می‌کنیم (که کاراکترهای HTML مثل < و & پارس رو خراب نکنن)
+        # و هم در صورت طولانی بودن، خلاصه‌ش می‌کنیم.
+        raw_prompt = cfg['system_prompt'] or ''
+        prompt_preview = _esc(raw_prompt)
+        MAX_PREVIEW = 3000
+        if len(prompt_preview) > MAX_PREVIEW:
+            prompt_preview = (
+                prompt_preview[:MAX_PREVIEW]
+                + f"…\n\n<i>(متن کامل {len(raw_prompt)} کاراکتره؛ برای اینجا "
+                "خلاصه شد ولی خودِ متنِ کامل ذخیره‌ست و همون استفاده می‌شه.)</i>"
+            )
+
         await query.edit_message_text(
             "💬 <b>ویرایش دستور سیستمی (System Prompt)</b>\n\n"
             "این متن به هوش مصنوعی می‌گه چه نقشی داره و چطور جواب بده.\n\n"
-            f"متن فعلی:\n<code>{cfg['system_prompt']}</code>\n\n"
+            f"متن فعلی:\n<code>{prompt_preview}</code>\n\n"
             "متن جدید رو بفرست، یا کلمه‌ی «حذف» رو بفرست تا به پیش‌فرض برگرده.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='ai:main')]])
