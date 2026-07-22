@@ -241,10 +241,20 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         parts.append({'text': 'کاربر متن یا عکسی ارسال نکرده.'})
     contents.append({'role': 'user', 'parts': parts})
 
+    # ⚠️ طبق مستندات رسمیِ گوگل، برای خانواده‌ی مدل‌های Gemini 3.x (جمله
+    # gemini-3.5-flash) توصیه شده temperature/top_p/top_k از مقدار
+    # پیش‌فرض تغییر داده نشه — قابلیت استدلال این مدل‌ها برای همون
+    # پیش‌فرض بهینه شده. برای مدل‌های ۲.x (که این توصیه رو نداشتن) طبق
+    # قبل temperature پایین‌تر می‌فرستیم تا پاسخ‌های درسی دقیق‌تر/کمتر
+    # پراکنده باشن.
+    generation_config = {'maxOutputTokens': 1024}
+    if not model.startswith('gemini-3'):
+        generation_config['temperature'] = 0.3
+
     payload = {
         'system_instruction': {'parts': [{'text': system_prompt}]},
         'contents': contents,
-        'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 1024},
+        'generationConfig': generation_config,
     }
 
     try:
