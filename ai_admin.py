@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 MODEL_PRESETS = {
     'gemini': [
-        ('gemini-2.5-flash',      '⚡ Gemini 2.5 Flash (پیشنهادی)'),
+        ('gemini-3.6-flash',      '🌟 Gemini 3.6 Flash (جدیدترین و پیشنهادیِ گوگل)'),
+        ('gemini-3.5-flash',      '🆕 Gemini 3.5 Flash (قوی، برای استدلال سنگین)'),
+        ('gemini-3.5-flash-lite', '🆕 Gemini 3.5 Flash-Lite (سریع و ارزون‌تر)'),
+        ('gemini-2.5-flash',      '⚡ Gemini 2.5 Flash (پایدار و قدیمی‌تر)'),
         ('gemini-flash-latest',   '🔄 Gemini Flash Latest (اگه بالایی 404 داد)'),
         ('gemini-2.5-flash-lite', '💨 Gemini 2.5 Flash-Lite (سریع‌تر و سبک‌تر)'),
         ('gemini-2.5-pro',        '🧠 Gemini 2.5 Pro (دقیق‌تر، محدودیت کمتر)'),
