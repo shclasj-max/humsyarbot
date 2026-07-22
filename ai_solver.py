@@ -10,6 +10,7 @@
      دیتابیس ذخیره می‌شود؛ نیازی به کالکشن جدید نیست).
 """
 import os
+import re
 import time
 import base64
 import random
@@ -247,7 +248,11 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
     # پیش‌فرض بهینه شده. برای مدل‌های ۲.x (که این توصیه رو نداشتن) طبق
     # قبل temperature پایین‌تر می‌فرستیم تا پاسخ‌های درسی دقیق‌تر/کمتر
     # پراکنده باشن.
-    generation_config = {'maxOutputTokens': 1024}
+    # ⚠️ فیکس باگِ «پیامِ نصفه»: سقفِ قبلی (1024 توکن) برای جواب‌های
+    # تشریحیِ چندبخشی خیلی کم بود و مدل وسط جمله متوقف می‌شد. سقف رو
+    # بالا بردیم؛ اگه بازم (به‌ندرت) جواب طولانی‌تر از این باشه، به‌جای
+    # قطعِ خاموش، صریح به کاربر می‌گیم که ادامه بخواد.
+    generation_config = {'maxOutputTokens': 3072}
     if not model.startswith('gemini-3'):
         generation_config['temperature'] = 0.3
 
@@ -258,7 +263,7 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = None
             for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
                 resp = await client.post(url, headers=headers, json=payload)
@@ -290,8 +295,11 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
     try:
         resp.raise_for_status()
         data = resp.json()
-        answer = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        candidate = data['candidates'][0]
+        answer = candidate['content']['parts'][0]['text'].strip()
         tokens = int((data.get('usageMetadata') or {}).get('totalTokenCount', 0) or 0)
+        if candidate.get('finishReason') == 'MAX_TOKENS':
+            answer += "\n\n⏳ (جواب طولانی بود و همین‌جا قطع شد؛ اگه خواستی بقیه‌ش رو بگم، بنویس «ادامه بده».)"
         return answer, tokens
     except (KeyError, IndexError, ValueError):
         reason = ''
@@ -338,11 +346,11 @@ async def _call_openrouter(api_key: str, model: str, system_prompt: str,
         'model': model,
         'messages': messages,
         'temperature': 0.3,
-        'max_tokens': 1024,
+        'max_tokens': 3072,   # ⚠️ فیکس باگِ «پیامِ نصفه» — قبلاً 1024 بود
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = None
             for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
                 resp = await client.post(url, headers=headers, json=payload)
@@ -377,8 +385,11 @@ async def _call_openrouter(api_key: str, model: str, system_prompt: str,
     try:
         resp.raise_for_status()
         data = resp.json()
-        answer = data['choices'][0]['message']['content'].strip()
+        choice = data['choices'][0]
+        answer = choice['message']['content'].strip()
         tokens = int((data.get('usage') or {}).get('total_tokens', 0) or 0)
+        if choice.get('finish_reason') == 'length':
+            answer += "\n\n⏳ (جواب طولانی بود و همین‌جا قطع شد؛ اگه خواستی بقیه‌ش رو بگم، بنویس «ادامه بده».)"
         return answer, tokens
     except (KeyError, IndexError, ValueError):
         raise AIConfigError("مدل پاسخی برنگردوند — احتمالاً مدل انتخاب‌شده الان در دسترس نیست.")
@@ -608,6 +619,27 @@ def _pick_unused(pool: list, used: set) -> str:
     return choice
 
 
+# ══════════════════════════════════════════════════
+#  تبدیل Markdown سبکِ خروجیِ مدل (**bold**, `code`, لیست‌ها، #تیتر) به
+#  HTML قابل‌نمایش در تلگرام. ⚠️ فیکس باگ: قبلاً متنِ خامِ AI بدون هیچ
+#  parse_mode ای فرستاده می‌شد، برای همین کاراکترهای «**» و امثالش عیناً
+#  توی پیامِ کاربر دیده می‌شدن. اول باید کاراکترهای خاصِ HTML (& < >) رو
+#  escape کنیم (که خودِ متنِ AI باعث خرابیِ پارسِ HTML نشه)، بعد الگوهای
+#  Markdown رو به تگ‌های HTML تبدیل کنیم.
+# ══════════════════════════════════════════════════
+
+def _md_to_telegram_html(text: str) -> str:
+    if not text:
+        return text
+    out = _esc(text, quote=False)                                      # 1) امن‌سازی HTML
+    out = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', out, flags=re.S)       # 2) **bold**
+    out = re.sub(r'(?m)^#{1,6}\s*(.+)$', r'<b>\1</b>', out)             # 3) # تیتر → بولد
+    out = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', out)              # 4) `code`
+    out = re.sub(r'(?m)^[*\-]\s+', '• ', out)                          # 5) لیست * یا - → •
+    out = re.sub(r'(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)', r'<i>\1</i>', out)  # 6) _italic_
+    return out
+
+
 async def _animate_while_waiting(thinking_msg, context: ContextTypes.DEFAULT_TYPE,
                                   chat_id: int, coro):
     """
@@ -656,7 +688,15 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
     tokens = 0
     try:
         answer_text, tokens = await _animate_while_waiting(thinking_msg, context, chat_id, get_answer_coro)
-        final_text = f"🤖 {answer_text}{footer_suffix}"
+        # ⚠️ فیکس باگ «برش وسطِ متن»: قبلاً برش طولِ پیام (سقف ۴۰۹۶ کاراکتریِ
+        # تلگرام) روی متنِ نهاییِ HTML‌شده انجام می‌شد که ممکن بود وسطِ یه
+        # تگ (مثلاً <b>) قطع بشه و parse_mode='HTML' با خطا مواجه بشه. حالا
+        # برش رو روی متنِ خامِ AI (قبل از تبدیل به HTML) انجام می‌دیم، بعد
+        # تبدیلش می‌کنیم — همیشه تگ‌ها کامل و سالم می‌مونن.
+        raw_answer = answer_text
+        if len(raw_answer) > 3500:
+            raw_answer = raw_answer[:3480] + "…"
+        final_text = f"🤖 {_md_to_telegram_html(raw_answer)}{_esc(footer_suffix, quote=False)}"
     except AIConfigError as e:
         # ⚠️ فیکس: این خطا فنیه و فقط برای ادمین معنی داره (مثلاً کلید/مدل
         # اشتباه تنظیم شده، یا OpenRouter روی «انتخاب خودکار» است و مدلی
@@ -682,12 +722,12 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
             except Exception:
                 logger.exception("ارسال هشدار خطای فنیِ هوشیار به ادمین ناموفق بود")
     except AIError as e:
-        final_text = f"⚠️ {e}"
+        final_text = f"⚠️ {_esc(str(e), quote=False)}"
     except Exception:
         logger.exception("AI error")
         final_text = "⚠️ مشکلی در ارتباط با سرویس هوش مصنوعی پیش اومد، دوباره امتحان کن."
 
-    if len(final_text) > 4000:  # سقف تلگرام برای طول یک پیام
+    if len(final_text) > 4000:  # محافظِ نهایی (به‌ندرت لازم می‌شه، چون برش اصلی روی متنِ خام انجام شد)
         final_text = final_text[:3990] + "…"
 
     reply_markup = None
@@ -698,10 +738,15 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
         ]])
 
     try:
-        await thinking_msg.edit_text(final_text, reply_markup=reply_markup)
+        await thinking_msg.edit_text(final_text, reply_markup=reply_markup, parse_mode='HTML')
     except Exception:
-        # اگه ادیت به هر دلیلی شکست خورد (مثلاً پیام حذف شده)، حداقل جواب رو جدا بفرست
-        await update.message.reply_text(final_text, reply_markup=reply_markup)
+        # اگه ادیت به هر دلیلی شکست خورد (مثلاً پیام حذف شده یا HTML نامعتبر
+        # بود)، یه بار به‌صورت متنِ ساده (بدون parse_mode) هم امتحان می‌کنیم
+        # تا حداقل خودِ جواب گم نشه، بعد اگه بازم شکست خورد جدا می‌فرستیم.
+        try:
+            await thinking_msg.edit_text(final_text, reply_markup=reply_markup)
+        except Exception:
+            await update.message.reply_text(final_text, reply_markup=reply_markup)
 
     if tokens:
         await record_token_usage(uid, tokens)
