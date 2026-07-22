@@ -647,6 +647,30 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
     try:
         answer_text, tokens = await _animate_while_waiting(thinking_msg, context, chat_id, get_answer_coro)
         final_text = f"🤖 {answer_text}{footer_suffix}"
+    except AIConfigError as e:
+        # ⚠️ فیکس: این خطا فنیه و فقط برای ادمین معنی داره (مثلاً کلید/مدل
+        # اشتباه تنظیم شده، یا OpenRouter روی «انتخاب خودکار» است و مدلی
+        # که برگردونده ربطی به سوال درسی نداشته). قبلاً همین متنِ فنی
+        # مستقیم به دانشجو نشون داده می‌شد که هم گیج‌کننده بود هم ظاهر بدی
+        # داشت. حالا دانشجو فقط یه پیام ساده می‌بینه، و متنِ فنی مستقیم
+        # برای ادمین ارشد فوروارد می‌شه تا سریع بره درستش کنه.
+        final_text = (
+            "⚠️ هوشیار الان یه مشکل فنی داره و نمی‌تونه درست جواب بده.\n"
+            "به ادمین اطلاع داده شد؛ لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن 🙏"
+        )
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    "🛠 <b>خطای فنیِ هوشیار</b> (فقط برای شما نمایش داده می‌شه؛ کاربر پیامِ ساده دید)\n\n"
+                    f"👤 کاربر: {_esc(update.effective_user.full_name or '—')} "
+                    f"(<code>{uid}</code>)\n\n"
+                    f"❓ سوال:\n{_esc(question_label[:500])}\n\n"
+                    f"🧩 جزئیات خطا:\n{_esc(str(e))}",
+                    parse_mode='HTML',
+                )
+            except Exception:
+                logger.exception("ارسال هشدار خطای فنیِ هوشیار به ادمین ناموفق بود")
     except AIError as e:
         final_text = f"⚠️ {e}"
     except Exception:
