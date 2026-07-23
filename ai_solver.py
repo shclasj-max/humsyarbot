@@ -4,7 +4,7 @@
      دستور سیستمی همگی از bot_settings (پنل ادمین → ai_admin.py) خوانده
      می‌شوند.
   ✅ معماری چندارائه‌دهنده: برای اضافه‌کردن یک AI دیگر (مثلاً OpenRouter/
-     OpenAI) فقط یک تابع جدید به PROVIDERS اضافه می‌شود — بقیه‌ی کد و
+     OpenAI) فقط یک تابع جدید به STREAM_PROVIDERS اضافه می‌شود — بقیه‌ی کد و
      پنل ادمین دست‌نخورده باقی می‌ماند.
   ✅ محدودیت روزانه‌ی سوال، به‌ازای هر کاربر (روی خودِ سند کاربر در
      دیتابیس ذخیره می‌شود؛ نیازی به کالکشن جدید نیست).
@@ -220,138 +220,275 @@ async def delete_persona(name: str) -> None:
 # ══════════════════════════════════════════════════
 #  ارائه‌دهنده‌ها (Providers)
 #  برای افزودن یک AI جدید: یک تابع async با همین امضا بنویس و در
-#  دیکشنری PROVIDERS پایین ثبتش کن. سپس از پنل ادمین می‌شود روی
+#  دیکشنری STREAM_PROVIDERS پایین ثبتش کن. سپس از پنل ادمین می‌شود روی
 #  provider جدید سوییچ کرد — بدون تغییر جای دیگری از کد.
 # ══════════════════════════════════════════════════
 
-async def _call_gemini(api_key: str, model: str, system_prompt: str,
-                        text: str = None, image_bytes: bytes = None,
-                        image_mime: str = 'image/jpeg', history: list = None,
-                        thinking: str = 'auto', **_) -> tuple:
+# ══════════════════════════════════════════════════
+#  ⚠️ قابلیتِ جدید: Function Calling — هوشیار می‌تونه واقعاً از
+#  دیتابیسِ خودِ هامزیار (برنامه/نمراتِ همون دانشجو) بخونه، نه اینکه
+#  حدس بزنه. فقط وقتی uid داریم (یعنی یه دانشجوی واقعی داره سوال
+#  می‌پرسه، نه تستِ ادمین) فعال می‌شه.
+# ══════════════════════════════════════════════════
+AI_FUNCTIONS = [
+    {
+        'name': 'get_my_schedule',
+        'description': (
+            'برنامه‌ی کلاسی/امتحانیِ آینده‌ی همین دانشجو رو از دیتابیسِ هامزیار می‌خونه. '
+            'برای سوالاتی مثل «کی امتحان دارم؟» یا «برنامه‌ی این هفته‌ام چیه؟» استفاده کن.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'type_filter': {
+                    'type': 'string',
+                    'description': 'فیلترِ نوع، مثلاً "امتحان" یا "کلاس" — اگه خالی بمونه همه برمی‌گرده.',
+                }
+            },
+        },
+    },
+    {
+        'name': 'get_my_grades',
+        'description': (
+            'نمراتِ ثبت‌شده‌ی همین دانشجو رو از دیتابیسِ هامزیار می‌خونه. '
+            'برای سوالاتی مثل «نمره‌ی آخرین کوییزم چند شد؟» استفاده کن.'
+        ),
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+]
+
+
+async def _execute_ai_function(name: str, args: dict, uid: int) -> str:
+    args = args or {}
+    try:
+        if name == 'get_my_schedule':
+            user = await db.get_user(uid) or {}
+            rows = await db.get_schedules(group=user.get('group'))
+            type_filter = (args.get('type_filter') or '').strip()
+            if type_filter:
+                rows = [r for r in rows if type_filter in (r.get('type') or '')]
+            if not rows:
+                return 'هیچ برنامه‌ی آینده‌ای برای این دانشجو ثبت نشده.'
+            lines = [
+                f"- {r.get('type','')}: {r.get('lesson','')} | استاد: {r.get('teacher','')} | "
+                f"{r.get('date','')} ساعت {r.get('time','')}"
+                for r in rows[:15]
+            ]
+            return "\n".join(lines)
+
+        if name == 'get_my_grades':
+            rows = await db.grade_list_for_student(uid)
+            if not rows:
+                return 'هنوز نمره‌ای برای این دانشجو ثبت نشده.'
+            lines = [
+                f"- {r.get('lesson','')} ({r.get('exam_title','')}): {r.get('score','')} "
+                f"| تاریخ: {r.get('exam_date','')}"
+                for r in rows[:20]
+            ]
+            return "\n".join(lines)
+
+        return 'تابعِ ناشناخته.'
+    except Exception:
+        logger.exception("اجرای تابعِ هوشیار (%s) ناموفق بود", name)
+        return 'خطا در خواندنِ اطلاعات از دیتابیس.'
+
+
+# ══════════════════════════════════════════════════
+#  ⚠️ قابلیتِ جدید: آپلودِ فایل به Gemini Files API — برای «سندِ مرجعِ
+#  فعال» (RAG سبک). خودِ فایل روی سرورهای گوگل ذخیره می‌شه (رایگان،
+#  ۴۸ ساعت)، فقط یه URI کوچیک برمی‌گردونیم که بعداً توی سوالاتِ بعدی
+#  ارجاع بدیم — بدون اینکه هر بار کاربر دوباره فایل رو بفرسته.
+# ══════════════════════════════════════════════════
+
+async def _gemini_upload_file(api_key: str, file_bytes: bytes, mime_type: str, display_name: str) -> dict:
+    base = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+    start_headers = {
+        'x-goog-api-key':                    api_key,
+        'X-Goog-Upload-Protocol':            'resumable',
+        'X-Goog-Upload-Command':             'start',
+        'X-Goog-Upload-Header-Content-Length': str(len(file_bytes)),
+        'X-Goog-Upload-Header-Content-Type': mime_type,
+        'Content-Type':                      'application/json',
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        start_resp = await client.post(base, headers=start_headers, json={'file': {'display_name': display_name}})
+        if start_resp.status_code != 200:
+            raise AIError("آپلودِ فایل روی سرویسِ هوش مصنوعی ناموفق بود.")
+        upload_url = start_resp.headers.get('x-goog-upload-url')
+        if not upload_url:
+            raise AIError("آپلودِ فایل ناموفق بود (URL آپلود دریافت نشد).")
+
+        upload_resp = await client.post(
+            upload_url,
+            headers={
+                'Content-Length':          str(len(file_bytes)),
+                'X-Goog-Upload-Offset':    '0',
+                'X-Goog-Upload-Command':   'upload, finalize',
+            },
+            content=file_bytes,
+        )
+        if upload_resp.status_code != 200:
+            raise AIError("آپلودِ فایل روی سرویسِ هوش مصنوعی ناموفق بود.")
+        file_info = (upload_resp.json() or {}).get('file') or {}
+        if not file_info.get('uri'):
+            raise AIError("آپلودِ فایل ناموفق بود (URI دریافت نشد).")
+        return file_info
+
+
+def _raise_gemini_status_error(status_code: int) -> None:
+    if status_code == 429:
+        raise AIQuotaError("سقف رایگان API برای امروز پر شده — کمی بعد دوباره امتحان کن.")
+    if status_code == 402:
+        raise AIConfigError(
+            "خطای ۴۰۲ (نیاز به پرداخت) از گوگل — پروژه‌ی Google Cloud این کلید "
+            "نیاز به فعال‌سازی Billing داره یا در منطقه‌ی شما ردهٔ رایگان در "
+            "دسترس نیست."
+        )
+    if status_code in (400, 401, 403, 404):
+        raise AIConfigError(
+            "کلید API نامعتبره، مدل اشتباهه یا دسترسی لازم رو نداره — ادمین باید از پنل "
+            f"هوشیار تنظیماتش رو چک کنه. (کد خطا: {status_code})"
+        )
+    if status_code >= 500:
+        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — کمی بعد دوباره امتحان کن.")
+
+
+async def _stream_gemini(api_key: str, model: str, system_prompt: str,
+                          text: str = None, image_bytes: bytes = None,
+                          image_mime: str = 'image/jpeg', history: list = None,
+                          thinking: str = 'auto', uid: int = None, doc: dict = None, **_):
+    """
+    ⚠️ موتورِ جدید — سه قابلیت رو یکجا پیاده می‌کنه:
+      ۱) پاسخِ استریمینگ (کلمه‌به‌کلمه) به‌جای یک‌جا برگشتنِ کل جواب
+      ۲) Function Calling (خوندنِ برنامه/نمره از دیتابیسِ خودِ هامزیار)
+      ۳) ابزارِ url_context (خوندنِ لینک‌هایی که کاربر می‌فرسته)
+    این یک async generator است که رویدادهای {'type': 'delta'/'done'}
+    yield می‌کند. حلقه‌ی function-calling کاملاً داخلی و نامرئی برای
+    فراخوان است — فقط دلتاهای متنِ جوابِ نهایی به بیرون می‌رسه.
+    """
     # FIX: از اواسط ۲۰۲۶ گوگل کلیدهای جدید با پیشوند «AQ.» صادر می‌کند که
     # با روش قدیمیِ فرستادن کلید در URL (?key=...) کار نمی‌کنند و ۴۰۴/۴۰۳
-    # برمی‌گردانند. روش رسمی و سازگار با هر دو فرمت (چه AIzaSy... قدیمی،
-    # چه AQ.... جدید) فرستادن کلید در هدر x-goog-api-key است.
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    headers = {
-        'Content-Type':   'application/json',
-        'x-goog-api-key': api_key,
-    }
+    # برمی‌گردانند. روش رسمی و سازگار با هر دو فرمت فرستادن کلید در هدر
+    # x-goog-api-key است.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+    headers = {'Content-Type': 'application/json', 'x-goog-api-key': api_key}
 
-    # حافظه‌ی موقتِ مکالمه (اگه باشه) رو به‌عنوان turn های قبلی اضافه کن.
-    # Gemini برای پیام‌های خودِ مدل از role='model' استفاده می‌کند.
     contents = []
     for item in (history or []):
         role = 'model' if item.get('role') == 'assistant' else 'user'
         contents.append({'role': role, 'parts': [{'text': item.get('text', '')}]})
 
-    # ⚠️ image_bytes/image_mime دیگه فقط برای عکس نیست — Gemini از همین
-    # ساختارِ inline_data برای PDF و فایلِ صوتی هم استفاده می‌کنه (فقط
-    # mime_type فرق می‌کنه)، پس این پارامترها الان یعنی «هر رسانه‌ی
-    # ورودیِ ضمیمه‌شده» — نامشون به‌خاطرِ سازگاری با کدِ قبلی عوض نشده.
     parts = []
     if image_bytes:
-        parts.append({
-            'inline_data': {
-                'mime_type': image_mime,
-                'data': base64.b64encode(image_bytes).decode('utf-8'),
-            }
-        })
+        parts.append({'inline_data': {'mime_type': image_mime, 'data': base64.b64encode(image_bytes).decode('utf-8')}})
+    if doc and doc.get('uri'):
+        # ⚠️ سندِ مرجعِ فعال (RAG سبک) — اگه دانشجو قبلاً یه PDF فرستاده
+        # و هنوز منقضی نشده، خودکار به همین سوال هم اضافه می‌شه.
+        parts.append({'file_data': {'mime_type': doc.get('mime') or 'application/pdf', 'file_uri': doc['uri']}})
     if text:
         parts.append({'text': text})
     if not parts:
         parts.append({'text': 'کاربر متن یا فایلی ارسال نکرده.'})
     contents.append({'role': 'user', 'parts': parts})
 
-    # ⚠️ طبق مستندات رسمیِ گوگل، برای خانواده‌ی مدل‌های Gemini 3.x (جمله
-    # gemini-3.5-flash) توصیه شده temperature/top_p/top_k از مقدار
-    # پیش‌فرض تغییر داده نشه — قابلیت استدلال این مدل‌ها برای همون
-    # پیش‌فرض بهینه شده. برای مدل‌های ۲.x (که این توصیه رو نداشتن) طبق
-    # قبل temperature پایین‌تر می‌فرستیم تا پاسخ‌های درسی دقیق‌تر/کمتر
-    # پراکنده باشن.
-    # ⚠️ فیکس باگِ «پیامِ نصفه»: سقفِ قبلی (1024 توکن) برای جواب‌های
-    # تشریحیِ چندبخشی خیلی کم بود و مدل وسط جمله متوقف می‌شد. سقف رو
-    # بالا بردیم؛ اگه بازم (به‌ندرت) جواب طولانی‌تر از این باشه، به‌جای
-    # قطعِ خاموش، صریح به کاربر می‌گیم که ادامه بخواد.
+    # ⚠️ طبق مستندات رسمیِ گوگل، برای خانواده‌ی مدل‌های Gemini 3.x توصیه
+    # شده temperature از پیش‌فرض تغییر داده نشه.
     generation_config = {'maxOutputTokens': 3072}
     if not model.startswith('gemini-3'):
         generation_config['temperature'] = 0.3
-
-    # ⚠️ قابلیتِ جدید: عمقِ استدلال. رایگانه (جزوِ توکنِ خروجی حساب
-    # می‌شه)، فقط وقتی ادمین از پنل «high» رو انتخاب کرده باشه فعال
-    # می‌شه — برای سوالاتِ سختِ فیزیولوژی/فارماکولوژی که استدلالِ
-    # عمیق‌تر لازم دارن. مدل‌های 3.x از thinkingLevel و مدل‌های 2.5 از
-    # thinkingBudget استفاده می‌کنن.
     if thinking == 'high':
         if model.startswith('gemini-3'):
             generation_config['thinkingConfig'] = {'thinkingLevel': 'high'}
         else:
-            generation_config['thinkingConfig'] = {'thinkingBudget': -1}  # -1 = پویا/حداکثر
+            generation_config['thinkingConfig'] = {'thinkingBudget': -1}
 
-    payload = {
-        'system_instruction': {'parts': [{'text': system_prompt}]},
-        'contents': contents,
-        'generationConfig': generation_config,
-        # ⚠️ قابلیتِ جدید: اجرای کد — رایگانه و به مدل اجازه می‌ده برای
-        # سوالاتِ محاسباتی (دوزِ دارو، آمارِ زیستی، فرمول‌ها) واقعاً پایتون
-        # اجرا کنه و جوابِ عددیِ دقیق بده، به‌جای حدس‌زدنِ ذهنی.
-        'tools': [{'code_execution': {}}],
-    }
+    tools = [{'code_execution': {}}, {'url_context': {}}]
+    if uid is not None:
+        tools.append({'function_declarations': AI_FUNCTIONS})
 
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = None
-            for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code >= 500 and attempt == 0:
-                    await asyncio.sleep(1.5)
-                    continue
-                break
-    except httpx.TimeoutException:
-        raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
-    except httpx.HTTPError as e:
-        raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+    total_tokens = 0
+    full_answer_parts = []
+    finish_reason = None
 
-    if resp.status_code == 429:
-        raise AIQuotaError("سقف رایگان API برای امروز پر شده — کمی بعد دوباره امتحان کن.")
-    if resp.status_code == 402:
-        raise AIConfigError(
-            "خطای ۴۰۲ (نیاز به پرداخت) از گوگل — پروژه‌ی Google Cloud این کلید "
-            "نیاز به فعال‌سازی Billing داره یا در منطقه‌ی شما ردهٔ رایگان در "
-            "دسترس نیست."
-        )
-    if resp.status_code in (400, 401, 403, 404):
-        raise AIConfigError(
-            "کلید API نامعتبره، مدل اشتباهه یا دسترسی لازم رو نداره — ادمین باید از پنل "
-            f"هوشیار تنظیماتش رو چک کنه. (کد خطا: {resp.status_code})"
-        )
-    if resp.status_code >= 500:
-        raise AIError("سرویس هوش مصنوعی موقتاً در دسترس نیست — یه بار دیگه هم امتحان شد ولی جواب نداد؛ کمی بعد دوباره امتحان کن.")
+    for _round in range(4):   # سقفِ دورهای فراخوانیِ تابع — جلوگیری از حلقه‌ی بی‌نهایت
+        payload = {
+            'system_instruction': {'parts': [{'text': system_prompt}]},
+            'contents': contents,
+            'generationConfig': generation_config,
+            'tools': tools,
+        }
 
-    try:
-        resp.raise_for_status()
-        data = resp.json()
-        candidate = data['candidates'][0]
-        # ⚠️ فیکس: قبلاً فقط اولین «part» رو می‌خوند (parts[0])، ولی وقتی
-        # اجرای کد فعاله یا مدل فکر می‌کنه، جواب توی چند تکه (part) میاد
-        # (مثلاً یه تکه کدِ اجراشده + یه تکه توضیحِ نهایی). حالا همه‌ی
-        # تکه‌های متنیِ غیر-thinking رو به ترتیب کنار هم می‌ذاریم.
-        raw_parts = candidate.get('content', {}).get('parts', []) or []
-        text_chunks = [p['text'] for p in raw_parts if p.get('text') and not p.get('thought')]
-        answer = '\n'.join(text_chunks).strip()
-        if not answer:
-            raise KeyError('empty answer')
-        tokens = int((data.get('usageMetadata') or {}).get('totalTokenCount', 0) or 0)
-        if candidate.get('finishReason') == 'MAX_TOKENS':
-            answer += "\n\n⏳ (جواب طولانی بود و همین‌جا قطع شد؛ اگه خواستی بقیه‌ش رو بگم، بنویس «ادامه بده».)"
-        return answer, tokens
-    except (KeyError, IndexError, ValueError):
-        reason = ''
+        function_call = None
+        round_model_parts = []
+
+        client = httpx.AsyncClient(timeout=90)
         try:
-            reason = data.get('candidates', [{}])[0].get('finishReason', '')
-        except Exception:
-            pass
-        raise AIConfigError(f"مدل پاسخی برنگردوند{f' (دلیل: {reason})' if reason else ''}.")
+            for attempt in range(2):   # ⚠️ یک بار ری‌ترای خودکار روی خطای موقتِ سرور (۵xx)
+                try:
+                    async with client.stream('POST', url, headers=headers, json=payload) as resp:
+                        if resp.status_code != 200:
+                            if resp.status_code >= 500 and attempt == 0:
+                                await asyncio.sleep(1.5)
+                                continue
+                            _raise_gemini_status_error(resp.status_code)
+                        async for line in resp.aiter_lines():
+                            if not line.startswith('data:'):
+                                continue
+                            chunk_str = line[5:].strip()
+                            if not chunk_str:
+                                continue
+                            try:
+                                chunk = json.loads(chunk_str)
+                            except ValueError:
+                                continue
+                            usage = chunk.get('usageMetadata') or {}
+                            if usage.get('totalTokenCount'):
+                                total_tokens = int(usage['totalTokenCount'])
+                            cands = chunk.get('candidates') or []
+                            if not cands:
+                                continue
+                            cand = cands[0]
+                            if cand.get('finishReason'):
+                                finish_reason = cand['finishReason']
+                            for part in (cand.get('content', {}) or {}).get('parts', []) or []:
+                                if part.get('thought'):
+                                    continue
+                                if 'functionCall' in part:
+                                    function_call = part['functionCall']
+                                    round_model_parts.append(part)
+                                elif part.get('text') and function_call is None:
+                                    round_model_parts.append(part)
+                                    full_answer_parts.append(part['text'])
+                                    yield {'type': 'delta', 'text': part['text']}
+                    break   # استریم با موفقیت تموم شد، از حلقه‌ی ری‌ترای خارج شو
+                except httpx.TimeoutException:
+                    raise AIError("سرویس هوش مصنوعی دیر جواب داد (timeout) — دوباره امتحان کن.")
+                except httpx.HTTPError as e:
+                    raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+        finally:
+            await client.aclose()
+
+        if function_call:
+            fn_name = function_call.get('name')
+            fn_args = function_call.get('args') or {}
+            result_text = await _execute_ai_function(fn_name, fn_args, uid)
+            contents.append({'role': 'model', 'parts': round_model_parts})
+            contents.append({'role': 'user', 'parts': [{
+                'function_response': {'name': fn_name, 'response': {'result': result_text}}
+            }]})
+            continue   # دورِ بعدی — این‌بار با نتیجه‌ی تابع
+
+        break   # این دور function call نداشت → جوابِ نهایی همینه
+
+    answer = ''.join(full_answer_parts).strip()
+    if not answer:
+        raise AIConfigError("مدل پاسخی برنگردوند.")
+    if finish_reason == 'MAX_TOKENS':
+        note = "\n\n⏳ (جواب طولانی بود و همین‌جا قطع شد؛ اگه خواستی بقیه‌ش رو بگم، بنویس «ادامه بده».)"
+        answer += note
+        yield {'type': 'delta', 'text': note}
+
+    yield {'type': 'done', 'answer': answer, 'tokens': total_tokens}
 
 
 async def _call_openrouter(api_key: str, model: str, system_prompt: str,
@@ -439,20 +576,35 @@ async def _call_openrouter(api_key: str, model: str, system_prompt: str,
         raise AIConfigError("مدل پاسخی برنگردوند — احتمالاً مدل انتخاب‌شده الان در دسترس نیست.")
 
 
-PROVIDERS = {
-    'gemini':     _call_gemini,
-    'openrouter': _call_openrouter,
-    # نمونه برای بعداً — فقط یک تابع مثل _call_gemini/_call_openrouter بنویس
-    # و اینجا اضافه کن:
-    # 'openai': _call_openai,
+STREAM_PROVIDERS = {
+    'gemini': _stream_gemini,
+    # نمونه برای بعداً: یک async generator با همین قرارداد رویداد بنویس
+    # ({'type': 'delta', 'text': ...} / {'type': 'done', 'answer':..., 'tokens':...})
 }
 
 
-async def ask_ai(text: str = None, image_bytes: bytes = None,
-                  image_mime: str = 'image/jpeg', history: list = None) -> tuple:
+async def _openrouter_as_stream(**kwargs):
     """
-    برمی‌گرداند (answer_text, tokens_used). history اختیاریه: لیستی از
-    {'role': 'user'|'assistant', 'text': ...} برای حفظ سیاق مکالمه‌ی اخیر.
+    OpenRouter فعلاً استریمِ واقعی نداره؛ برای اینکه رابطِ یکسانی به
+    فراخوان بدیم، کل جواب رو یک‌جا می‌گیریم و به‌عنوان یک delta واحد +
+    یک done برمی‌گردونیم — کدِ بالادستی (نمایشِ پیام) فرقی نمی‌کنه.
+    """
+    answer, tokens = await _call_openrouter(**kwargs)
+    yield {'type': 'delta', 'text': answer}
+    yield {'type': 'done', 'answer': answer, 'tokens': tokens}
+
+
+STREAM_PROVIDERS['openrouter'] = _openrouter_as_stream
+
+
+async def ask_ai_stream(text: str = None, image_bytes: bytes = None,
+                         image_mime: str = 'image/jpeg', history: list = None,
+                         uid: int = None):
+    """
+    رابطِ اصلیِ جدید: یک async generator که رویدادهای {'type': 'delta',
+    'text': ...} (پاسخِ تدریجی) و در آخر {'type': 'done', 'answer':...,
+    'tokens':...} می‌دهد. uid برای Function Calling و سندِ مرجعِ فعال
+    (RAG) استفاده می‌شود.
     """
     cfg = await get_ai_config()
     if not cfg['enabled']:
@@ -460,17 +612,51 @@ async def ask_ai(text: str = None, image_bytes: bytes = None,
     if not cfg['api_key']:
         raise AIConfigError("هنوز کلید API توسط ادمین تنظیم نشده.")
 
-    fn = PROVIDERS.get(cfg['provider'])
+    fn = STREAM_PROVIDERS.get(cfg['provider'])
     if not fn:
         raise AIConfigError(f"ارائه‌دهنده‌ی «{cfg['provider']}» پشتیبانی نمی‌شود.")
 
-    answer, tokens = await fn(
-        api_key=cfg['api_key'], model=cfg['model'],
-        system_prompt=cfg['system_prompt'],
+    doc = None
+    if cfg['provider'] == 'gemini' and uid is not None:
+        try:
+            doc = await db.ai_get_doc(uid)
+            if doc and doc.get('at') and (datetime.now() - doc['at']).total_seconds() > 48 * 3600:
+                doc = None   # فایلِ گوگل بعد از ۴۸ ساعت خودش منقضی می‌شه
+        except Exception:
+            doc = None
+
+    kwargs = dict(
+        api_key=cfg['api_key'], model=cfg['model'], system_prompt=cfg['system_prompt'],
         text=text, image_bytes=image_bytes, image_mime=image_mime,
         history=history or [], thinking=cfg['thinking'],
     )
-    _guard_against_meta_leak(answer, cfg)
+    if cfg['provider'] == 'gemini':
+        kwargs['uid'] = uid
+        kwargs['doc'] = doc
+
+    full_answer = None
+    async for event in fn(**kwargs):
+        if event['type'] == 'done':
+            full_answer = event['answer']
+        yield event
+
+    if full_answer is not None:
+        _guard_against_meta_leak(full_answer, cfg)
+
+
+async def ask_ai(text: str = None, image_bytes: bytes = None,
+                  image_mime: str = 'image/jpeg', history: list = None,
+                  uid: int = None) -> tuple:
+    """
+    نسخه‌ی ساده (غیر-استریم) برای فراخوان‌هایی که فقط جوابِ نهایی رو
+    می‌خوان (مثلاً دکمه‌ی «تست اتصال» توی پنل ادمین) — همون
+    ask_ai_stream رو زیرِ پوستش صدا می‌زنه و رویدادها رو جمع می‌کنه.
+    """
+    answer, tokens = '', 0
+    async for event in ask_ai_stream(text=text, image_bytes=image_bytes,
+                                      image_mime=image_mime, history=history, uid=uid):
+        if event['type'] == 'done':
+            answer, tokens = event['answer'], event['tokens']
     return answer, tokens
 
 
@@ -688,70 +874,75 @@ def _md_to_telegram_html(text: str) -> str:
     return out
 
 
-async def _animate_while_waiting(thinking_msg, context: ContextTypes.DEFAULT_TYPE,
-                                  chat_id: int, coro):
-    """
-    تا وقتی جواب واقعی آماده بشه، پیامِ «در حال فکر کردن» رو هر چند ثانیه با
-    یه عبارت بامزه‌ی جدید عوض می‌کنه (اگه طول بکشه) — به‌جای یک پیام ثابت.
-    """
-    task   = asyncio.ensure_future(coro)
-    delays = [3.0, 4.0, 4.0, 4.0, 4.0]   # فاصله‌ی هر تغییرِ پیام (ثانیه)
-    used   = set()
+EDIT_THROTTLE_SECONDS = 1.3   # حداقل فاصله بین دو ادیتِ پیام حین استریم (جلوگیری از Flood-limit تلگرام)
 
-    for delay in delays:
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
-        if task.done():
-            break
+
+async def _typing_pinger(context: ContextTypes.DEFAULT_TYPE, chat_id: int, stop_event: asyncio.Event):
+    """در پس‌زمینه هر چند ثانیه یک‌بار وضعیتِ «در حال تایپ» رو نگه می‌داره — تا وقتی stop_event ست بشه."""
+    while not stop_event.is_set():
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
         except Exception:
             pass
         try:
-            await thinking_msg.edit_text(_pick_unused(STALL_PHRASES, used))
-        except Exception:
+            await asyncio.wait_for(stop_event.wait(), timeout=4)
+        except asyncio.TimeoutError:
             pass
-
-    return await task  # اگه فاز شوخی هم تموم شد، فقط منتظرِ نتیجه‌ی واقعی بمون
 
 
 async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                  get_answer_coro, footer_suffix: str,
+                                  stream_gen, footer_suffix: str,
                                   uid: int, question_label: str) -> None:
     """
-    یه پیامِ بامزه‌ی «در حال فکر کردن» می‌فرسته و وقتی جواب آماده شد، همون
-    پیام رو ادیت می‌کنه — حس تعاملیِ زنده‌تری به گفتگو می‌ده. اگه جواب دیر
-    برسه، پیام رو با عبارت‌های بامزه‌تر یکی‌یکی عوض می‌کنه.
-    اگه جواب موفق بود: توی حافظه‌ی موقتِ مکالمه ثبتش می‌کنه، توکن مصرفی رو
-    به دیتابیس اضافه می‌کنه، و زیرِ پیام دو دکمه می‌ذاره («گفتگوی جدید» و
-    «گزارش این جواب»).
+    ⚠️ قابلیتِ جدید: پاسخِ استریمینگِ واقعی — به‌جای اینکه یک‌جا منتظرِ
+    کلِ جواب بمونیم و بعد نشونش بدیم، همون‌طور که متن از Gemini می‌رسه،
+    پیام رو تدریجاً (با یه throttle برای رعایتِ محدودیتِ ویرایشِ تلگرام)
+    آپدیت می‌کنیم — دقیقاً حسِ «داره جلوی چشمت تایپ می‌کنه» رو می‌ده.
+    اگه جواب موفق بود: توی حافظه‌ی مکالمه ثبتش می‌کنه، توکن مصرفی رو به
+    دیتابیس اضافه می‌کنه، و زیرِ پیام دکمه‌ها رو می‌ذاره.
     """
-    thinking_msg = await update.message.reply_text(random.choice(THINKING_PHRASES))
     chat_id = update.effective_chat.id
-    await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+    thinking_msg = await context.bot.send_message(chat_id, random.choice(THINKING_PHRASES))
 
-    answer_text = None
+    stop_event = asyncio.Event()
+    pinger = asyncio.ensure_future(_typing_pinger(context, chat_id, stop_event))
+
+    buffer: list = []
     tokens = 0
+    answer_text = None
+    last_edit_at = 0.0
+    final_text = ''
+
     try:
-        answer_text, tokens = await _animate_while_waiting(thinking_msg, context, chat_id, get_answer_coro)
-        # ⚠️ فیکس باگ «برش وسطِ متن»: قبلاً برش طولِ پیام (سقف ۴۰۹۶ کاراکتریِ
-        # تلگرام) روی متنِ نهاییِ HTML‌شده انجام می‌شد که ممکن بود وسطِ یه
-        # تگ (مثلاً <b>) قطع بشه و parse_mode='HTML' با خطا مواجه بشه. حالا
-        # برش رو روی متنِ خامِ AI (قبل از تبدیل به HTML) انجام می‌دیم، بعد
-        # تبدیلش می‌کنیم — همیشه تگ‌ها کامل و سالم می‌مونن.
-        raw_answer = answer_text
+        async for event in stream_gen:
+            if event['type'] == 'delta':
+                buffer.append(event['text'])
+                now = time.time()
+                if now - last_edit_at >= EDIT_THROTTLE_SECONDS:
+                    raw_partial = ''.join(buffer)
+                    if len(raw_partial) > 3480:
+                        raw_partial = raw_partial[:3480] + "…"
+                    try:
+                        await thinking_msg.edit_text(
+                            f"🤖 {_md_to_telegram_html(raw_partial)} ▌", parse_mode='HTML',
+                        )
+                    except Exception:
+                        pass   # مثلاً «message not modified» یا محدودیتِ نرخ — بی‌خیالش شو، دورِ بعد دوباره امتحان می‌شه
+                    last_edit_at = now
+            elif event['type'] == 'done':
+                answer_text = event['answer']
+                tokens = event['tokens']
+
+        raw_answer = answer_text or ''
+        # ⚠️ برشِ طولِ پیام روی متنِ خام (نه HTML) انجام می‌شه تا هیچ‌وقت
+        # وسطِ یه تگ قطع نشه.
         if len(raw_answer) > 3500:
             raw_answer = raw_answer[:3480] + "…"
         final_text = f"🤖 {_md_to_telegram_html(raw_answer)}{_esc(footer_suffix, quote=False)}"
+
     except AIConfigError as e:
-        # ⚠️ فیکس: این خطا فنیه و فقط برای ادمین معنی داره (مثلاً کلید/مدل
-        # اشتباه تنظیم شده، یا OpenRouter روی «انتخاب خودکار» است و مدلی
-        # که برگردونده ربطی به سوال درسی نداشته). قبلاً همین متنِ فنی
-        # مستقیم به دانشجو نشون داده می‌شد که هم گیج‌کننده بود هم ظاهر بدی
-        # داشت. حالا دانشجو فقط یه پیام ساده می‌بینه، و متنِ فنی مستقیم
-        # برای ادمین ارشد فوروارد می‌شه تا سریع بره درستش کنه.
+        # ⚠️ این خطا فنیه و فقط برای ادمین معنی داره. دانشجو فقط یه پیامِ
+        # ساده می‌بینه، و متنِ فنی مستقیم برای ادمین ارشد فوروارد می‌شه.
         final_text = (
             "⚠️ هوشیار الان یه مشکل فنی داره و نمی‌تونه درست جواب بده.\n"
             "به ادمین اطلاع داده شد؛ لطفاً چند دقیقه‌ی دیگه دوباره امتحان کن 🙏"
@@ -774,27 +965,38 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         logger.exception("AI error")
         final_text = "⚠️ مشکلی در ارتباط با سرویس هوش مصنوعی پیش اومد، دوباره امتحان کن."
+    finally:
+        stop_event.set()
+        pinger.cancel()
+        try:
+            await pinger
+        except Exception:
+            pass
 
-    if len(final_text) > 4000:  # محافظِ نهایی (به‌ندرت لازم می‌شه، چون برش اصلی روی متنِ خام انجام شد)
+    if len(final_text) > 4000:  # محافظِ نهایی (به‌ندرت لازم می‌شه)
         final_text = final_text[:3990] + "…"
 
     reply_markup = None
     if answer_text:
-        reply_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🆕 گفتگوی جدید", callback_data="aiu:newchat"),
-            InlineKeyboardButton("🚩 گزارش این جواب", callback_data=f"aiu:report:{chat_id}:{thinking_msg.message_id}"),
-        ]])
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔬 مثال بزن", callback_data="aiu:fu:example"),
+                InlineKeyboardButton("📝 خلاصه‌ترش کن", callback_data="aiu:fu:summary"),
+                InlineKeyboardButton("🎯 سوالِ مشابه", callback_data="aiu:fu:similar"),
+            ],
+            [
+                InlineKeyboardButton("🆕 گفتگوی جدید", callback_data="aiu:newchat"),
+                InlineKeyboardButton("🚩 گزارش این جواب", callback_data=f"aiu:report:{chat_id}:{thinking_msg.message_id}"),
+            ],
+        ])
 
     try:
         await thinking_msg.edit_text(final_text, reply_markup=reply_markup, parse_mode='HTML')
     except Exception:
-        # اگه ادیت به هر دلیلی شکست خورد (مثلاً پیام حذف شده یا HTML نامعتبر
-        # بود)، یه بار به‌صورت متنِ ساده (بدون parse_mode) هم امتحان می‌کنیم
-        # تا حداقل خودِ جواب گم نشه، بعد اگه بازم شکست خورد جدا می‌فرستیم.
         try:
             await thinking_msg.edit_text(final_text, reply_markup=reply_markup)
         except Exception:
-            await update.message.reply_text(final_text, reply_markup=reply_markup)
+            await context.bot.send_message(chat_id, final_text, reply_markup=reply_markup)
 
     if tokens:
         await record_token_usage(uid, tokens)
@@ -856,7 +1058,7 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         history = await _get_history(uid)
         await _answer_with_live_edit(
-            update, context, ask_ai(text=text, history=history),
+            update, context, ask_ai_stream(text=text, history=history, uid=uid),
             _footer(limit, used), uid, text,
         )
     finally:
@@ -1008,6 +1210,24 @@ async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # ⚠️ قابلیتِ جدید: «سندِ مرجعِ فعال» — به‌جای فرستادنِ PDF به‌صورتِ
+    # inline (که فقط برای همین یه سوال کار می‌کنه)، آپلودش می‌کنیم روی
+    # Gemini Files API (رایگان، ۴۸ ساعت نگه‌داری) و فقط یه اشاره‌گرِ
+    # کوچیک ذخیره می‌کنیم. این‌جوری سوالاتِ بعدیِ همین دانشجو هم خودکار
+    # به همین سند دسترسی دارن، بدون اینکه دوباره بفرستتش.
+    display_name = None
+    if update.message.document:
+        display_name = update.message.document.file_name
+    if kind == 'pdf':
+        try:
+            file_info = await _gemini_upload_file(cfg['api_key'], media_bytes, mime, display_name or 'جزوه.pdf')
+            await db.ai_set_doc(uid, file_info['uri'], file_info.get('mimeType', mime), display_name or 'جزوه')
+            media_bytes = None   # دیگه لازم نیست inline بفرستیمش؛ از طریقِ doc reference میره
+        except Exception:
+            logger.exception("آپلودِ PDF به Gemini Files API ناموفق بود")
+            await update.message.reply_text("⚠️ آپلودِ فایل ناموفق بود — دوباره امتحان کن.")
+            return
+
     allowed, used, limit = await check_and_consume_quota(uid)
     if not allowed:
         await update.message.reply_text(
@@ -1018,7 +1238,7 @@ async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     labels = {
         'image': "[یک سوال به‌صورت عکس فرستاد]",
-        'pdf':   "[یک فایل PDF فرستاد]",
+        'pdf':   f"[یک فایل PDF فرستاد: {display_name or 'جزوه'} — به‌عنوانِ سندِ مرجع ذخیره شد]",
         'audio': "[یک پیام صوتی فرستاد]",
     }
     question_label = caption or labels.get(kind, "[یک فایل فرستاد]")
@@ -1028,7 +1248,7 @@ async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history = await _get_history(uid)
         await _answer_with_live_edit(
             update, context,
-            ask_ai(text=caption, image_bytes=media_bytes, image_mime=mime, history=history),
+            ask_ai_stream(text=caption, image_bytes=media_bytes, image_mime=mime, history=history, uid=uid),
             _footer(limit, used), uid, question_label,
         )
     finally:
@@ -1049,7 +1269,47 @@ async def ai_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == 'newchat':
         await _clear_memory(uid)
-        await query.answer("✅ حافظه‌ی مکالمه پاک شد؛ از اول شروع کن 🙂", show_alert=True)
+        await db.ai_clear_doc(uid)
+        await query.answer("✅ حافظه‌ی مکالمه (و سندِ مرجعِ فعال، اگه بود) پاک شد؛ از اول شروع کن 🙂", show_alert=True)
+        return
+
+    if action == 'fu':
+        fu_type = parts[2] if len(parts) > 2 else ''
+        prompts = {
+            'example': 'یه مثالِ ملموس و کاربردی برای همون چیزی که الان توضیح دادی بزن.',
+            'summary': 'همون جوابِ قبلی رو خیلی خلاصه‌تر (در حد ۲ تا ۳ خط) بگو.',
+            'similar': 'یه سوالِ چهارگزینه‌ایِ مشابهِ همون موضوع بساز و ازم بپرس.',
+        }
+        prompt = prompts.get(fu_type)
+        if not prompt:
+            await query.answer()
+            return
+
+        cfg = await get_ai_config()
+        if not cfg['enabled']:
+            await query.answer(cfg.get('disabled_message') or DEFAULT_DISABLED_MSG, show_alert=True)
+            return
+        if await db.ai_is_banned(uid):
+            await query.answer("⛔️ دسترسیِ شما به هوشیار توسط مدیریت مسدود شده.", show_alert=True)
+            return
+        if uid in _busy_users:
+            await query.answer("⏳ صبر کن جوابِ قبلی آماده بشه.", show_alert=True)
+            return
+        allowed, used, limit = await check_and_consume_quota(uid)
+        if not allowed:
+            await query.answer(f"⛔️ سقفِ روزانه تموم شده ({used}/{limit}).", show_alert=True)
+            return
+
+        await query.answer()
+        _busy_users.add(uid)
+        try:
+            history = await _get_history(uid)
+            await _answer_with_live_edit(
+                update, context, ask_ai_stream(text=prompt, history=history, uid=uid),
+                _footer(limit, used), uid, prompt,
+            )
+        finally:
+            _busy_users.discard(uid)
         return
 
     if action == 'report':
