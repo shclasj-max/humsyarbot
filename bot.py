@@ -70,7 +70,7 @@ from ticket import ticket_callback, ticket_message_handler
 from reports import report_callback, handle_report_note_text   # FIX جدید
 from ai_admin import ai_admin_callback, ai_admin_text_handler   # 🤖 هوشیار
 from ai_solver import (                                          # 🤖 هوشیار
-    handle_ai_text, handle_ai_media, ai_user_callback, ai_memory_sweep_job,
+    handle_ai_text, handle_ai_media, ai_user_callback,
 )
 from database import db
 
@@ -1202,16 +1202,9 @@ async def post_init(application: Application):
             name='subscription_expiry'
         )
 
-        # FIX جدید: هوشیار — جاروی دوره‌ایِ حافظه‌ی موقتِ مکالمه (RAM)؛
-        # این حافظه خودش هم موقع خوندن TTL رو چک می‌کنه، این job فقط
-        # یه لایه‌ی احتیاطیِ اضافه‌ست تا ورودی‌های خیلی قدیمی بی‌دلیل
-        # توی RAM نمونن.
-        application.job_queue.run_repeating(
-            ai_memory_sweep_job,
-            interval=600,
-            first=300,
-            name='ai_memory_sweep'
-        )
+        # FIX: قبلاً اینجا یه job برای جاروی حافظه‌ی موقتِ RAM هوشیار بود؛
+        # حافظه الان روی دیتابیس ذخیره می‌شه (پایدار در برابرِ ری‌استارت)
+        # و TTL موقعِ خوندن چک می‌شه، پس این job دیگه لازم نیست.
 
         logger.info("✅ Job‌های زمان‌بندی ثبت شدند")
 
