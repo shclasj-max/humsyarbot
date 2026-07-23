@@ -67,6 +67,7 @@ class DB:
         self.sub_payments  = _db['sub_payments']
         self.discount_codes = _db['discount_codes']
         self.grades         = _db['grades']  # FIX جدید: سیستم نمرات
+        self.ai_reports     = _db['ai_reports']  # FIX جدید: گزارش‌های «پاسخ نامناسب» هوشیار (پایدار، نه فقط RAM)
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها
@@ -2925,6 +2926,42 @@ class DB:
             {'user_id': uid},
             {'$inc': {'ai_total_tokens': int(tokens), 'ai_tokens_today': int(tokens)}},
         )
+
+    # ══════════════════════════════════════════════════
+    #  مسدودکردن یک کاربر خاص از هوشیار (جدا از بلاک کاملِ ربات)
+    # ══════════════════════════════════════════════════
+
+    async def ai_set_banned(self, uid: int, banned: bool) -> None:
+        await self.users.update_one({'user_id': uid}, {'$set': {'ai_banned': bool(banned)}})
+
+    async def ai_is_banned(self, uid: int) -> bool:
+        user = await self.get_user(uid) or {}
+        return bool(user.get('ai_banned'))
+
+    async def ai_list_banned(self, limit: int = 50) -> list:
+        return await self.users.find(
+            {'ai_banned': True}, {'user_id': 1, 'name': 1}
+        ).to_list(length=limit)
+
+    # ══════════════════════════════════════════════════
+    #  لاگِ پایدارِ «گزارش پاسخ نامناسب» — قبلاً فقط توی RAM بود و با
+    #  ری‌استارتِ ربات از بین می‌رفت؛ حالا برای بررسیِ بعدیِ ادمین توی
+    #  دیتابیس هم ثبت می‌شه (مستقل از کشِ موقتِ RAM که برای دکمه‌ی زیر
+    #  پیام استفاده می‌شه).
+    # ══════════════════════════════════════════════════
+
+    async def ai_log_report(self, uid: int, name: str, question: str, answer: str) -> None:
+        await self.ai_reports.insert_one({
+            'user_id':  uid,
+            'name':     name or '—',
+            'question': (question or '—')[:1000],
+            'answer':   (answer or '—')[:2000],
+            'created_at': datetime.now(),
+        })
+
+    async def ai_recent_reports(self, limit: int = 10) -> list:
+        cursor = self.ai_reports.find({}).sort('created_at', -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
 
 db = DB()
