@@ -11,6 +11,7 @@
 """
 import os
 import re
+import json
 import time
 import base64
 import random
@@ -183,21 +184,50 @@ def _cache_for_report(chat_id: int, message_id: int, uid: int, name: str,
 #  تنظیمات — همه از bot_settings (کلید-مقدار عمومی دیتابیس)
 # ══════════════════════════════════════════════════
 
+DEFAULT_DISABLED_MSG = "🤖 بخش هوش مصنوعی توسط مدیریت غیرفعال شد."
+
+
 async def get_ai_config() -> dict:
     raw = await db.get_settings_by_prefix('ai_')
     provider = raw.get('ai_provider', 'gemini')
+    personas_raw = raw.get('ai_personas', '{}')
+    try:
+        personas = json.loads(personas_raw) if isinstance(personas_raw, str) else (personas_raw or {})
+    except (ValueError, TypeError):
+        personas = {}
     return {
-        'enabled':       bool(raw.get('ai_enabled', False)),
-        'provider':      provider,
-        'api_key':       raw.get('ai_api_key', ''),
-        'model':         raw.get('ai_model') or DEFAULT_MODELS.get(provider, DEFAULT_MODEL),
-        'daily_limit':   int(raw.get('ai_daily_limit', DEFAULT_LIMIT) or 0),
-        'system_prompt': raw.get('ai_system_prompt', DEFAULT_PROMPT),
+        'enabled':          bool(raw.get('ai_enabled', False)),
+        'provider':         provider,
+        'api_key':          raw.get('ai_api_key', ''),
+        'model':            raw.get('ai_model') or DEFAULT_MODELS.get(provider, DEFAULT_MODEL),
+        'daily_limit':      int(raw.get('ai_daily_limit', DEFAULT_LIMIT) or 0),
+        'system_prompt':    raw.get('ai_system_prompt', DEFAULT_PROMPT),
+        'disabled_message': raw.get('ai_disabled_message', ''),
+        'personas':         personas,   # {نامِ_پرسونا: متنِ_پرامپت}
+        # ⚠️ قابلیت جدید: عمقِ استدلال. 'auto' یعنی دست‌نخورده (پیش‌فرضِ
+        # خودِ مدل)، 'high' یعنی برای سوالاتِ سخت بیشتر «فکر کنه» قبل از
+        # جواب — رایگانه، فقط جزوِ توکنِ خروجی حساب می‌شه.
+        'thinking':         raw.get('ai_thinking', 'auto'),
     }
 
 
 async def set_ai_setting(key: str, value) -> None:
     await db.set_setting(f'ai_{key}', value)
+
+
+async def save_persona(name: str, prompt: str) -> None:
+    """پرسونای فعلی رو با یه اسم ذخیره می‌کنه تا بعداً سریع بشه بهش سوییچ کرد."""
+    cfg = await get_ai_config()
+    personas = cfg['personas']
+    personas[name.strip()[:40]] = prompt
+    await set_ai_setting('personas', json.dumps(personas, ensure_ascii=False))
+
+
+async def delete_persona(name: str) -> None:
+    cfg = await get_ai_config()
+    personas = cfg['personas']
+    personas.pop(name, None)
+    await set_ai_setting('personas', json.dumps(personas, ensure_ascii=False))
 
 
 # ══════════════════════════════════════════════════
@@ -210,7 +240,7 @@ async def set_ai_setting(key: str, value) -> None:
 async def _call_gemini(api_key: str, model: str, system_prompt: str,
                         text: str = None, image_bytes: bytes = None,
                         image_mime: str = 'image/jpeg', history: list = None,
-                        **_) -> tuple:
+                        thinking: str = 'auto', **_) -> tuple:
     # FIX: از اواسط ۲۰۲۶ گوگل کلیدهای جدید با پیشوند «AQ.» صادر می‌کند که
     # با روش قدیمیِ فرستادن کلید در URL (?key=...) کار نمی‌کنند و ۴۰۴/۴۰۳
     # برمی‌گردانند. روش رسمی و سازگار با هر دو فرمت (چه AIzaSy... قدیمی،
@@ -228,6 +258,10 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         role = 'model' if item.get('role') == 'assistant' else 'user'
         contents.append({'role': role, 'parts': [{'text': item.get('text', '')}]})
 
+    # ⚠️ image_bytes/image_mime دیگه فقط برای عکس نیست — Gemini از همین
+    # ساختارِ inline_data برای PDF و فایلِ صوتی هم استفاده می‌کنه (فقط
+    # mime_type فرق می‌کنه)، پس این پارامترها الان یعنی «هر رسانه‌ی
+    # ورودیِ ضمیمه‌شده» — نامشون به‌خاطرِ سازگاری با کدِ قبلی عوض نشده.
     parts = []
     if image_bytes:
         parts.append({
@@ -239,7 +273,7 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
     if text:
         parts.append({'text': text})
     if not parts:
-        parts.append({'text': 'کاربر متن یا عکسی ارسال نکرده.'})
+        parts.append({'text': 'کاربر متن یا فایلی ارسال نکرده.'})
     contents.append({'role': 'user', 'parts': parts})
 
     # ⚠️ طبق مستندات رسمیِ گوگل، برای خانواده‌ی مدل‌های Gemini 3.x (جمله
@@ -256,10 +290,25 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
     if not model.startswith('gemini-3'):
         generation_config['temperature'] = 0.3
 
+    # ⚠️ قابلیتِ جدید: عمقِ استدلال. رایگانه (جزوِ توکنِ خروجی حساب
+    # می‌شه)، فقط وقتی ادمین از پنل «high» رو انتخاب کرده باشه فعال
+    # می‌شه — برای سوالاتِ سختِ فیزیولوژی/فارماکولوژی که استدلالِ
+    # عمیق‌تر لازم دارن. مدل‌های 3.x از thinkingLevel و مدل‌های 2.5 از
+    # thinkingBudget استفاده می‌کنن.
+    if thinking == 'high':
+        if model.startswith('gemini-3'):
+            generation_config['thinkingConfig'] = {'thinkingLevel': 'high'}
+        else:
+            generation_config['thinkingConfig'] = {'thinkingBudget': -1}  # -1 = پویا/حداکثر
+
     payload = {
         'system_instruction': {'parts': [{'text': system_prompt}]},
         'contents': contents,
         'generationConfig': generation_config,
+        # ⚠️ قابلیتِ جدید: اجرای کد — رایگانه و به مدل اجازه می‌ده برای
+        # سوالاتِ محاسباتی (دوزِ دارو، آمارِ زیستی، فرمول‌ها) واقعاً پایتون
+        # اجرا کنه و جوابِ عددیِ دقیق بده، به‌جای حدس‌زدنِ ذهنی.
+        'tools': [{'code_execution': {}}],
     }
 
     try:
@@ -296,7 +345,15 @@ async def _call_gemini(api_key: str, model: str, system_prompt: str,
         resp.raise_for_status()
         data = resp.json()
         candidate = data['candidates'][0]
-        answer = candidate['content']['parts'][0]['text'].strip()
+        # ⚠️ فیکس: قبلاً فقط اولین «part» رو می‌خوند (parts[0])، ولی وقتی
+        # اجرای کد فعاله یا مدل فکر می‌کنه، جواب توی چند تکه (part) میاد
+        # (مثلاً یه تکه کدِ اجراشده + یه تکه توضیحِ نهایی). حالا همه‌ی
+        # تکه‌های متنیِ غیر-thinking رو به ترتیب کنار هم می‌ذاریم.
+        raw_parts = candidate.get('content', {}).get('parts', []) or []
+        text_chunks = [p['text'] for p in raw_parts if p.get('text') and not p.get('thought')]
+        answer = '\n'.join(text_chunks).strip()
+        if not answer:
+            raise KeyError('empty answer')
         tokens = int((data.get('usageMetadata') or {}).get('totalTokenCount', 0) or 0)
         if candidate.get('finishReason') == 'MAX_TOKENS':
             answer += "\n\n⏳ (جواب طولانی بود و همین‌جا قطع شد؛ اگه خواستی بقیه‌ش رو بگم، بنویس «ادامه بده».)"
@@ -424,7 +481,7 @@ async def ask_ai(text: str = None, image_bytes: bytes = None,
         api_key=cfg['api_key'], model=cfg['model'],
         system_prompt=cfg['system_prompt'],
         text=text, image_bytes=image_bytes, image_mime=image_mime,
-        history=history or [],
+        history=history or [], thinking=cfg['thinking'],
     )
     _guard_against_meta_leak(answer, cfg)
     return answer, tokens
@@ -539,7 +596,9 @@ async def show_ai_intro(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━\n\n"
         "سوال درسی‌تو بفرست:\n"
         "📝 متن سوال رو تایپ کن\n"
-        "📷 یا عکس سوال رو بفرست (می‌تونی زیرش توضیح هم بنویسی)\n\n"
+        "📷 یا عکس سوال رو بفرست (می‌تونی زیرش توضیح هم بنویسی)\n"
+        "📄 یا فایل PDF (جزوه/برگه‌ی اسکن‌شده)\n"
+        "🎙️ یا حتی یه ویس بفرست و سوالتو بگو\n\n"
         f"{quota_line}\n\n"
         "⚠️ پاسخ‌ها توسط هوش مصنوعی تولید می‌شن و ممکنه خطا داشته باشن — "
         "حتماً با منبع درسی/استاد چک کن.\n\n"
@@ -778,7 +837,11 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = await get_ai_config()
     if not cfg['enabled']:
         context.user_data.pop('mode', None)
-        await update.message.reply_text("🤖 بخش هوش مصنوعی توسط مدیریت غیرفعال شد.")
+        await update.message.reply_text(cfg.get('disabled_message') or DEFAULT_DISABLED_MSG)
+        return
+
+    if await db.ai_is_banned(uid):
+        await update.message.reply_text("⛔️ دسترسیِ شما به هوشیار توسط مدیریت مسدود شده.")
         return
 
     if len(text) > MAX_INPUT_CHARS:
@@ -811,28 +874,73 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _busy_users.discard(uid)
 
 
-async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+MAX_MEDIA_BYTES = 15 * 1024 * 1024  # ⚠️ قابلیتِ جدید (PDF/صدا): سقفِ حجمِ فایلِ ورودی
+
+
+async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    ⚠️ قابلیتِ جدید: قبلاً این تابع (به اسمِ handle_ai_photo) فقط عکس
+    قبول می‌کرد. الان از همین ساختارِ inline_data که Gemini برای هر نوع
+    رسانه‌ای پشتیبانی می‌کنه، برای PDF (جزوه/برگه‌ی اسکن‌شده) و پیامِ
+    صوتی/فایلِ صوتی (سوالِ گفتاری) هم استفاده می‌کنیم — بدون تغییری در
+    مدلِ هزینه (این‌ها هم جزوِ همون Free Tier هستن).
+    """
     uid = update.effective_user.id
 
     cfg = await get_ai_config()
     if not cfg['enabled']:
         context.user_data.pop('mode', None)
-        await update.message.reply_text("🤖 بخش هوش مصنوعی توسط مدیریت غیرفعال شد.")
+        await update.message.reply_text(cfg.get('disabled_message') or DEFAULT_DISABLED_MSG)
         return
 
+    if await db.ai_is_banned(uid):
+        await update.message.reply_text("⛔️ دسترسیِ شما به هوشیار توسط مدیریت مسدود شده.")
+        return
+
+    kind = None
     if update.message.photo:
         tg_file = await update.message.photo[-1].get_file()
-        mime    = 'image/jpeg'
-    elif update.message.document and (update.message.document.mime_type or '').startswith('image/'):
-        tg_file = await update.message.document.get_file()
-        mime    = update.message.document.mime_type
+        mime, kind = 'image/jpeg', 'image'
+    elif update.message.voice:
+        tg_file = await update.message.voice.get_file()
+        mime, kind = (update.message.voice.mime_type or 'audio/ogg'), 'audio'
+    elif update.message.audio:
+        tg_file = await update.message.audio.get_file()
+        mime, kind = (update.message.audio.mime_type or 'audio/mpeg'), 'audio'
+    elif update.message.document:
+        doc_mime = update.message.document.mime_type or ''
+        if doc_mime.startswith('image/'):
+            tg_file = await update.message.document.get_file()
+            mime, kind = doc_mime, 'image'
+        elif doc_mime == 'application/pdf':
+            tg_file = await update.message.document.get_file()
+            mime, kind = doc_mime, 'pdf'
+        else:
+            return  # نوع فایل پشتیبانی‌نشده — نادیده گرفته می‌شود
     else:
-        return  # نوع فایل پشتیبانی‌نشده — نادیده گرفته می‌شود
+        return
+
+    # PDF و صدا فقط از طریقِ Gemini کار می‌کنن (OpenRouter برای این
+    # نوع‌ها راه‌اندازی نشده)؛ اگه ادمین ارائه‌دهنده رو روی OpenRouter
+    # گذاشته، مودبانه بگو فقط عکس/متن پشتیبانی می‌شه.
+    if kind != 'image' and cfg['provider'] != 'gemini':
+        await update.message.reply_text(
+            "⚠️ فعلاً فقط عکس یا متن رو می‌تونم پردازش کنم "
+            "(فایلِ PDF/صوتی فقط با ارائه‌دهنده‌ی Gemini کار می‌کنه)."
+        )
+        return
+
+    if getattr(tg_file, 'file_size', None) and tg_file.file_size > MAX_MEDIA_BYTES:
+        await update.message.reply_text(
+            f"⚠️ حجمِ فایل بیشتر از {MAX_MEDIA_BYTES // (1024*1024)} مگابایته — "
+            "یه نسخه‌ی کوچیک‌تر بفرست."
+        )
+        return
 
     caption = (update.message.caption or '').strip() or None
     if caption and len(caption) > MAX_INPUT_CHARS:
         await update.message.reply_text(
-            f"✍️ توضیحِ زیر عکس یه‌کم طولانیه (بیشتر از {MAX_INPUT_CHARS} کاراکتر). "
+            f"✍️ توضیحِ فایل یه‌کم طولانیه (بیشتر از {MAX_INPUT_CHARS} کاراکتر). "
             "لطفاً خلاصه‌ترش کن."
         )
         return
@@ -849,15 +957,26 @@ async def handle_ai_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    image_bytes = bytes(await tg_file.download_as_bytearray())
-    question_label = caption or "[یک سوال به‌صورت عکس فرستاد]"
+    try:
+        media_bytes = bytes(await tg_file.download_as_bytearray())
+    except Exception:
+        logger.exception("دانلود فایل هوشیار ناموفق بود")
+        await update.message.reply_text("⚠️ دانلودِ فایل ناموفق بود — دوباره امتحان کن.")
+        return
+
+    labels = {
+        'image': "[یک سوال به‌صورت عکس فرستاد]",
+        'pdf':   "[یک فایل PDF فرستاد]",
+        'audio': "[یک پیام صوتی فرستاد]",
+    }
+    question_label = caption or labels.get(kind, "[یک فایل فرستاد]")
 
     _busy_users.add(uid)
     try:
         history = _get_history(uid)
         await _answer_with_live_edit(
             update, context,
-            ask_ai(text=caption, image_bytes=image_bytes, image_mime=mime, history=history),
+            ask_ai(text=caption, image_bytes=media_bytes, image_mime=mime, history=history),
             _footer(limit, used), uid, question_label,
         )
     finally:
@@ -887,6 +1006,13 @@ async def ai_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not info:
             await query.answer("⚠️ این پیام قدیمیه و دیگه قابل گزارش نیست.", show_alert=True)
             return
+        # ⚠️ فیکس: قبلاً گزارش‌ها فقط توی RAM بودن و با ری‌استارتِ ربات از
+        # بین می‌رفتن. حالا در کنار پیامِ فوری به ادمین، توی دیتابیس هم
+        # ثبت می‌شه تا از پنل ادمین («📋 گزارش‌های اخیر») همیشه قابل مرور باشه.
+        try:
+            await db.ai_log_report(info['uid'], info['name'], info['question'], info['answer'])
+        except Exception:
+            logger.exception("ثبت گزارش هوشیار در دیتابیس ناموفق بود")
         if ADMIN_ID:
             try:
                 await context.bot.send_message(
