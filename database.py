@@ -2988,5 +2988,36 @@ class DB:
     async def ai_clear_memory(self, uid: int) -> None:
         await self.users.update_one({'user_id': uid}, {'$unset': {'ai_mem': '', 'ai_mem_at': ''}})
 
+    # ══════════════════════════════════════════════════
+    #  سندِ مرجعِ فعال — ⚠️ قابلیتِ جدید: وقتی دانشجو یه PDF می‌فرسته،
+    #  خودِ فایل روی سرورهای گوگل (Files API، رایگان، ۴۸ ساعت نگه‌داری)
+    #  آپلود می‌شه؛ اینجا فقط یه اشاره‌گرِ کوچیک (URI + زمان) ذخیره
+    #  می‌کنیم، نه خودِ فایل — دیتابیسِ ما دست‌نخورده و فشرده می‌مونه.
+    # ══════════════════════════════════════════════════
+
+    async def ai_set_doc(self, uid: int, uri: str, mime: str, name: str) -> None:
+        await self.users.update_one(
+            {'user_id': uid},
+            {'$set': {
+                'ai_doc_uri': uri, 'ai_doc_mime': mime, 'ai_doc_name': name[:100],
+                'ai_doc_at': datetime.now(),
+            }},
+        )
+
+    async def ai_get_doc(self, uid: int) -> dict:
+        user = await self.get_user(uid) or {}
+        if not user.get('ai_doc_uri'):
+            return None
+        return {
+            'uri': user['ai_doc_uri'], 'mime': user.get('ai_doc_mime'),
+            'name': user.get('ai_doc_name'), 'at': user.get('ai_doc_at'),
+        }
+
+    async def ai_clear_doc(self, uid: int) -> None:
+        await self.users.update_one(
+            {'user_id': uid},
+            {'$unset': {'ai_doc_uri': '', 'ai_doc_mime': '', 'ai_doc_name': '', 'ai_doc_at': ''}},
+        )
+
 
 db = DB()
