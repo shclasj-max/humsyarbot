@@ -2963,5 +2963,30 @@ class DB:
         cursor = self.ai_reports.find({}).sort('created_at', -1).limit(limit)
         return await cursor.to_list(length=limit)
 
+    # ══════════════════════════════════════════════════
+    #  حافظه‌ی مکالمه‌ی هوشیار — ⚠️ فیکس: قبلاً فقط توی RAM بود و با هر
+    #  ری‌استارتِ سرور (که این چند روز به‌خاطرِ آپدیت‌های پیاپی زیاد
+    #  اتفاق افتاد) کاملاً از بین می‌رفت. حالا روی خودِ سندِ کاربر توی
+    #  دیتابیس ذخیره می‌شه — پایدار، ولی فشرده: با $slice همیشه فقط
+    #  چند آیتمِ آخر نگه داشته می‌شه (نه یه آرشیوِ بی‌نهایت‌رشد).
+    # ══════════════════════════════════════════════════
+
+    async def ai_remember(self, uid: int, role: str, text: str, max_items: int) -> None:
+        await self.users.update_one(
+            {'user_id': uid},
+            {
+                '$push': {'ai_mem': {'$each': [{'r': role, 't': (text or '')[:1200]}], '$slice': -max_items}},
+                '$set': {'ai_mem_at': datetime.now()},
+            },
+        )
+
+    async def ai_get_memory(self, uid: int) -> tuple:
+        """برمی‌گرداند (items, last_updated_datetime_or_None)."""
+        user = await self.get_user(uid) or {}
+        return user.get('ai_mem', []) or [], user.get('ai_mem_at')
+
+    async def ai_clear_memory(self, uid: int) -> None:
+        await self.users.update_one({'user_id': uid}, {'$unset': {'ai_mem': '', 'ai_mem_at': ''}})
+
 
 db = DB()
