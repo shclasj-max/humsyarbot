@@ -70,7 +70,7 @@ from ticket import ticket_callback, ticket_message_handler
 from reports import report_callback, handle_report_note_text   # FIX جدید
 from ai_admin import ai_admin_callback, ai_admin_text_handler   # 🤖 هوشیار
 from ai_solver import (                                          # 🤖 هوشیار
-    handle_ai_text, handle_ai_photo, ai_user_callback, ai_memory_sweep_job,
+    handle_ai_text, handle_ai_media, ai_user_callback, ai_memory_sweep_job,
 )
 from database import db
 
@@ -515,12 +515,18 @@ async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get('sub_mode') == 'awaiting_screenshot' and update.message.photo:
         return await sub_screenshot_handler(update, context)
 
-    # 🤖 هوشیار — عکس سوال درسی (یا فایل تصویری) در حالت «پرسش از AI»
+    # 🤖 هوشیار — عکس/PDF/صدا در حالت «پرسش از AI»
+    # ⚠️ قابلیتِ جدید: قبلاً فقط عکس پشتیبانی می‌شد؛ حالا PDF (جزوه/برگه‌ی
+    # اسکن‌شده) و پیامِ صوتی/فایلِ صوتی (سوالِ گفتاری) هم قبول می‌شه —
+    # جزئیاتِ تشخیصِ نوع و اعتبارسنجی داخلِ خودِ handle_ai_media است.
     if context.user_data.get('mode') == 'ai_query' and (
-        update.message.photo or
-        (update.message.document and (update.message.document.mime_type or '').startswith('image/'))
+        update.message.photo or update.message.voice or update.message.audio or
+        (update.message.document and (
+            (update.message.document.mime_type or '').startswith('image/') or
+            update.message.document.mime_type == 'application/pdf'
+        ))
     ):
-        return await handle_ai_photo(update, context)
+        return await handle_ai_media(update, context)
 
     # ۱. بکاپ restore
     if uid == ADMIN_ID and context.user_data.get('backup_mode') == 'waiting_restore':
@@ -756,7 +762,8 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     # حالتِ نیمه‌کاره ذخیره می‌شد (مثلاً «📚 منابع» به‌عنوان دستور
     # سیستمیِ جدید ست می‌شد).
     'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
-    'ai_reset_quota_search',
+    'ai_reset_quota_search', 'ai_save_persona_name', 'ai_set_disabled_msg',
+    'ai_ban_search',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
@@ -839,10 +846,11 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     ):
         return await handle_admin_text(update, context)
 
-    # ۴d. 🤖 هوشیار — تنظیمات پنل ادمین (API Key/مدل/محدودیت/prompt/ریست سهمیه)
+    # ۴d. 🤖 هوشیار — تنظیمات پنل ادمین (API Key/مدل/محدودیت/prompt/ریست سهمیه/پرسونا/بن/پیام‌خاموش)
     if uid == ADMIN_ID and context.user_data.get('mode') in (
         'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
-        'ai_reset_quota_search',
+        'ai_reset_quota_search', 'ai_save_persona_name', 'ai_set_disabled_msg',
+        'ai_ban_search',
     ):
         return await ai_admin_text_handler(update, context)
 
