@@ -13,6 +13,7 @@ import os
 import re
 import json
 import time
+import shutil
 import base64
 import random
 import asyncio
@@ -42,13 +43,15 @@ DEFAULT_LIMIT  = 15   # سقف روزانه‌ی هر کاربر عادی؛ 0 = 
 MAX_INPUT_CHARS = 2000  # سقف طول متن ورودی کاربر (جلوگیری از هدررفت توکن/هزینه)
 
 # ══════════════════════════════════════════════════
-#  حافظه‌ی موقتِ مکالمه — فقط توی RAM، هیچ‌وقت وارد MongoDB نمی‌شه.
-#  با ~۷۰۰ کاربر (حتی چند برابر بیشتر) حجمش ناچیزه؛ برای جلوگیری از
-#  رشدِ بی‌نهایت هم TTL داره (بی‌فعالیت زیاد → پاک می‌شه) هم یک
-#  job دوره‌ای که هر چند دقیقه یه‌بار موردهای منقضی رو جارو می‌کنه.
+#  حافظه‌ی مکالمه — ⚠️ فیکس: قبلاً فقط توی RAM بود و با هر ری‌استارتِ
+#  سرور (که این چند روز به‌خاطرِ آپدیت‌های پیاپی زیاد اتفاق افتاد)
+#  کاملاً پاک می‌شد — انگار هوشیار «حافظه‌ی ماهی» داشت. حالا روی سندِ
+#  خودِ کاربر توی دیتابیس ذخیره می‌شه: پایدار در برابرِ ری‌استارت، ولی
+#  فشرده — با $slice همیشه فقط چند آیتمِ آخر نگه داشته می‌شه، نه یه
+#  آرشیوِ بی‌نهایت‌رشد.
 # ══════════════════════════════════════════════════
-MEMORY_TTL_SECONDS   = 20 * 60   # ۲۰ دقیقه بی‌فعالیتی → فراموش کن
-MAX_HISTORY_ITEMS    = 6         # ۶ آیتم = ۳ سوال + ۳ جواب اخیر
+MEMORY_TTL_SECONDS   = 6 * 60 * 60   # ۶ ساعت بی‌فعالیتی → شروعِ تازه (نه فراموشیِ زودهنگام)
+MAX_HISTORY_ITEMS    = 8             # ۸ آیتم = ۴ سوال + ۴ جواب اخیر
 REPORT_CACHE_MAX     = 2000      # سقفِ حافظه‌ی کش «گزارش پاسخ» (هرس LRU)
 DEFAULT_PROMPT = (
     "تو «هوشیار» هستی؛ دستیار هوش مصنوعیِ ربات هامزیار (Humsyar) برای "
@@ -116,48 +119,32 @@ class AIConfigError(AIError):
 
 
 # ══════════════════════════════════════════════════
-#  حافظه‌ی موقتِ مکالمه (RAM only, نه دیتابیس)
+#  حافظه‌ی مکالمه (پایدار، روی دیتابیس — نه RAM؛ توضیح در بالا)
 # ══════════════════════════════════════════════════
-_conversation_memory: dict = {}   # {uid: {'items': deque, 'last_active': float}}
 
-
-def _get_history(uid: int) -> list:
-    entry = _conversation_memory.get(uid)
-    if not entry:
+async def _get_history(uid: int) -> list:
+    items, updated_at = await db.ai_get_memory(uid)
+    if not items:
         return []
-    if time.time() - entry['last_active'] > MEMORY_TTL_SECONDS:
-        _conversation_memory.pop(uid, None)
-        return []
-    return list(entry['items'])
+    if updated_at and (datetime.now() - updated_at).total_seconds() > MEMORY_TTL_SECONDS:
+        return []   # قدیمیه؛ نادیده‌اش می‌گیریم (خودش با remember بعدی جایگزین می‌شه)
+    return [{'role': it.get('r'), 'text': it.get('t', '')} for it in items]
 
 
-def _remember(uid: int, role: str, text: str) -> None:
+async def _remember(uid: int, role: str, text: str) -> None:
     if not text:
         return
-    entry = _conversation_memory.setdefault(
-        uid, {'items': deque(maxlen=MAX_HISTORY_ITEMS), 'last_active': time.time()}
-    )
-    entry['items'].append({'role': role, 'text': text[:1500]})
-    entry['last_active'] = time.time()
+    try:
+        await db.ai_remember(uid, role, text, MAX_HISTORY_ITEMS)
+    except Exception:
+        logger.exception("ذخیره‌ی حافظه‌ی مکالمه‌ی هوشیار ناموفق بود")
 
 
-def _clear_memory(uid: int) -> None:
-    _conversation_memory.pop(uid, None)
-
-
-async def ai_memory_sweep_job(context: ContextTypes.DEFAULT_TYPE = None) -> None:
-    """
-    Job دوره‌ای (هر ۱۰ دقیقه، از bot.py صدا زده می‌شه): حافظه‌ی مکالمه‌ی
-    کاربرهایی که مدتی غیرفعال بودن رو جارو می‌کنه — صرفاً یک اقدام
-    احتیاطیِ اضافه، چون _get_history خودش هم موقع خوندن TTL رو چک
-    می‌کنه؛ این job فقط جلوی تجمعِ بی‌مصرفِ ورودی‌های خیلی قدیمی رو
-    توی RAM می‌گیره.
-    """
-    now = time.time()
-    expired = [uid for uid, e in _conversation_memory.items()
-               if now - e['last_active'] > MEMORY_TTL_SECONDS]
-    for uid in expired:
-        _conversation_memory.pop(uid, None)
+async def _clear_memory(uid: int) -> None:
+    try:
+        await db.ai_clear_memory(uid)
+    except Exception:
+        logger.exception("پاک‌کردنِ حافظه‌ی مکالمه‌ی هوشیار ناموفق بود")
 
 
 # ══════════════════════════════════════════════════
@@ -813,8 +800,8 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
         await record_token_usage(uid, tokens)
 
     if answer_text:
-        _remember(uid, 'user', question_label)
-        _remember(uid, 'assistant', answer_text)
+        await _remember(uid, 'user', question_label)
+        await _remember(uid, 'assistant', answer_text)
         _cache_for_report(
             chat_id, thinking_msg.message_id, uid,
             update.effective_user.full_name, question_label, answer_text,
@@ -867,7 +854,7 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _busy_users.add(uid)
     try:
-        history = _get_history(uid)
+        history = await _get_history(uid)
         await _answer_with_live_edit(
             update, context, ask_ai(text=text, history=history),
             _footer(limit, used), uid, text,
@@ -877,6 +864,54 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 MAX_MEDIA_BYTES = 15 * 1024 * 1024  # ⚠️ قابلیتِ جدید (PDF/صدا): سقفِ حجمِ فایلِ ورودی
+
+def _find_ffmpeg() -> str | None:
+    """
+    اول دنبالِ ffmpeg سیستمی می‌گرده (شاید ادمین با apt نصبش کرده باشه).
+    اگه پیدا نشد، سراغِ پکیجِ pip به‌اسمِ imageio-ffmpeg می‌ره — این پکیج
+    یه نسخه‌ی آماده‌ی ffmpeg رو خودش موقعِ نصب دانلود می‌کنه، پس نیازی
+    به sudo/apt روی سرور نیست؛ کافیه توی requirements.txt باشه.
+    """
+    path = shutil.which('ffmpeg')
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+_FFMPEG_PATH = _find_ffmpeg()  # فقط یک بار موقعِ import چک می‌شه
+
+
+async def _transcode_ogg_opus_to_wav(ogg_bytes: bytes) -> bytes | None:
+    """
+    ⚠️ فیکسِ باگِ «ارور ۴۰۰ روی پیامِ صوتی»: پیام‌های صوتیِ تلگرام با
+    فرمتِ OGG (کدکِ Opus) ضبط می‌شن، ولی طبقِ مستنداتِ رسمیِ گوگل،
+    Gemini از «OGG Vorbis» پشتیبانی می‌کنه، نه Opus — همین ناهماهنگی
+    باعثِ ارور ۴۰۰ می‌شد. اینجا با ffmpeg (اگه روی سرور نصب باشه) به
+    WAV (که همه‌جا پشتیبانی می‌شه) تبدیلش می‌کنیم. اگه ffmpeg نصب نبود،
+    None برمی‌گردونه و فراخوان باید به کاربر پیامِ روشن بده.
+    """
+    if not _FFMPEG_PATH:
+        return None
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _FFMPEG_PATH, '-y', '-i', 'pipe:0', '-ar', '16000', '-ac', '1', '-f', 'wav', 'pipe:1',
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        wav_bytes, stderr = await asyncio.wait_for(proc.communicate(input=ogg_bytes), timeout=30)
+        if proc.returncode != 0 or not wav_bytes:
+            logger.warning("ffmpeg transcode شکست خورد: %s", (stderr or b'')[:300])
+            return None
+        return wav_bytes
+    except Exception:
+        logger.exception("تبدیلِ صدا با ffmpeg ناموفق بود")
+        return None
 
 
 async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -951,19 +986,34 @@ async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ صبر کن جواب سوال قبلی‌ت آماده بشه، بعد این یکی رو بفرست 🙂")
         return
 
+    try:
+        media_bytes = bytes(await tg_file.download_as_bytearray())
+    except Exception:
+        logger.exception("دانلود فایل هوشیار ناموفق بود")
+        await update.message.reply_text("⚠️ دانلودِ فایل ناموفق بود — دوباره امتحان کن.")
+        return
+
+    # ⚠️ فیکسِ ارورِ ۴۰۰: پیام‌های صوتیِ تلگرام OGG/Opus هستن، ولی Gemini
+    # فقط OGG Vorbis رو قبول می‌کنه. قبل از فرستادن (و قبل از مصرفِ
+    # سهمیه‌ی روزانه) تبدیلش می‌کنیم — اگه تبدیل شکست بخوره، کاربر
+    # سهمیه‌شو الکی از دست نده.
+    if kind == 'audio' and 'ogg' in mime.lower():
+        wav_bytes = await _transcode_ogg_opus_to_wav(media_bytes)
+        if wav_bytes:
+            media_bytes, mime = wav_bytes, 'audio/wav'
+        else:
+            await update.message.reply_text(
+                "⚠️ فعلاً امکانِ پردازشِ این پیامِ صوتی نیست (مشکلِ سازگاریِ فرمت). "
+                "لطفاً سوالتو تایپ کن یا عکس/PDF بفرست — یا به ادمین اطلاع بده."
+            )
+            return
+
     allowed, used, limit = await check_and_consume_quota(uid)
     if not allowed:
         await update.message.reply_text(
             f"⛔️ سقف روزانه‌ی سوال از هوشیار تموم شده ({used}/{limit}).\n"
             "فردا دوباره امتحان کن."
         )
-        return
-
-    try:
-        media_bytes = bytes(await tg_file.download_as_bytearray())
-    except Exception:
-        logger.exception("دانلود فایل هوشیار ناموفق بود")
-        await update.message.reply_text("⚠️ دانلودِ فایل ناموفق بود — دوباره امتحان کن.")
         return
 
     labels = {
@@ -975,7 +1025,7 @@ async def handle_ai_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _busy_users.add(uid)
     try:
-        history = _get_history(uid)
+        history = await _get_history(uid)
         await _answer_with_live_edit(
             update, context,
             ask_ai(text=caption, image_bytes=media_bytes, image_mime=mime, history=history),
@@ -998,7 +1048,7 @@ async def ai_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1] if len(parts) > 1 else ''
 
     if action == 'newchat':
-        _clear_memory(uid)
+        await _clear_memory(uid)
         await query.answer("✅ حافظه‌ی مکالمه پاک شد؛ از اول شروع کن 🙂", show_alert=True)
         return
 
