@@ -403,8 +403,17 @@ async def _stream_gemini(api_key: str, model: str, system_prompt: str,
             generation_config['thinkingConfig'] = {'thinkingBudget': -1}
 
     tools = [{'code_execution': {}}, {'url_context': {}}]
+    tool_config = None
     if uid is not None:
         tools.append({'function_declarations': AI_FUNCTIONS})
+        # ⚠️ فیکسِ ارورِ ۴۰۰: وقتی function_declarations (تابع‌های سفارشیِ
+        # برنامه/نمره) با ابزارهای توکارِ گوگل (code_execution/url_context)
+        # با هم توی یه درخواست باشن، Gemini این فلگ رو صریحاً می‌خواد،
+        # وگرنه با «Please enable tool_config.include_server_side_tool_
+        # invocations…» ارور ۴۰۰ می‌ده. تستِ اتصالِ ادمین چون uid نداره
+        # (پس تابعی هم اضافه نمی‌شه) هیچ‌وقت این مشکل رو نشون نمی‌داد —
+        # برای همین «تست» موفق بود ولی چتِ واقعی خطا می‌داد.
+        tool_config = {'function_calling_config': {'mode': 'AUTO'}, 'include_server_side_tool_invocations': True}
 
     total_tokens = 0
     full_answer_parts = []
@@ -417,6 +426,8 @@ async def _stream_gemini(api_key: str, model: str, system_prompt: str,
             'generationConfig': generation_config,
             'tools': tools,
         }
+        if tool_config:
+            payload['tool_config'] = tool_config
 
         function_call = None
         round_model_parts = []
