@@ -885,7 +885,7 @@ def _md_to_telegram_html(text: str) -> str:
     return out
 
 
-EDIT_THROTTLE_SECONDS = 1.3   # حداقل فاصله بین دو ادیتِ پیام حین استریم (جلوگیری از Flood-limit تلگرام)
+EDIT_THROTTLE_SECONDS = 0.7   # حداقل فاصله بین دو ادیتِ پیام حین استریم (جلوگیری از Flood-limit تلگرام)
 
 
 async def _typing_pinger(context: ContextTypes.DEFAULT_TYPE, chat_id: int, stop_event: asyncio.Event):
@@ -922,6 +922,7 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
     tokens = 0
     answer_text = None
     last_edit_at = 0.0
+    last_edit_len = 0
     final_text = ''
 
     try:
@@ -929,17 +930,31 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
             if event['type'] == 'delta':
                 buffer.append(event['text'])
                 now = time.time()
-                if now - last_edit_at >= EDIT_THROTTLE_SECONDS:
-                    raw_partial = ''.join(buffer)
-                    if len(raw_partial) > 3480:
-                        raw_partial = raw_partial[:3480] + "…"
+                raw_partial = ''.join(buffer)
+                # ⚠️ فیکس باگِ «فقط یه خط | میاد بعد یهو کل پیام»: قبلاً
+                # اولین دلتا (حتی اگه فقط ۱-۲ کاراکتر بود) بلافاصله ادیت
+                # می‌شد (چون last_edit_at از 0.0 شروع می‌شد)، و چون throttle
+                # طولانی بود (1.3 ثانیه) و خیلی از جواب‌ها زودتر از اون
+                # تموم می‌شدن، هیچ ادیتِ میانی‌ای اتفاق نمی‌افتاد — نتیجه:
+                # یه پیامِ تقریباً خالی، بعد یهو جوابِ کامل جای‌گزینش می‌شد.
+                # حالا: هم فاصله‌ی زمانی کوتاه‌تره، هم یه شرطِ «حجمِ متنِ
+                # جدید» اضافه شده تا حتی برای جواب‌های کوتاه هم چند بار
+                # واقعی آپدیت بشه، و هم اولین ادیت با حداقل چند کاراکتر
+                # محتوا انجام می‌شه (نه یه پیامِ تقریباً خالی).
+                should_edit = len(raw_partial) >= 8 and (
+                    now - last_edit_at >= EDIT_THROTTLE_SECONDS or
+                    len(raw_partial) - last_edit_len >= 50
+                )
+                if should_edit:
+                    display = raw_partial[:3480] + "…" if len(raw_partial) > 3480 else raw_partial
                     try:
                         await thinking_msg.edit_text(
-                            f"🤖 {_md_to_telegram_html(raw_partial)} ▌", parse_mode='HTML',
+                            f"🤖 {_md_to_telegram_html(display)} ▌", parse_mode='HTML',
                         )
                     except Exception:
                         pass   # مثلاً «message not modified» یا محدودیتِ نرخ — بی‌خیالش شو، دورِ بعد دوباره امتحان می‌شه
                     last_edit_at = now
+                    last_edit_len = len(raw_partial)
             elif event['type'] == 'done':
                 answer_text = event['answer']
                 tokens = event['tokens']
@@ -981,6 +996,8 @@ async def _answer_with_live_edit(update: Update, context: ContextTypes.DEFAULT_T
         pinger.cancel()
         try:
             await pinger
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
 
