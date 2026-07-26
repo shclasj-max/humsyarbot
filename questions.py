@@ -244,6 +244,40 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ]]))
         return CREATING_Q
 
+    # ── طراحی سوال با هوشیار (AI) ──
+    elif action == 'ai_create':
+        await _ai_create_start(query, context)
+
+    elif action == 'ai_lesson':
+        idx     = int(parts[2])
+        lessons = context.user_data.get('_ai_lessons', [])
+        if idx < len(lessons):
+            await _ai_topic_select(query, context, lessons[idx])
+
+    elif action == 'ai_topic':
+        topics = context.user_data.get('_ai_topics', [])
+        idx    = int(parts[2])
+        topic  = topics[idx] if idx < len(topics) else context.user_data.get('ai_q_lesson', '')
+        context.user_data['ai_q_topic'] = topic
+        await _ai_difficulty_select(query, context)
+
+    elif action == 'ai_diff':
+        level = parts[2] if len(parts) > 2 else 'medium'
+        diff_map = {'easy': 'آسان 🟢', 'medium': 'متوسط 🟡', 'hard': 'سخت 🔴'}
+        context.user_data['ai_q_difficulty'] = diff_map.get(level, 'متوسط 🟡')
+        await _ai_ask_note(query, context)
+
+    elif action == 'ai_regen':
+        await _ai_generate_and_preview(query, context)
+
+    elif action == 'ai_save':
+        await _ai_save_question(query, context)
+
+    elif action == 'ai_cancel':
+        for k in ('ai_q_lesson', 'ai_q_topic', 'ai_q_difficulty', 'ai_q_note', 'ai_q_generated', '_ai_lessons', '_ai_topics'):
+            context.user_data.pop(k, None)
+        await _main_menu(query)
+
     # ── خروجی فایل سوالات ──
     elif action == 'pdf_menu':
         await _pdf_menu(query, context)
@@ -384,6 +418,7 @@ async def _main_menu(query):
         [InlineKeyboardButton("📝 آزمون سفارشی",          callback_data='questions:custom_exam')],
         [InlineKeyboardButton("📄 خروجی فایل سوالات",    callback_data='questions:pdf_menu')],
         [InlineKeyboardButton("✏️ طراحی سوال",            callback_data='questions:create')],
+        [InlineKeyboardButton("🧠 طراحی سوال با هوشیار",  callback_data='questions:ai_create')],
         [InlineKeyboardButton("📊 آمار و پیشرفت من",      callback_data='questions:stats')],
         _back("🔙 داشبورد", "dashboard:refresh"),
     ]
@@ -395,6 +430,7 @@ async def _main_menu(query):
         "📝 <b>آزمون سفارشی:</b> تعداد و زمان دلخواه\n"
         "📄 <b>خروجی فایل:</b> سوالات را دانلود کنید\n"
         "✏️ <b>طراحی سوال:</b> سوال خودتان بسازید\n"
+        "🧠 <b>طراحی با هوشیار:</b> AI براتون سوال بسازه\n"
         "📊 <b>آمار:</b> پیشرفت و نقاط ضعف",
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -598,9 +634,12 @@ async def _next_q(query, context, uid):
     total_str = f"/{total}" if total < 999 else ""
 
     # اطلاعات طراح
-    creator_id  = q.get('creator_id')
-    by_bot      = q.get('by_bot', False)
-    if by_bot:
+    creator_id   = q.get('creator_id')
+    by_bot       = q.get('by_bot', False)
+    creator_type = q.get('creator_type', '')
+    if creator_type == 'ai':
+        creator_line = "\n<i>🤖 طراحی شده توسط هوشیار (AI)</i>"
+    elif by_bot:
         creator_line = "\n<i>🤖 طراحی شده توسط بات</i>"
     elif creator_id:
         user = await db.get_user(creator_id)
@@ -1322,6 +1361,189 @@ async def _save_question(update, context):
 
 
 # ══════════════════════════════════════════════════════════
+#  🧠 طراحی سوال با هوشیار (AI) — ⚠️ قابلیتِ جدید
+#  ویزاردِ مشابهِ طراحیِ دستی، ولی به‌جایِ تایپِ سوال/گزینه‌ها، فقط
+#  درس/مبحث/سختی رو انتخاب می‌کنی و یه نکته‌ی اختیاری می‌نویسی — هوشیار
+#  خودش سوال+گزینه‌ها+پاسخِ درست+تحلیل رو می‌سازه، بعد یه پیش‌نمایش
+#  می‌بینی و یا ذخیره می‌کنی، یا دوباره می‌سازتش، یا لغو می‌کنی.
+# ══════════════════════════════════════════════════════════
+
+async def _ai_create_start(query, context):
+    lessons = await db.get_lessons()
+    if not lessons:
+        await query.edit_message_text(
+            "❌ هنوز درسی تعریف نشده.",
+            reply_markup=InlineKeyboardMarkup([_back("🔙 بازگشت", "questions:main")]))
+        return
+    context.user_data['_ai_lessons'] = lessons
+    keyboard = []
+    for i in range(0, len(lessons), 2):
+        row = [InlineKeyboardButton(f"📚 {lessons[i]}", callback_data=f'questions:ai_lesson:{i}')]
+        if i + 1 < len(lessons):
+            row.append(InlineKeyboardButton(f"📚 {lessons[i+1]}", callback_data=f'questions:ai_lesson:{i+1}'))
+        keyboard.append(row)
+    keyboard.append(_back("🔙 بازگشت", "questions:main"))
+    await query.edit_message_text(
+        "🧠 <b>طراحی سوال با هوشیار</b>\n\n"
+        "هوشیار برات یه سوالِ چهارگزینه‌ی کامل (با گزینه‌ها، پاسخِ درست و تحلیل) می‌سازه.\n\n"
+        "اول درس رو انتخاب کن:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _ai_topic_select(query, context, lesson):
+    context.user_data['ai_q_lesson'] = lesson
+    topics = await db.get_topics(lesson)
+    if not topics:
+        context.user_data['ai_q_topic'] = lesson
+        await _ai_difficulty_select(query, context)
+        return
+    context.user_data['_ai_topics'] = topics
+    keyboard = [[InlineKeyboardButton(f"📌 {t}", callback_data=f'questions:ai_topic:{i}')]
+                for i, t in enumerate(topics)]
+    keyboard.append(_back("🔙 بازگشت", "questions:ai_create"))
+    await query.edit_message_text(
+        f"🧠 <b>{lesson}</b>\n\nمبحث را انتخاب کنید:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _ai_difficulty_select(query, context):
+    keyboard = [
+        [InlineKeyboardButton("🟢 آسان",  callback_data='questions:ai_diff:easy')],
+        [InlineKeyboardButton("🟡 متوسط", callback_data='questions:ai_diff:medium')],
+        [InlineKeyboardButton("🔴 سخت",   callback_data='questions:ai_diff:hard')],
+    ]
+    await query.edit_message_text(
+        f"🧠 <b>{context.user_data.get('ai_q_lesson','')} — {context.user_data.get('ai_q_topic','')}</b>\n\n"
+        "سطح سختی رو انتخاب کن:",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _ai_ask_note(query, context):
+    context.user_data['mode'] = 'ai_question_note'
+    await query.edit_message_text(
+        f"🧠 <b>{context.user_data.get('ai_q_lesson','')} — {context.user_data.get('ai_q_topic','')}</b>\n\n"
+        "اگه نکته‌ی خاصی مدنظرته بنویس (مثلاً «روی یون پتاسیم تمرکز کن»)، "
+        "وگرنه فقط <code>-</code> بفرست تا هوشیار خودش انتخاب کنه:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='questions:ai_cancel')]]))
+
+
+async def handle_ai_question_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or '').strip()
+    context.user_data.pop('mode', None)
+    context.user_data['ai_q_note'] = '' if text == '-' else text
+
+    wait_msg = await update.message.reply_text("⏳ هوشیار داره سوال طراحی می‌کنه...")
+    await _ai_generate_and_preview(wait_msg, context, is_message=True)
+
+
+async def _ai_generate_and_preview(target, context, is_message: bool = False):
+    """target: یا query (از دکمه‌ها) یا یه Message (بعدِ نوشتنِ نکته)."""
+    from ai_solver import generate_question_ai, AIError
+
+    lesson = context.user_data.get('ai_q_lesson', '')
+    topic  = context.user_data.get('ai_q_topic', '')
+    diff   = context.user_data.get('ai_q_difficulty', '')
+    note   = context.user_data.get('ai_q_note', '')
+
+    async def _edit(text, reply_markup):
+        if is_message:
+            await target.edit_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        else:
+            await target.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+
+    try:
+        result = await generate_question_ai(lesson=lesson, topic=topic, difficulty=diff, note=note)
+    except AIError as e:
+        await _edit(
+            f"⚠️ طراحیِ سوال ناموفق بود:\n{e}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 دوباره امتحان کن", callback_data='questions:ai_regen')],
+                [InlineKeyboardButton("❌ لغو", callback_data='questions:ai_cancel')],
+            ]))
+        return
+    except Exception:
+        logger.exception("طراحی سوال با AI ناموفق بود")
+        await _edit(
+            "⚠️ یه خطای غیرمنتظره پیش اومد — دوباره امتحان کن.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='questions:ai_cancel')]]))
+        return
+
+    context.user_data['ai_q_generated'] = result
+    opts = result['options']
+    ci   = result['correct_index']
+    opts_text = "\n".join(
+        f"  {'✅' if i == ci else '▪️'} {LETTERS[i]} {o}"
+        for i, o in enumerate(opts)
+    )
+    preview = (
+        f"🧠 <b>پیش‌نمایشِ سوالِ طراحی‌شده</b>\n"
+        f"📚 {lesson} — {topic} | {diff}\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"❓ <b>{result['question']}</b>\n\n"
+        f"{opts_text}\n\n"
+        f"📝 <b>تحلیل:</b> {result['explanation']}"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ ذخیره کن", callback_data='questions:ai_save')],
+        [InlineKeyboardButton("🔄 دوباره بساز", callback_data='questions:ai_regen')],
+        [InlineKeyboardButton("❌ لغو", callback_data='questions:ai_cancel')],
+    ])
+    await _edit(preview, keyboard)
+
+
+async def _ai_save_question(query, context):
+    uid      = query.from_user.id
+    result   = context.user_data.get('ai_q_generated')
+    if not result:
+        await query.answer("⚠️ چیزی برای ذخیره نیست، از اول شروع کن.", show_alert=True)
+        return
+
+    is_ca    = await db.is_content_admin(uid)
+    is_admin = (uid == ADMIN_ID)
+    auto     = is_ca or is_admin
+
+    creator_user = await db.get_user(uid)
+    creator_name = creator_user.get('name', '') if creator_user else ''
+
+    await db.questions.insert_one({
+        'lesson':         context.user_data.get('ai_q_lesson', ''),
+        'topic':          context.user_data.get('ai_q_topic', ''),
+        'difficulty':     context.user_data.get('ai_q_difficulty', 'متوسط 🟡'),
+        'question':       result['question'],
+        'options':        result['options'],
+        'correct_answer': result['correct_index'],
+        'explanation':    result['explanation'],
+        'creator_id':     uid,
+        'creator_name':   creator_name,
+        'creator_type':   'ai',          # ⚠️ تگِ جدید — برای گزارشِ «این سوال رو کی ساخته»
+        'by_bot':         False,
+        'approved':       auto,
+        'created_at':     datetime.now().isoformat(),
+        'attempt_count':  0,
+        'correct_count':  0,
+    })
+
+    for k in ('ai_q_lesson', 'ai_q_topic', 'ai_q_difficulty', 'ai_q_note', 'ai_q_generated', '_ai_lessons', '_ai_topics'):
+        context.user_data.pop(k, None)
+
+    if auto:
+        msg = "✅ <b>سوالِ طراحی‌شده با هوشیار در بانکِ سوال ثبت شد!</b>\n\n<i>🧠 برچسب: طراحی‌شده توسط هوشیار</i>"
+    else:
+        msg = (
+            "✅ <b>سوال ارسال شد و در انتظارِ تاییدِ ادمین است.</b>\n"
+            "<i>🧠 برچسب: طراحی‌شده توسط هوشیار</i>"
+        )
+
+    await query.edit_message_text(
+        msg, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧠 طراحیِ یکیِ دیگه", callback_data='questions:ai_create')],
+            _back("🔙 بازگشت به بانک سوال", "questions:main"),
+        ]))
+
+
+# ══════════════════════════════════════════════════════════
 #  مدیریت سوالات توسط ادمین محتوا
 # ══════════════════════════════════════════════════════════
 
@@ -1346,6 +1568,9 @@ async def _ca_question_list(query, uid: int, context):
         q_filter['by_bot'] = True
     elif f_source == 'student':
         q_filter['by_bot'] = {'$ne': True}
+        q_filter['creator_type'] = {'$ne': 'ai'}
+    elif f_source == 'ai':
+        q_filter['creator_type'] = 'ai'
 
     questions = await db.questions.find(q_filter).sort('created_at', -1).to_list(200)
 
@@ -1366,6 +1591,7 @@ async def _ca_question_list(query, uid: int, context):
         'all':     f"{'✅' if f_source=='all' else '⬜'} همه منابع",
         'bot':     f"{'✅' if f_source=='bot' else '⬜'} توسط بات",
         'student': f"{'✅' if f_source=='student' else '⬜'} توسط دانشجو",
+        'ai':      f"{'✅' if f_source=='ai' else '⬜'} توسط هوشیار",
     }
 
     keyboard = [
@@ -1379,17 +1605,20 @@ async def _ca_question_list(query, uid: int, context):
             InlineKeyboardButton(source_labels['bot'],     callback_data='questions:ca_q_filter:source:bot'),
             InlineKeyboardButton(source_labels['student'], callback_data='questions:ca_q_filter:source:student'),
         ],
+        [
+            InlineKeyboardButton(source_labels['ai'], callback_data='questions:ca_q_filter:source:ai'),
+        ],
     ]
 
     # لیست سوالات (حداکثر ۱۵ تا)
     for q in questions[:15]:
         qid     = str(q['_id'])
         status  = "✅" if q.get('approved') else "⏳"
-        source  = "🤖" if q.get('by_bot') else "✏️"
+        source  = "🧠" if q.get('creator_type') == 'ai' else ("🤖" if q.get('by_bot') else "✏️")
         creator = q.get('creator_name', '') or ''
         lesson  = q.get('lesson', '')
         text_q  = q.get('question', '')[:30]
-        creator_tag = f" | {creator}" if (creator and not q.get('by_bot')) else ''
+        creator_tag = f" | {creator}" if (creator and not q.get('by_bot') and q.get('creator_type') != 'ai') else ''
         keyboard.append([InlineKeyboardButton(
             f"{status}{source} {text_q} | {lesson}{creator_tag}",
             callback_data=f'questions:ca_q_view:{qid}'
@@ -1440,7 +1669,9 @@ async def _ca_question_view(query, uid: int, qid: str):
     status = "✅ تأیید شده" if q.get('approved') else "⏳ در انتظار تأیید"
 
     # تگ طراح
-    if q.get('by_bot'):
+    if q.get('creator_type') == 'ai':
+        creator_line = "🧠 <b>طراح:</b> هوشیار (هوش مصنوعی)"
+    elif q.get('by_bot'):
         creator_line = "🤖 <b>طراح:</b> ادمین محتوا (بات)"
     elif q.get('creator_name'):
         creator_line = f"✏️ <b>طراح:</b> {q['creator_name']}"
