@@ -257,6 +257,52 @@ AI_FUNCTIONS = [
     },
 ]
 
+# ══════════════════════════════════════════════════
+#  ⚠️ قابلیتِ جدید: ابزارهای «فقط ادمین ارشد» — دسترسیِ خوندنیِ گسترده
+#  به دیتای ربات (کاربران، تیکت‌ها، آمار، بانکِ سوال). این‌ها هیچ‌وقت
+#  به دانشجوها اضافه نمی‌شن (چک هم توی ساختِ لیستِ ابزارها و هم داخلِ
+#  خودِ اجرا انجام می‌شه — دفاعِ دوجداره). فقط خوندن — هیچ‌کدوم چیزی رو
+#  توی دیتابیس تغییر نمی‌دن.
+# ══════════════════════════════════════════════════
+ADMIN_AI_FUNCTIONS = [
+    {
+        'name': 'admin_search_user',
+        'description': (
+            'فقط برای ادمین ارشد: یک کاربرِ خاص رو با آیدیِ عددی، یوزرنیم یا اسم پیدا '
+            'می‌کنه و پروفایل/وضعیتش (گروه، ورودی، تاییدشده یا نه، آخرین فعالیت) رو برمی‌گردونه.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {'query': {'type': 'string', 'description': 'آیدیِ عددی، یوزرنیم یا اسمِ کاربر'}},
+            'required': ['query'],
+        },
+    },
+    {
+        'name': 'admin_get_bot_stats',
+        'description': 'فقط برای ادمین ارشد: آمارِ کلیِ ربات (تعدادِ کاربران، فعالیتِ روزانه/هفتگی، تیکت‌های باز/بسته) رو می‌ده.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'admin_list_tickets',
+        'description': 'فقط برای ادمین ارشد: لیستِ تیکت‌های پشتیبانی رو می‌ده (پیش‌فرض: فقط بازها).',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'status_filter': {'type': 'string', 'description': '"open" یا "closed"؛ اگه خالی بمونه هر دو.'},
+            },
+        },
+    },
+    {
+        'name': 'admin_search_questions',
+        'description': 'فقط برای ادمین ارشد: جستجوی متنیِ آزاد توی بانکِ سوال (روی متنِ سوال/توضیح).',
+        'parameters': {
+            'type': 'object',
+            'properties': {'query': {'type': 'string', 'description': 'عبارتِ جستجو'}},
+            'required': ['query'],
+        },
+    },
+]
+
 
 async def _execute_ai_function(name: str, args: dict, uid: int) -> str:
     args = args or {}
@@ -286,6 +332,66 @@ async def _execute_ai_function(name: str, args: dict, uid: int) -> str:
                 for r in rows[:20]
             ]
             return "\n".join(lines)
+
+        # ⚠️ همه‌ی توابعِ زیر «فقط ادمین ارشد» هستن — حتی اگه به هر دلیلی
+        # (باگ/تغییرِ آینده) این تابع‌ها برای یه کاربرِ دیگه هم صدا زده
+        # بشن، اینجا دوباره چک می‌شه و اجرا نمی‌شن.
+        if name in ('admin_search_user', 'admin_get_bot_stats', 'admin_list_tickets', 'admin_search_questions'):
+            if uid != ADMIN_ID:
+                return 'این تابع فقط برای ادمین ارشد در دسترسه.'
+
+            if name == 'admin_search_user':
+                results = await db.search_users(args.get('query', ''))
+                if not results:
+                    return 'کاربری با این مشخصات پیدا نشد.'
+                lines = []
+                for u in results[:5]:
+                    lines.append(
+                        f"- {u.get('name','—')} (آیدی: {u.get('user_id')}) | "
+                        f"یوزرنیم: @{u.get('username') or '—'} | گروه: {u.get('group','—')} | "
+                        f"ورودی: {u.get('intake','—')} | تایید‌شده: {'بله' if u.get('approved') else 'خیر'} | "
+                        f"ثبت‌نام: {u.get('registered_at','—')} | آخرین فعالیت: {u.get('last_active','—')} | "
+                        f"مسدودِ هوشیار: {'بله' if u.get('ai_banned') else 'خیر'}"
+                    )
+                return "\n".join(lines)
+
+            if name == 'admin_get_bot_stats':
+                u_stats = await db.stats_dashboard_users()
+                t_stats = await db.stats_dashboard_tickets()
+                return (
+                    f"👥 کاربرانِ تاییدشده: {u_stats['total_approved']} | در انتظارِ تایید: {u_stats['total_pending']}\n"
+                    f"🆕 ثبت‌نامِ امروز: {u_stats['new_today']} | این هفته: {u_stats['new_week']}\n"
+                    f"🟢 فعالِ امروز: {u_stats['active_today']} | فعالِ این هفته: {u_stats['active_week']}\n"
+                    f"😴 غیرفعالِ بیش از ۱۴ روز: {u_stats['inactive_14d']}\n"
+                    f"🚫 بلاک‌کننده‌ی ربات: {u_stats['blocked_bot']}\n"
+                    f"🎫 تیکتِ باز: {t_stats['open']} | بسته: {t_stats['closed']}\n"
+                    f"⏱ میانگینِ زمانِ رسیدگی به تیکت: "
+                    f"{t_stats['avg_resolution_h'] if t_stats['avg_resolution_h'] is not None else '—'} ساعت"
+                )
+
+            if name == 'admin_list_tickets':
+                status = (args.get('status_filter') or '').strip().lower() or None
+                if status not in ('open', 'closed'):
+                    status = None
+                rows = await db.ticket_get_all(status)
+                if not rows:
+                    return 'تیکتی پیدا نشد.'
+                lines = [
+                    f"- #{t.get('ticket_id')} | {t.get('user_name','—')} | موضوع: {t.get('subject','—')} | "
+                    f"وضعیت: {t.get('status','—')} | {t.get('created_at','—')}"
+                    for t in rows[:15]
+                ]
+                return "\n".join(lines)
+
+            if name == 'admin_search_questions':
+                rows = await db.search_questions_text(args.get('query', ''))
+                if not rows:
+                    return 'سوالی با این عبارت پیدا نشد.'
+                lines = [
+                    f"- [{r.get('lesson','—')} / {r.get('topic','—')}] {(r.get('question') or '')[:120]}"
+                    for r in rows
+                ]
+                return "\n".join(lines)
 
         return 'تابعِ ناشناخته.'
     except Exception:
@@ -405,7 +511,13 @@ async def _stream_gemini(api_key: str, model: str, system_prompt: str,
     tools = [{'code_execution': {}}, {'url_context': {}}]
     tool_config = None
     if uid is not None:
-        tools.append({'function_declarations': AI_FUNCTIONS})
+        # ⚠️ قابلیتِ جدید: ابزارهای «فقط ادمین ارشد» فقط وقتی uid دقیقاً
+        # ADMIN_ID باشه اضافه می‌شن — دانشجوها هیچ‌وقت به این‌ها دسترسی
+        # ندارن (چک دوباره هم داخلِ _execute_ai_function انجام می‌شه).
+        function_declarations = list(AI_FUNCTIONS)
+        if uid == ADMIN_ID:
+            function_declarations += ADMIN_AI_FUNCTIONS
+        tools.append({'function_declarations': function_declarations})
         # ⚠️ فیکسِ ارورِ ۴۰۰: وقتی function_declarations (تابع‌های سفارشیِ
         # برنامه/نمره) با ابزارهای توکارِ گوگل (code_execution/url_context)
         # با هم توی یه درخواست باشن، Gemini این فلگ رو صریحاً می‌خواد،
@@ -669,6 +781,227 @@ async def ask_ai(text: str = None, image_bytes: bytes = None,
         if event['type'] == 'done':
             answer, tokens = event['answer'], event['tokens']
     return answer, tokens
+
+
+# ══════════════════════════════════════════════════
+#  ⚠️ قابلیتِ جدید: طراحیِ خودکارِ سوالِ چهارگزینه‌ای با هوش مصنوعی —
+#  برای بخشِ «بانکِ سوال و طرحِ سوال». برخلافِ چتِ هوشیار، اینجا به
+#  استریم/تاریخچه/تابع نیازی نیست؛ فقط یک درخواستِ ساده با خروجیِ
+#  JSON تضمین‌شده (Structured Output) — قابل‌اعتمادتر از پارس‌کردنِ
+#  متنِ آزاد.
+# ══════════════════════════════════════════════════
+
+QUESTION_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'question':      {'type': 'string', 'description': 'متنِ کاملِ سوال'},
+        'options':       {
+            'type': 'array', 'items': {'type': 'string'},
+            'minItems': 4, 'maxItems': 4,
+            'description': 'دقیقاً ۴ گزینه',
+        },
+        'correct_index': {'type': 'integer', 'description': 'ایندکسِ گزینه‌ی درست، از 0 تا 3'},
+        'explanation':   {'type': 'string', 'description': 'تحلیلِ کاملِ پاسخ (چرا درست/چرا بقیه غلط)'},
+    },
+    'required': ['question', 'options', 'correct_index', 'explanation'],
+}
+
+
+async def generate_question_ai(lesson: str, topic: str, difficulty: str = None, note: str = None) -> dict:
+    """
+    یک سوالِ چهارگزینه‌ی کامل (سوال/گزینه‌ها/پاسخِ درست/تحلیل) برای درس و
+    مبحثِ داده‌شده می‌سازد. خروجی: {'question','options','correct_index','explanation'}.
+    """
+    cfg = await get_ai_config()
+    if not cfg['enabled']:
+        raise AIConfigError("بخش هوش مصنوعی فعلاً توسط مدیریت غیرفعال است.")
+    if not cfg['api_key']:
+        raise AIConfigError("هنوز کلید API توسط ادمین تنظیم نشده.")
+    if cfg['provider'] != 'gemini':
+        raise AIConfigError("طراحیِ سوال با AI فعلاً فقط با ارائه‌دهنده‌ی Gemini در دسترسه.")
+
+    prompt = (
+        "یک سوالِ چهارگزینه‌ای (تستی) دقیق و علمی برای دانشجویانِ پزشکی طراحی کن.\n"
+        f"درس: {lesson}\nمبحث: {topic}\n"
+    )
+    if difficulty:
+        prompt += f"سطح سختی: {difficulty}\n"
+    if note:
+        prompt += f"نکته‌ی خاصِ موردنظر: {note}\n"
+    prompt += (
+        "سوال باید بدونِ ابهام باشه و فقط یکی از ۴ گزینه دقیقاً درست باشه. "
+        "توی «explanation» هم توضیح بده چرا گزینه‌ی درست، درسته و بقیه چرا غلطن."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:generateContent"
+    headers = {'Content-Type': 'application/json', 'x-goog-api-key': cfg['api_key']}
+    payload = {
+        'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'responseMimeType': 'application/json',
+            'responseSchema': QUESTION_SCHEMA,
+            'maxOutputTokens': 1536,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise AIError("سرویس هوش مصنوعی دیر جواب داد — دوباره امتحان کن.")
+    except httpx.HTTPError as e:
+        raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+
+    if resp.status_code != 200:
+        _raise_gemini_status_error(resp.status_code)
+
+    try:
+        data = resp.json()
+        raw_text = data['candidates'][0]['content']['parts'][0]['text']
+        parsed = json.loads(raw_text)
+        options = parsed.get('options') or []
+        if len(options) != 4 or not parsed.get('question') or 'correct_index' not in parsed:
+            raise ValueError('ساختارِ ناقص')
+        correct_index = int(parsed['correct_index'])
+        if not (0 <= correct_index <= 3):
+            correct_index = 0
+        return {
+            'question':      str(parsed['question']).strip(),
+            'options':       [str(o).strip() for o in options],
+            'correct_index': correct_index,
+            'explanation':   str(parsed.get('explanation') or '').strip(),
+        }
+    except (KeyError, IndexError, ValueError, TypeError, json.JSONDecodeError):
+        raise AIConfigError("هوش مصنوعی خروجیِ قابل‌فهمی برنگردوند — دوباره امتحان کن.")
+
+
+# ══════════════════════════════════════════════════
+#  ⚠️ قابلیتِ جدید: دستیارِ نوشتنِ اطلاعیه + پیش‌نویسِ پاسخِ تیکت.
+#
+#  نکته‌ی طراحیِ مهم: این دو تابع کاملاً «کمکی» هستن، نه بخشی از مسیرِ
+#  اصلیِ ربات. هر خطایی (سهمیه تموم شده، کلید غلط، سرویس قطع، هر چیزِ
+#  دیگه) به‌شکلِ AIError بالا می‌ره و فراخوان (admin.py/ticket.py) باید
+#  همیشه یه راهِ برگشتِ ساده به مسیرِ دستیِ همیشگی داشته باشه — یعنی
+#  اگه هوش مصنوعی کار نکرد، نوشتنِ اطلاعیه یا پاسخِ تیکت دقیقاً مثلِ
+#  قبل (بدونِ AI) کار می‌کنه.
+# ══════════════════════════════════════════════════
+
+BROADCAST_STYLE_INSTRUCTION = """تو دستیارِ نوشتنِ اطلاعیه‌های رسمیِ ربات «هامزیار» هستی — یک ربات آموزشی دانشگاهی برای دانشجویان دانشگاه علوم پزشکی هرمزگان.
+
+از این قوانین دقیقاً و بدون استثنا پیروی کن:
+
+هویت و لحن: لحن باید حسِ یک سامانه‌ی رسمیِ دانشگاهیِ مدرن رو منتقل کنه؛ حرفه‌ای، تمیز، قابل‌اعتماد و پریمیوم.
+
+سبک نگارش: رسمی اما صمیمی، کوتاه و مفید، بدون زیاده‌گویی، بدون متن‌های شعاری، خوانا و مرتب، مناسبِ پیامِ همگانیِ تلگرام. هر پاراگراف حداکثر ۲ تا ۳ خط.
+
+قالب: همیشه خروجی رو با HTML تلگرام بنویس. فقط از تگ‌های <b> و <a> استفاده کن — هیچ تگ HTML دیگری مجاز نیست. هیچ‌وقت از Markdown یا ** استفاده نکن.
+
+ساختارِ ثابت (دقیقاً به همین شکل):
+📣 <b>عنوان اطلاعیه</b>
+━━━━━━━━━━━━━━━━
+🎓 <b>دانشجویان گرامی،</b>
+متن اطلاعیه...
+📌 نکته مهم (در صورت نیاز)
+💙 <b>از همراهی و اعتماد شما سپاسگزاریم.</b>
+✨ <b>تیم اطلاع‌رسانی هامزیار</b>
+
+ایموجی‌های مجاز برای استفاده در متن (بسته به موضوع): 📣 اطلاعیه، 🎓 دانشجویان، 📌 نکته مهم، ⚠️ هشدار، 🔔 خبر، 📚 منابع، 🧪 بانک سوالات، ✏️ طراحی سوال، 🤖 هوشیار، 📝 فرم، 🗳️ انتخابات، 🔗 لینک، 📱 اپلیکیشن، 💳 اشتراک، ⚙️ بروزرسانی، 🚀 قابلیت جدید، 💙 تشکر، ✨ امضا. از ایموجیِ اضافی/خارج از این لیست استفاده نکن.
+
+بولد: همیشه موارد مهم (ساعت، تاریخ، لینک، نام درس، نام قابلیت، نام بخش، اسمِ سامانه، اطلاعیه‌ی مهم، تغییرات، قیمت، مدتِ اشتراک) رو Bold کن.
+
+لینک: اگه لینکی بود، دقیقاً به این شکل بنویس: <a href="URL">متن نمایشی</a>
+
+امضا: بسته به موضوع یکی از این سه رو انتخاب کن: «✨ <b>تیم اطلاع‌رسانی هامزیار</b>» یا «✨ <b>تیم توسعه هامزیار</b>» یا «✨ <b>مدیریت هامزیار</b>».
+
+لحن بر اساسِ موضوع: اگه موضوع قابلیتِ جدید/بروزرسانی/نسخه‌ی جدید/هوش‌مصنوعی/اشتراک/بانکِ سوالات بود، لحن هیجان‌انگیز اما حرفه‌ای باشه. اگه موضوع امتحانات/اطلاعیه‌ی دانشگاه/نمرات/قوانین/انتخابات/اخبارِ رسمی بود، لحن کاملاً رسمی باشه.
+
+خروجی: فقط متنِ نهاییِ HTML رو تولید کن — هیچ توضیحِ اضافه، هیچ مقدمه یا موخره‌ای نده."""
+
+
+async def generate_broadcast_ai(notes: str) -> str:
+    """از روی چند نکته/بولت‌پوینتی که ادمین می‌ده، متنِ کاملِ اطلاعیه رو طبقِ استانداردِ هامزیار می‌سازه."""
+    cfg = await get_ai_config()
+    if not cfg['enabled']:
+        raise AIConfigError("بخش هوش مصنوعی فعلاً توسط مدیریت غیرفعال است.")
+    if not cfg['api_key']:
+        raise AIConfigError("هنوز کلید API توسط ادمین تنظیم نشده.")
+    if cfg['provider'] != 'gemini':
+        raise AIConfigError("این قابلیت فعلاً فقط با ارائه‌دهنده‌ی Gemini در دسترسه.")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:generateContent"
+    headers = {'Content-Type': 'application/json', 'x-goog-api-key': cfg['api_key']}
+    payload = {
+        'system_instruction': {'parts': [{'text': BROADCAST_STYLE_INSTRUCTION}]},
+        'contents': [{'role': 'user', 'parts': [{'text': f"این نکته‌ها رو به یه اطلاعیه تبدیل کن:\n\n{notes}"}]}],
+        'generationConfig': {'maxOutputTokens': 1024},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise AIError("سرویس هوش مصنوعی دیر جواب داد — دوباره امتحان کن.")
+    except httpx.HTTPError as e:
+        raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+
+    if resp.status_code != 200:
+        _raise_gemini_status_error(resp.status_code)
+
+    try:
+        data = resp.json()
+        text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        if not text:
+            raise ValueError('empty')
+        return text
+    except (KeyError, IndexError, ValueError, TypeError):
+        raise AIConfigError("هوش مصنوعی متنِ قابل‌فهمی برنگردوند — دوباره امتحان کن.")
+
+
+TICKET_REPLY_INSTRUCTION = """تو داری به ادمینِ پشتیبانیِ ربات «هامزیار» (ربات آموزشیِ دانشگاه علوم پزشکی هرمزگان) کمک می‌کنی تا به تیکتِ یک دانشجو جواب بده.
+
+یه پیش‌نویسِ پاسخِ کوتاه، محترمانه، دوستانه و کاربردی بنویس — انگار خودِ پشتیبانیِ هامزیار داره جواب می‌ده، نه یه ربات. مستقیم برو سراغِ راه‌حل یا جوابِ سوال، بدون مقدمه‌چینیِ اضافه. اگه اطلاعاتِ کافی برای حلِ قطعیِ مشکل نیست، ازش بخواه جزئیاتِ بیشتر بده.
+فقط از تگِ <b> برای تاکید استفاده کن (اگه لازم بود)، بدونِ Markdown. خروجی فقط خودِ متنِ پاسخه، بدون توضیحِ اضافه."""
+
+
+async def generate_ticket_reply_ai(subject: str, ticket_text: str, previous_replies: list = None) -> str:
+    """یک پیش‌نویسِ پاسخ برای تیکتِ پشتیبانی می‌سازد — ادمین می‌تونه مستقیم بفرستدش یا ویرایش کنه."""
+    cfg = await get_ai_config()
+    if not cfg['enabled']:
+        raise AIConfigError("بخش هوش مصنوعی فعلاً توسط مدیریت غیرفعال است.")
+    if not cfg['api_key']:
+        raise AIConfigError("هنوز کلید API توسط ادمین تنظیم نشده.")
+    if cfg['provider'] != 'gemini':
+        raise AIConfigError("این قابلیت فعلاً فقط با ارائه‌دهنده‌ی Gemini در دسترسه.")
+
+    convo = f"موضوعِ تیکت: {subject}\n\nمتنِ تیکت:\n{ticket_text}\n"
+    if previous_replies:
+        convo += "\nپاسخ‌های قبلی:\n" + "\n".join(f"- {r}" for r in previous_replies[-5:])
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg['model']}:generateContent"
+    headers = {'Content-Type': 'application/json', 'x-goog-api-key': cfg['api_key']}
+    payload = {
+        'system_instruction': {'parts': [{'text': TICKET_REPLY_INSTRUCTION}]},
+        'contents': [{'role': 'user', 'parts': [{'text': convo}]}],
+        'generationConfig': {'maxOutputTokens': 512},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise AIError("سرویس هوش مصنوعی دیر جواب داد — دوباره امتحان کن.")
+    except httpx.HTTPError as e:
+        raise AIError(f"خطا در اتصال به سرویس هوش مصنوعی: {e}")
+
+    if resp.status_code != 200:
+        _raise_gemini_status_error(resp.status_code)
+
+    try:
+        data = resp.json()
+        text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        if not text:
+            raise ValueError('empty')
+        return text
+    except (KeyError, IndexError, ValueError, TypeError):
+        raise AIConfigError("هوش مصنوعی متنِ قابل‌فهمی برنگردوند — دوباره امتحان کن.")
 
 
 # نشانه‌های شناخته‌شده‌ی «نشتِ فراداده»: بعضی مدل‌های رایگان (مخصوصاً وقتی
