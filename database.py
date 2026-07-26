@@ -850,6 +850,15 @@ class DB:
             except Exception: pass
         return await self.questions.find(q).limit(limit).to_list(limit)
 
+    async def search_questions_text(self, query_text: str, limit: int = 10) -> list:
+        """جستجوی آزادِ متنی (نه فیلترِ درس/موضوع) — برای Function Callingِ هوشیار."""
+        if not query_text:
+            return []
+        rx = {'$regex': query_text, '$options': 'i'}
+        return await self.questions.find(
+            {'approved': True, '$or': [{'question': rx}, {'explanation': rx}]}
+        ).limit(limit).to_list(limit)
+
     async def get_weak_questions(self, uid: int, limit: int = 1):
         user = await self.get_user(uid)
         weak = user.get('weak_topics', []) if user else []
