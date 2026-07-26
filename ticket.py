@@ -186,11 +186,38 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"پاسخ‌های قبلی: {rc}\n\n"
             "پاسخ جدید خود را بنویسید:",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ لغو", callback_data=f'ticket:admin_view:{tid}')
-            ]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 پیش‌نویسِ هوشیار", callback_data=f'ticket:ai_draft:{tid}')],
+                [InlineKeyboardButton("❌ لغو", callback_data=f'ticket:admin_view:{tid}')],
+            ])
         )
         return TICKET_REPLY_WAITING
+
+    # ── ⚠️ قابلیتِ جدید: پیش‌نویسِ پاسخِ تیکت با هوشیار ──
+    elif action == 'ai_draft' and uid == ADMIN_ID:
+        tid = int(parts[2])
+        await _ticket_ai_draft(query, context, tid)
+
+    elif action == 'ai_send' and uid == ADMIN_ID:
+        tid   = int(parts[2])
+        draft = context.user_data.get('ai_ticket_draft', '')
+        if not draft:
+            await query.answer("⚠️ پیش‌نویسی برای ارسال نیست.", show_alert=True)
+            return
+        await _send_ticket_reply(context.bot, tid, draft)
+        context.user_data.pop('ai_ticket_draft', None)
+        context.user_data.pop('replying_ticket', None)
+        context.user_data['ticket_mode'] = ''
+        await query.edit_message_text(
+            f"✅ پاسخِ پیشنهادیِ هوشیار به تیکت #{tid} ارسال شد!",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"📋 تیکت #{tid}", callback_data=f'ticket:admin_view:{tid}'),
+                    InlineKeyboardButton("🔒 بستن",          callback_data=f'ticket:admin_close:{tid}'),
+                ],
+                [InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')],
+            ])
+        )
 
     elif action == 'admin_close' and uid == ADMIN_ID:
         tid = int(parts[2])
@@ -379,26 +406,7 @@ async def ticket_message_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not tid:
             return
         context.user_data['ticket_mode'] = ''
-        ticket = await db.ticket_get(tid)
-        await db.ticket_add_reply(tid, text)
-
-        if ticket:
-            try:
-                await context.bot.send_message(
-                    ticket['user_id'],
-                    f"📨 <b>پاسخ به تیکت #{tid}</b>\n"
-                    f"📋 {ticket.get('subject','')}\n"
-                    f"━━━━━━━━━━━━━━━━\n\n"
-                    f"💬 {text}\n\n"
-                    "<i>برای ادامه گفتگو می‌توانید پاسخ دهید.</i>",
-                    parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(f"💬 ادامه گفتگو", callback_data=f'ticket:reply_user:{tid}'),
-                        InlineKeyboardButton(f"📋 مشاهده تیکت", callback_data=f'ticket:view:{tid}'),
-                    ]])
-                )
-            except Exception:
-                pass
+        await _send_ticket_reply(context.bot, tid, text)
 
         await update.message.reply_text(
             f"✅ پاسخ به تیکت #{tid} ارسال شد!",
@@ -410,6 +418,86 @@ async def ticket_message_handler(update: Update, context: ContextTypes.DEFAULT_T
                 [InlineKeyboardButton("🔙 مدیریت تیکت‌ها", callback_data='ticket:manage')],
             ])
         )
+
+
+async def _send_ticket_reply(bot, tid: int, text: str) -> None:
+    """
+    منطقِ مشترکِ «ثبت و ارسالِ پاسخِ ادمین به یک تیکت» — چه پاسخ دستی
+    تایپ شده باشه، چه از پیش‌نویسِ هوشیار تاییدشده. اینجا فقط یه بارِ
+    واحد نوشته شده تا هر دو مسیر رفتارِ کاملاً یکسانی داشته باشن.
+    """
+    ticket = await db.ticket_get(tid)
+    await db.ticket_add_reply(tid, text)
+
+    if ticket:
+        try:
+            await bot.send_message(
+                ticket['user_id'],
+                f"📨 <b>پاسخ به تیکت #{tid}</b>\n"
+                f"📋 {ticket.get('subject','')}\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"💬 {text}\n\n"
+                "<i>برای ادامه گفتگو می‌توانید پاسخ دهید.</i>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💬 ادامه گفتگو", callback_data=f'ticket:reply_user:{tid}'),
+                    InlineKeyboardButton("📋 مشاهده تیکت", callback_data=f'ticket:view:{tid}'),
+                ]])
+            )
+        except Exception:
+            pass
+
+
+async def _ticket_ai_draft(query, context, tid: int):
+    """
+    ⚠️ قابلیتِ جدید: پیش‌نویسِ پاسخِ تیکت با هوشیار. اگه AI کار نکنه
+    (سهمیه/قطعی/کلید)، ادمین همیشه می‌تونه با دکمه‌ی «لغو» برگرده به
+    همون صفحه‌ی «پاسخِ دستی» که قبلاً بود — این قابلیت هیچ‌وقت مسیرِ
+    اصلیِ پاسخ‌دادن به تیکت رو قفل نمی‌کنه.
+    """
+    from ai_solver import generate_ticket_reply_ai, AIError
+
+    ticket = await db.ticket_get(tid)
+    if not ticket:
+        await query.answer("❌ تیکت پیدا نشد.", show_alert=True)
+        return
+
+    try:
+        draft = await generate_ticket_reply_ai(
+            subject=ticket.get('subject', ''),
+            ticket_text=ticket.get('message', ''),
+            previous_replies=ticket.get('replies', []),
+        )
+    except AIError as e:
+        await query.edit_message_text(
+            f"⚠️ هوشیار الان نتونست پیش‌نویس بسازه:\n<i>{e}</i>\n\n"
+            "می‌تونی خودت دستی پاسخ بدی.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 دوباره امتحان کن", callback_data=f'ticket:ai_draft:{tid}')],
+                [InlineKeyboardButton("✏️ پاسخِ دستی", callback_data=f'ticket:admin_reply:{tid}')],
+            ]))
+        return
+    except Exception:
+        logger.exception("طراحی پیش‌نویسِ پاسخِ تیکت با AI ناموفق بود")
+        await query.edit_message_text(
+            "⚠️ یه خطای غیرمنتظره پیش اومد. می‌تونی خودت دستی پاسخ بدی.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✏️ پاسخِ دستی", callback_data=f'ticket:admin_reply:{tid}')
+            ]]))
+        return
+
+    context.user_data['ai_ticket_draft'] = draft
+    await query.edit_message_text(
+        f"🤖 <b>پیش‌نویسِ پیشنهادیِ هوشیار — تیکت #{tid}</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"{draft}",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ ارسالِ همین پاسخ", callback_data=f'ticket:ai_send:{tid}')],
+            [InlineKeyboardButton("🔄 دوباره بساز", callback_data=f'ticket:ai_draft:{tid}')],
+            [InlineKeyboardButton("✏️ خودم می‌نویسم", callback_data=f'ticket:admin_reply:{tid}')],
+        ]))
 
 
 async def _do_create_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE, confirmed: bool = False):
