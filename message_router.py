@@ -95,6 +95,11 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from questions import handle_create_question_steps
         return await handle_create_question_steps(update, context)
 
+    # ── حالت نکته‌ی اختیاری برای طراحی سوال با هوشیار (AI) ──
+    if context.user_data.get('mode') == 'ai_question_note':
+        from questions import handle_ai_question_note_text
+        return await handle_ai_question_note_text(update, context)
+
     # ── حالت ادمین محتوا ──
     ca_text_modes = {
         'add_lesson', 'add_session', 'waiting_description',
