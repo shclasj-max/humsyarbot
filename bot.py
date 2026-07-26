@@ -764,6 +764,11 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
     'ai_reset_quota_search', 'ai_save_persona_name', 'ai_set_disabled_msg',
     'ai_ban_search',
+    # FIX جدید: طراحی سوال با هوشیار (AI) — همین موضوع برای مرحله‌ی
+    # «نکته‌ی اختیاری» هم صادقه.
+    'ai_question_note',
+    # FIX جدید: دستیارِ نوشتنِ اطلاعیه با هوشیار
+    'bc_ai_notes',
 }
 MENU_BUTTON_TEXTS = {
     '🩺 داشبورد', '📚 منابع', '🧪 بانک سوال', '❓ سوالات متداول',
@@ -815,6 +820,13 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ۱. FIX: broadcast — باید اول از همه چک بشه
     if uid == ADMIN_ID and context.user_data.get('mode') == 'broadcast':
         return await admin_broadcast_handler(update, context)
+
+    # ⚠️ قابلیتِ جدید: نکته‌های اطلاعیه برای هوشیار (دستیارِ نوشتنِ اطلاعیه)
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'bc_ai_notes':
+        from admin import _broadcast_ai_generate
+        context.user_data['mode'] = ''
+        context.user_data['bc_ai_notes'] = update.message.text or ''
+        return await _broadcast_ai_generate(update.message, context, is_message=True)
 
     # ۲. FIX: profile_edit — ویرایش نام/شماره دانشجویی (هر کاربری)
     if context.user_data.get('mode') == 'profile_edit':
