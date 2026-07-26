@@ -1183,6 +1183,33 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ویژگی جدید: ارسال آزمایشی فقط به خود ادمین قبل از ارسال واقعی
         await _broadcast_send_test(query, context)
 
+    # ── ⚠️ قابلیتِ جدید: دستیارِ نوشتنِ اطلاعیه با هوشیار ──
+    elif action == 'bc_ai_start':
+        context.user_data['mode'] = 'bc_ai_notes'
+        await query.edit_message_text(
+            "🤖 <b>نوشتنِ اطلاعیه با هوشیار</b>\n\n"
+            "چندتا نکته/بولت‌پوینت درباره‌ی موضوعِ اطلاعیه بنویس "
+            "(مثلاً: «هوشیار امروز آپدیت شد، سریع‌تر جواب می‌ده، همه می‌تونن استفاده کنن»)، "
+            "هوشیار طبقِ استانداردِ رسمیِ هامزیار متنِ کامل رو می‌سازه:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✏️ خودم می‌نویسم", callback_data='admin:bc_edit'),
+                InlineKeyboardButton("❌ لغو", callback_data='admin:bc_cancel'),
+            ]]))
+
+    elif action == 'bc_ai_regen':
+        await _broadcast_ai_generate(query, context)
+
+    elif action == 'bc_ai_use':
+        draft = context.user_data.get('bc_ai_draft', '')
+        if not draft:
+            await query.answer("⚠️ چیزی برای استفاده نیست.", show_alert=True)
+            return
+        context.user_data['bc_msg_data'] = {'type': 'text', 'text': draft}
+        context.user_data['mode'] = ''
+        context.user_data.pop('bc_ai_draft', None)
+        await _broadcast_show_preview(query, context)
+
 
 # ══════════════════════════════════════════════════
 # 📢 توابع Broadcast
@@ -1232,9 +1259,58 @@ async def _broadcast_ask_message(query, context, target: str, edit: bool = False
         f"📌 مخاطب: <b>{target_label}</b>\n\n━━━━━━━━━━━━━━━━\n"
         "✍️ <b>مرحله ۲:</b> پیام خود را بنویسید:\n\n"
         "• متن (HTML پشتیبانی می‌شود)\n• عکس + کپشن\n• ویدیو + کپشن\n• فایل + کپشن\n\n"
-        "<i>💡 قبل از ارسال، پیش‌نمایش نشان داده می‌شود.</i>",
+        "<i>💡 قبل از ارسال، پیش‌نمایش نشان داده می‌شود.</i>\n\n"
+        "یا بذار هوشیار برات بنویسه:",
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:bc_cancel')]]))
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 با هوشیار بنویس", callback_data='admin:bc_ai_start')],
+            [InlineKeyboardButton("❌ لغو", callback_data='admin:bc_cancel')],
+        ]))
+
+
+async def _broadcast_ai_generate(query_or_msg, context, is_message: bool = False):
+    """
+    ⚠️ قابلیتِ جدید: تولیدِ متنِ اطلاعیه با هوشیار. اگه هوش مصنوعی به هر
+    دلیلی (سهمیه، قطعی، کلید نامعتبر) کار نکنه، این تابع هرگز کرش نمی‌کنه
+    و ادمین رو به مسیرِ دستیِ همیشگیِ نوشتنِ اطلاعیه (که مستقل از AI
+    هست) هدایت می‌کنه.
+    """
+    from ai_solver import generate_broadcast_ai, AIError
+
+    notes = context.user_data.get('bc_ai_notes', '')
+
+    async def _edit(text, reply_markup):
+        if is_message:
+            await query_or_msg.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        else:
+            await query_or_msg.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+
+    try:
+        draft = await generate_broadcast_ai(notes)
+    except AIError as e:
+        await _edit(
+            f"⚠️ هوشیار الان نتونست اطلاعیه بنویسه:\n<i>{e}</i>\n\n"
+            "می‌تونی خودت دستی بنویسی — کاملاً مستقل از این مشکل کار می‌کنه.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 دوباره امتحان کن", callback_data='admin:bc_ai_regen')],
+                [InlineKeyboardButton("✏️ خودم می‌نویسم", callback_data='admin:bc_edit')],
+            ]))
+        return
+    except Exception:
+        logger.exception("تولید اطلاعیه با AI ناموفق بود")
+        await _edit(
+            "⚠️ یه خطای غیرمنتظره پیش اومد. می‌تونی خودت دستی بنویسی.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("✏️ خودم می‌نویسم", callback_data='admin:bc_edit')]]))
+        return
+
+    context.user_data['bc_ai_draft'] = draft
+    preview = f"👁 <b>پیش‌نمایشِ اطلاعیه</b>\n━━━━━━━━━━━━━━━━\n\n{draft}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ استفاده از این متن", callback_data='admin:bc_ai_use')],
+        [InlineKeyboardButton("🔄 دوباره بساز", callback_data='admin:bc_ai_regen')],
+        [InlineKeyboardButton("✏️ خودم می‌نویسم", callback_data='admin:bc_edit')],
+    ])
+    await _edit(preview, keyboard)
 
 
 async def _broadcast_show_preview(query_or_msg, context, scheduled: bool = False):
