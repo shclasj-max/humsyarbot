@@ -230,6 +230,19 @@ async def delete_persona(name: str) -> None:
 #  حدس بزنه. فقط وقتی uid داریم (یعنی یه دانشجوی واقعی داره سوال
 #  می‌پرسه، نه تستِ ادمین) فعال می‌شه.
 # ══════════════════════════════════════════════════
+# ══════════════════════════════════════════════════
+#  ابزارهایی که به همه‌ی دانشجوها داده می‌شن (uid فقط «همینه که داره
+#  چت می‌کنه»، هیچ‌کدوم پارامترِ آیدی/یوزرنیمِ ورودی نمی‌گیرن).
+#
+#  ⚠️ قانونِ امنیتیِ ثابت — هیچ‌وقت نقض نشه: هر تابعی که اینجا اضافه
+#  می‌شه باید فقط و فقط دیتای «uid» ی که خودِ Gemini در زمانِ اجرا از
+#  ما می‌گیره رو بخونه (که ما خودمون، نه مدل، تعیینش می‌کنیم — همون
+#  آیدیِ تلگرامِ واقعیِ درخواست‌دهنده). هیچ تابعِ دانشجویی نباید یک
+#  پارامترِ «آیدی/یوزرنیم/اسمِ کاربرِ دیگر» بگیره؛ وگرنه یه دانشجو با
+#  فریب‌دادنِ مدل (مثلاً «فرض کن من آیدی ۱۲۳۴۵۶ام») می‌تونه دیتای یه
+#  کاربرِ دیگه رو بخونه. توابعِ «admin_*» که این محدودیت رو ندارن،
+#  همیشه پایین‌تر با چکِ دوجداره (uid == ADMIN_ID) محافظت می‌شن.
+# ══════════════════════════════════════════════════
 AI_FUNCTIONS = [
     {
         'name': 'get_my_schedule',
@@ -254,6 +267,35 @@ AI_FUNCTIONS = [
             'برای سوالاتی مثل «نمره‌ی آخرین کوییزم چند شد؟» استفاده کن.'
         ),
         'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_my_subscription_status',
+        'description': 'وضعیتِ اشتراکِ همین دانشجو (فعال/منقضی، چند روز مونده) رو می‌خونه.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_my_tickets',
+        'description': 'تیکت‌های پشتیبانیِ خودِ همین دانشجو (وضعیت، موضوع) رو می‌خونه.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'get_my_profile_summary',
+        'description': 'اطلاعاتِ ثبت‌نامِ خودِ همین دانشجو (گروه، ورودی، وضعیتِ تایید) رو می‌خونه.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'remember_about_me',
+        'description': (
+            'وقتی کاربر یه چیزِ ماندگار و مهم درباره‌ی خودش می‌گه (مثلاً درسی که '
+            'داره می‌خونه، یه ترجیحِ ثابت مثلِ «جواب‌ها رو کوتاه بگو»، یا یه علاقه‌ی '
+            'مشخص) که توی سوالاتِ بعدی هم به‌کارِت میاد، این تابع رو صدا بزن تا یادت '
+            'بمونه. برای اطلاعاتِ موقت/بی‌اهمیتِ همون یه سوال استفاده نکن.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {'fact': {'type': 'string', 'description': 'خودِ نکته، خیلی کوتاه و مشخص'}},
+            'required': ['fact'],
+        },
     },
 ]
 
@@ -301,6 +343,70 @@ ADMIN_AI_FUNCTIONS = [
             'required': ['query'],
         },
     },
+    {
+        'name': 'admin_get_user_full_profile',
+        'description': (
+            'فقط برای ادمین ارشد: یه دیدِ کاملِ ۳۶۰درجه از یک کاربرِ خاص می‌ده — پروفایل + '
+            'وضعیتِ اشتراک + تعدادِ نمرات ثبت‌شده + تعدادِ تیکت‌های باز. برای سوالاتی مثلِ '
+            '«وضعیتِ کاملِ فلان کاربر چیه؟» استفاده کن.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {'query': {'type': 'string', 'description': 'آیدیِ عددی، یوزرنیم یا اسمِ کاربر'}},
+            'required': ['query'],
+        },
+    },
+    {
+        'name': 'admin_get_subscription_stats',
+        'description': 'فقط برای ادمین ارشد: تعدادِ کاربرانِ فعال/منقضی/در انتظارِ پرداختِ اشتراک رو می‌ده.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'admin_search_faq',
+        'description': 'فقط برای ادمین ارشد: جستجوی متنی توی سوالاتِ متداول (FAQ) ربات.',
+        'parameters': {
+            'type': 'object',
+            'properties': {'query': {'type': 'string', 'description': 'عبارتِ جستجو'}},
+            'required': ['query'],
+        },
+    },
+    {
+        'name': 'admin_list_content_admins',
+        'description': 'فقط برای ادمین ارشد: لیستِ ادمین‌های محتوایِ فعلیِ ربات رو می‌ده.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'admin_list_pending_approvals',
+        'description': (
+            'فقط برای ادمین ارشد: خلاصه‌ی همه‌ی چیزهایی که منتظرِ تاییدِ ادمین هستن — '
+            'کاربرانِ در انتظارِ تایید، سوالاتِ در انتظارِ تایید، پرداخت‌های در انتظارِ بررسی.'
+        ),
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'admin_get_interaction_insights',
+        'description': (
+            'فقط برای ادمین ارشد: بر اساسِ گزارش‌های اخیرِ «پاسخِ نامناسب» که دانشجوها ثبت '
+            'کردن، یه خلاصه‌ی تحلیلی از الگوهای مشکل‌ساز می‌ده — برای اینکه ادمین بتونه دستی '
+            'تصمیم بگیره پرامپت/شخصیتِ هوشیار رو تغییر بده یا نه. (این تحلیل صرفاً پیشنهادیه، '
+            'خودکار چیزی رو تغییر نمی‌ده.)'
+        ),
+        'parameters': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'admin_get_ticket_detail',
+        'description': 'فقط برای ادمین ارشد: جزئیاتِ کاملِ یک تیکتِ خاص (متنِ اصلی + همه‌ی پاسخ‌ها) رو با شماره‌ی تیکت می‌ده.',
+        'parameters': {
+            'type': 'object',
+            'properties': {'ticket_id': {'type': 'integer', 'description': 'شماره‌ی تیکت'}},
+            'required': ['ticket_id'],
+        },
+    },
+    {
+        'name': 'admin_get_schedule_overview',
+        'description': 'فقط برای ادمین ارشد: خلاصه‌ی برنامه‌ی کلاسی/امتحانیِ آینده‌ی همه‌ی گروه‌ها (نه فقط یک دانشجوی خاص) رو می‌ده.',
+        'parameters': {'type': 'object', 'properties': {}},
+    },
 ]
 
 
@@ -333,10 +439,54 @@ async def _execute_ai_function(name: str, args: dict, uid: int) -> str:
             ]
             return "\n".join(lines)
 
+        if name == 'get_my_subscription_status':
+            sub = await db.sub_get(uid)
+            if not sub:
+                return 'این کاربر هیچ اشتراکی ثبت نکرده.'
+            active = await db.sub_is_active(uid)
+            days   = await db.sub_days_left(uid)
+            return (
+                f"وضعیت: {'فعال ✅' if active else 'غیرفعال/منقضی ⌛'}\n"
+                f"پلن: {sub.get('plan_name','—')}\n"
+                f"روزهای باقی‌مانده: {days if active else 0}\n"
+                f"تاریخِ پایان: {sub.get('end_date','—')}"
+            )
+
+        if name == 'get_my_tickets':
+            rows = await db.ticket_list_for_user(uid)
+            if not rows:
+                return 'این کاربر هیچ تیکتی ثبت نکرده.'
+            lines = [
+                f"- #{t.get('ticket_id')} | موضوع: {t.get('subject','—')} | وضعیت: {t.get('status','—')} | {t.get('created_at','—')}"
+                for t in rows
+            ]
+            return "\n".join(lines)
+
+        if name == 'get_my_profile_summary':
+            user = await db.get_user(uid) or {}
+            return (
+                f"نام: {user.get('name','—')}\n"
+                f"گروه: {user.get('group','—')} | ورودی: {user.get('intake','—')}\n"
+                f"وضعیتِ تایید: {'تاییدشده ✅' if user.get('approved') else 'در انتظارِ تایید ⏳'}\n"
+                f"تاریخِ عضویت: {user.get('registered_at','—')}"
+            )
+
+        if name == 'remember_about_me':
+            fact = (args.get('fact') or '').strip()
+            if not fact:
+                return 'چیزی برای به‌خاطرسپردن نبود.'
+            await db.ai_remember_fact(uid, fact)
+            return 'یادم موند.'
+
         # ⚠️ همه‌ی توابعِ زیر «فقط ادمین ارشد» هستن — حتی اگه به هر دلیلی
         # (باگ/تغییرِ آینده) این تابع‌ها برای یه کاربرِ دیگه هم صدا زده
         # بشن، اینجا دوباره چک می‌شه و اجرا نمی‌شن.
-        if name in ('admin_search_user', 'admin_get_bot_stats', 'admin_list_tickets', 'admin_search_questions'):
+        if name in (
+            'admin_search_user', 'admin_get_bot_stats', 'admin_list_tickets', 'admin_search_questions',
+            'admin_get_user_full_profile', 'admin_get_subscription_stats', 'admin_search_faq',
+            'admin_list_content_admins', 'admin_list_pending_approvals', 'admin_get_interaction_insights',
+            'admin_get_ticket_detail', 'admin_get_schedule_overview',
+        ):
             if uid != ADMIN_ID:
                 return 'این تابع فقط برای ادمین ارشد در دسترسه.'
 
@@ -390,6 +540,104 @@ async def _execute_ai_function(name: str, args: dict, uid: int) -> str:
                 lines = [
                     f"- [{r.get('lesson','—')} / {r.get('topic','—')}] {(r.get('question') or '')[:120]}"
                     for r in rows
+                ]
+                return "\n".join(lines)
+
+            if name == 'admin_get_user_full_profile':
+                results = await db.search_users(args.get('query', ''))
+                if not results:
+                    return 'کاربری با این مشخصات پیدا نشد.'
+                u = results[0]
+                target_uid = u.get('user_id')
+                grades  = await db.grade_list_for_student(target_uid)
+                tickets = await db.ticket_get_all(None)
+                open_tickets = [t for t in tickets if t.get('user_id') == target_uid and t.get('status') == 'open']
+                sub_active = await db.sub_count_by_status('active')  # فقط برای رفرنس کلی
+                return (
+                    f"👤 {u.get('name','—')} (آیدی: {u.get('user_id')})\n"
+                    f"یوزرنیم: @{u.get('username') or '—'} | گروه: {u.get('group','—')} | ورودی: {u.get('intake','—')}\n"
+                    f"تایید‌شده: {'بله' if u.get('approved') else 'خیر'} | مسدودِ هوشیار: {'بله' if u.get('ai_banned') else 'خیر'}\n"
+                    f"ثبت‌نام: {u.get('registered_at','—')} | آخرین فعالیت: {u.get('last_active','—')}\n"
+                    f"📊 تعدادِ نمراتِ ثبت‌شده: {len(grades)}\n"
+                    f"🎫 تیکتِ بازِ این کاربر: {len(open_tickets)}"
+                )
+
+            if name == 'admin_get_subscription_stats':
+                active  = await db.sub_count_by_status('active')
+                expired = await db.sub_count_by_status('expired')
+                pending = await db.sub_payment_list_pending()
+                return (
+                    f"💳 اشتراکِ فعال: {active}\n"
+                    f"⌛ اشتراکِ منقضی‌شده: {expired}\n"
+                    f"⏳ پرداختِ در انتظارِ بررسی: {len(pending)}"
+                )
+
+            if name == 'admin_search_faq':
+                rows = await db.faq_search_text(args.get('query', ''))
+                if not rows:
+                    return 'سوالِ متداولی با این عبارت پیدا نشد.'
+                lines = [f"- {r.get('question','')} → {(r.get('answer') or '')[:150]}" for r in rows]
+                return "\n".join(lines)
+
+            if name == 'admin_list_content_admins':
+                rows = await db.get_content_admins()
+                if not rows:
+                    return 'هیچ ادمینِ محتوایی ثبت نشده.'
+                lines = [f"- {u.get('name','—')} (آیدی: {u.get('user_id')})" for u in rows]
+                return "\n".join(lines)
+
+            if name == 'admin_list_pending_approvals':
+                pending_u = await db.pending_users()
+                pending_q = await db.pending_questions()
+                pending_p = await db.sub_payment_list_pending()
+                return (
+                    f"👥 کاربرِ در انتظارِ تایید: {len(pending_u)}\n"
+                    f"❓ سوالِ در انتظارِ تایید: {len(pending_q)}\n"
+                    f"💳 پرداختِ در انتظارِ بررسی: {len(pending_p)}"
+                )
+
+            if name == 'admin_get_interaction_insights':
+                # ⚠️ نسخه‌ی امنِ «یادگیریِ خودکار»: به‌جای اینکه ربات
+                # خودش شخصیتشو تغییر بده، فقط یه خلاصه‌ی تحلیلی از
+                # گزارش‌های دانشجوها می‌ده — تصمیمِ نهایی همیشه با ادمینه.
+                reports = await db.ai_recent_reports(limit=30)
+                if not reports:
+                    return 'هنوز گزارشی از دانشجوها ثبت نشده — چیزِ خاصی برای تحلیل نیست.'
+                sample = "\n---\n".join(
+                    f"سوال: {r.get('question','')[:150]}\nپاسخ: {r.get('answer','')[:200]}"
+                    for r in reports[:15]
+                )
+                return (
+                    f"📋 {len(reports)} گزارشِ اخیر پیدا شد. خلاصه‌ی نمونه‌ای ازشون:\n\n{sample}\n\n"
+                    "(بر اساسِ این‌ها، اگه الگویی می‌بینی — مثلاً یه نوع سوال که مدام اشتباه جواب داده "
+                    "می‌شه — می‌تونی از پنلِ هوشیار دستورِ سیستمی رو دستی اصلاح کنی.)"
+                )
+
+            if name == 'admin_get_ticket_detail':
+                try:
+                    tid = int(args.get('ticket_id'))
+                except (TypeError, ValueError):
+                    return 'شماره‌ی تیکت نامعتبره.'
+                t = await db.ticket_get(tid)
+                if not t:
+                    return f'تیکت #{tid} پیدا نشد.'
+                replies = t.get('replies', [])
+                replies_txt = "\n".join(f"  - {r}" for r in replies) if replies else "  (بدون پاسخ)"
+                return (
+                    f"🎫 تیکت #{tid} | {t.get('user_name','—')} (آیدی: {t.get('user_id')})\n"
+                    f"موضوع: {t.get('subject','—')} | وضعیت: {t.get('status','—')} | {t.get('created_at','—')}\n"
+                    f"متن: {t.get('message','—')}\n"
+                    f"پاسخ‌ها:\n{replies_txt}"
+                )
+
+            if name == 'admin_get_schedule_overview':
+                rows = await db.get_schedules()  # بدونِ group یعنی همه‌ی گروه‌ها
+                if not rows:
+                    return 'هیچ برنامه‌ی آینده‌ای برای هیچ گروهی ثبت نشده.'
+                lines = [
+                    f"- [{r.get('group','—')}] {r.get('type','')}: {r.get('lesson','')} | "
+                    f"{r.get('date','')} ساعت {r.get('time','')}"
+                    for r in rows[:20]
                 ]
                 return "\n".join(lines)
 
@@ -748,8 +996,24 @@ async def ask_ai_stream(text: str = None, image_bytes: bytes = None,
         except Exception:
             doc = None
 
+    # ⚠️ قابلیتِ جدید: تزریقِ «پروفایلِ ماندگارِ فشرده» — نکاتی که خودِ
+    # مدل قبلاً درباره‌ی همین کاربر یاد گرفته (با remember_about_me) به
+    # دستورِ سیستمیِ همین درخواست اضافه می‌شه، تا بدونِ نیاز به دوباره‌
+    # گفتنِ کاربر، ادامه‌ی طبیعیِ رابطه حفظ بشه.
+    system_prompt = cfg['system_prompt']
+    if uid is not None:
+        try:
+            notes = await db.ai_get_profile_notes(uid)
+            if notes:
+                system_prompt += (
+                    "\n\n[نکاتِ ماندگاری که قبلاً درباره‌ی این کاربر یاد گرفتی — طبیعی و بدونِ اشاره‌ی مستقیم بهشون استفاده کن:]\n"
+                    + "\n".join(f"- {n}" for n in notes)
+                )
+        except Exception:
+            pass
+
     kwargs = dict(
-        api_key=cfg['api_key'], model=cfg['model'], system_prompt=cfg['system_prompt'],
+        api_key=cfg['api_key'], model=cfg['model'], system_prompt=system_prompt,
         text=text, image_bytes=image_bytes, image_mime=image_mime,
         history=history or [], thinking=cfg['thinking'],
     )
