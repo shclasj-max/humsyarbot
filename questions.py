@@ -278,6 +278,25 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop(k, None)
         await _main_menu(query)
 
+    # ── ⚠️ قابلیتِ جدید: تاییدِ ذخیره‌سازیِ سوالِ (احتمالاً) تکراری ──
+    elif action == 'dup_confirm':
+        q = context.user_data.get('new_q') or context.user_data.get('ai_q_generated')
+        if context.user_data.get('new_q'):
+            await _do_insert_manual_question(update, context, context.user_data.get('new_q', {}), query.from_user.id)
+        elif context.user_data.get('ai_q_generated'):
+            await _do_insert_ai_question(query, context)
+        else:
+            await query.answer("⚠️ چیزی برای ذخیره نیست.", show_alert=True)
+
+    elif action == 'dup_cancel':
+        for k in ('new_q', 'create_step', 'mode', 'cr_lesson', 'creating_as_ca',
+                  'ai_q_lesson', 'ai_q_topic', 'ai_q_difficulty', 'ai_q_note',
+                  'ai_q_generated', '_ai_lessons', '_ai_topics'):
+            context.user_data.pop(k, None)
+        await query.edit_message_text(
+            "❌ لغو شد — سوال ذخیره نشد.",
+            reply_markup=InlineKeyboardMarkup([_back("🔙 بازگشت به بانک سوال", "questions:main")]))
+
     # ── خروجی فایل سوالات ──
     elif action == 'pdf_menu':
         await _pdf_menu(query, context)
@@ -1280,8 +1299,31 @@ async def handle_difficulty_choice(update: Update, context: ContextTypes.DEFAULT
 
 
 async def _save_question(update, context):
-    uid       = update.effective_user.id
-    q         = context.user_data.get('new_q', {})
+    uid = update.effective_user.id
+    q   = context.user_data.get('new_q', {})
+
+    # ⚠️ قابلیتِ جدید: تشخیصِ سوالِ تکراری — قبل از ثبت، چک می‌کنیم شبیهِ
+    # سوالِ قبلی‌ای توی همون درس/مبحث نیست. این چک کاملاً محلیه (بدونِ
+    # هوش مصنوعی)، پس حتی اگه AI قطع باشه بازم کار می‌کنه.
+    similar = await db.find_similar_questions(q.get('lesson', ''), q.get('topic', ''), q.get('question', ''))
+    if similar:
+        top = similar[0]
+        await update.message.reply_text(
+            "⚠️ <b>این سوال شبیهِ یه سوالِ قبلیه!</b>\n\n"
+            f"📌 سوالِ مشابهِ موجود ({int(top['ratio']*100)}٪ شباهت):\n"
+            f"<i>{top.get('question','')}</i>\n\n"
+            "می‌خوای بازم اضافه‌ش کنی؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بازم ذخیره کن", callback_data='questions:dup_confirm')],
+                [InlineKeyboardButton("❌ لغو (حذف پیش‌نویس)", callback_data='questions:dup_cancel')],
+            ]))
+        return
+
+    await _do_insert_manual_question(update, context, q, uid)
+
+
+async def _do_insert_manual_question(update, context, q: dict, uid: int):
     is_ca     = context.user_data.get('creating_as_ca', False)
     is_admin  = (uid == ADMIN_ID)
     auto      = is_ca or is_admin
@@ -1353,11 +1395,11 @@ async def _save_question(update, context):
         except Exception as e:
             logger.warning(f"Admin notification failed: {e}")
 
-    await update.message.reply_text(
-        msg, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([
-            _back("🔙 بازگشت به بانک سوال", "questions:main")
-        ]))
+    final_markup = InlineKeyboardMarkup([_back("🔙 بازگشت به بانک سوال", "questions:main")])
+    if update.message:
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=final_markup)
+    else:
+        await context.bot.send_message(update.effective_chat.id, msg, parse_mode='HTML', reply_markup=final_markup)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1493,11 +1535,37 @@ async def _ai_generate_and_preview(target, context, is_message: bool = False):
 
 
 async def _ai_save_question(query, context):
-    uid      = query.from_user.id
-    result   = context.user_data.get('ai_q_generated')
+    uid    = query.from_user.id
+    result = context.user_data.get('ai_q_generated')
     if not result:
         await query.answer("⚠️ چیزی برای ذخیره نیست، از اول شروع کن.", show_alert=True)
         return
+
+    # ⚠️ قابلیتِ جدید: تشخیصِ سوالِ تکراری (کاملاً محلی، بدونِ AI) قبل
+    # از ثبتِ سوالِ طراحی‌شده با هوشیار هم اعمال می‌شه.
+    lesson = context.user_data.get('ai_q_lesson', '')
+    topic  = context.user_data.get('ai_q_topic', '')
+    similar = await db.find_similar_questions(lesson, topic, result.get('question', ''))
+    if similar:
+        top = similar[0]
+        await query.edit_message_text(
+            "⚠️ <b>این سوال شبیهِ یه سوالِ قبلیه!</b>\n\n"
+            f"📌 سوالِ مشابهِ موجود ({int(top['ratio']*100)}٪ شباهت):\n"
+            f"<i>{top.get('question','')}</i>\n\n"
+            "می‌خوای بازم اضافه‌ش کنی؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بازم ذخیره کن", callback_data='questions:dup_confirm')],
+                [InlineKeyboardButton("❌ لغو", callback_data='questions:dup_cancel')],
+            ]))
+        return
+
+    await _do_insert_ai_question(query, context)
+
+
+async def _do_insert_ai_question(query, context):
+    uid      = query.from_user.id
+    result   = context.user_data.get('ai_q_generated')
 
     is_ca    = await db.is_content_admin(uid)
     is_admin = (uid == ADMIN_ID)
