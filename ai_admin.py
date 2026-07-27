@@ -126,6 +126,7 @@ async def show_ai_main(query):
             InlineKeyboardButton("⛔ مسدودکردن کاربر", callback_data='ai:ban_search'),
             InlineKeyboardButton("📋 لیست مسدودشده‌ها", callback_data='ai:ban_list'),
         ],
+        [InlineKeyboardButton("🧠 پروفایلِ ماندگارِ یک کاربر", callback_data='ai:profile_search')],
         [InlineKeyboardButton("🚩 گزارش‌های اخیر", callback_data='ai:reports')],
         [InlineKeyboardButton("🧪 تست اتصال", callback_data='ai:test')],
         [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:cat_settings')],
@@ -479,6 +480,55 @@ async def ai_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    # ── ⚠️ قابلیتِ جدید: مدیریتِ پروفایلِ ماندگارِ یک کاربر (شفافیت/حریمِ خصوصی) ──
+    if action == 'profile_search':
+        context.user_data['mode'] = 'ai_profile_search'
+        await query.edit_message_text(
+            "🧠 <b>پروفایلِ ماندگارِ یک کاربر</b>\n\n"
+            "هوشیار برای هر کاربر چندتا نکته‌ی ماندگار (نه کلِ گفتگو، فقط نکاتِ کوتاهِ "
+            "مهم مثلِ «داره فیزیولوژی می‌خونه») نگه می‌داره تا مکالمه‌های بعدی طبیعی‌تر باشن.\n\n"
+            "آیدی عددی، یوزرنیم یا اسمِ کاربر رو بفرست تا پروفایلش رو ببینی.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='ai:main')]])
+        )
+        return
+
+    if action == 'profile_view':
+        target_uid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        if target_uid is None:
+            await query.answer("⚠️ درخواست نامعتبره.", show_alert=True)
+            return
+        notes = await db.ai_get_profile_notes(target_uid)
+        target_user = await db.get_user(target_uid) or {}
+        name = target_user.get('name') or str(target_uid)
+        if not notes:
+            text = f"🧠 <b>{_esc(name)}</b>\n\nهیچ نکته‌ی ماندگاری برای این کاربر ثبت نشده."
+            kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data='ai:profile_search')]]
+        else:
+            notes_txt = "\n".join(f"• {_esc(n)}" for n in notes)
+            text = f"🧠 <b>{_esc(name)}</b>\n\n{notes_txt}"
+            kb = [
+                [InlineKeyboardButton("🗑 پاک‌کردنِ این پروفایل", callback_data=f'ai:profile_clear:{target_uid}')],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data='ai:profile_search')],
+            ]
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if action == 'profile_clear':
+        target_uid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        if target_uid is None:
+            await query.answer("⚠️ درخواست نامعتبره.", show_alert=True)
+            return
+        await db.ai_forget_profile(target_uid)
+        await query.answer("✅ پروفایلِ ماندگارِ این کاربر پاک شد.", show_alert=True)
+        await send_audit_log(
+            context.bot, 'admin', 'مدیر ارشد', uid,
+            f"پاک‌کردنِ پروفایلِ ماندگارِ هوشیار برای کاربر {target_uid}",
+            module='AI', severity='LOW', actor_role='مدیر ارشد',
+        )
+        await show_ai_main(query)
+        return
+
     if action == 'reports':
         reports = await db.ai_recent_reports(limit=10)
         if not reports:
@@ -626,6 +676,21 @@ async def ai_admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             kb.append([InlineKeyboardButton(
                 label, callback_data=f"ai:do_ban:{u.get('user_id')}:{0 if is_banned else 1}",
             )])
+        kb.append([InlineKeyboardButton("❌ لغو", callback_data='ai:main')])
+        await update.message.reply_text("یکی رو انتخاب کن:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if mode == 'ai_profile_search':
+        context.user_data.pop('mode', None)
+        results = await db.search_users(text)
+        if not results:
+            await update.message.reply_text("❌ کاربری با این مشخصات پیدا نشد.")
+            return
+        kb = [
+            [InlineKeyboardButton(f"🧠 {u.get('name') or 'بدون نام'} — {u.get('user_id')}",
+                                   callback_data=f"ai:profile_view:{u.get('user_id')}")]
+            for u in results[:10]
+        ]
         kb.append([InlineKeyboardButton("❌ لغو", callback_data='ai:main')])
         await update.message.reply_text("یکی رو انتخاب کن:", reply_markup=InlineKeyboardMarkup(kb))
         return
