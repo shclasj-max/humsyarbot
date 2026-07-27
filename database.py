@@ -9,6 +9,7 @@
 import os
 import logging
 import asyncio
+import difflib
 from datetime import datetime, timedelta
 from bson import ObjectId
 import motor.motor_asyncio
@@ -859,6 +860,33 @@ class DB:
             {'approved': True, '$or': [{'question': rx}, {'explanation': rx}]}
         ).limit(limit).to_list(limit)
 
+    # ══════════════════════════════════════════════════
+    #  ⚠️ قابلیتِ جدید: تشخیصِ سوالِ تکراری قبل از ثبت. عمداً بدونِ هوش
+    #  مصنوعی پیاده شده (فقط شباهتِ متنیِ محلی با difflib) — چون این یه
+    #  چکِ کیفیِ مهمه که نباید هیچ‌وقت به دردسترس‌بودنِ AI وابسته باشه؛
+    #  حتی اگه سرویسِ AI کاملاً قطع باشه، این قابلیت بدونِ کم‌وکاستی کار
+    #  می‌کنه.
+    # ══════════════════════════════════════════════════
+
+    async def find_similar_questions(self, lesson: str, topic: str, text: str,
+                                      threshold: float = 0.72, limit: int = 3) -> list:
+        if not text:
+            return []
+        candidates = await self.questions.find(
+            {'lesson': lesson, 'topic': topic}, {'question': 1, 'options': 1, 'correct_answer': 1}
+        ).to_list(500)
+        scored = []
+        norm = text.strip().lower()
+        for c in candidates:
+            other = (c.get('question') or '').strip().lower()
+            if not other:
+                continue
+            ratio = difflib.SequenceMatcher(None, norm, other).ratio()
+            if ratio >= threshold:
+                scored.append((ratio, c))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [{'ratio': r, **c} for r, c in scored[:limit]]
+
     async def get_weak_questions(self, uid: int, limit: int = 1):
         user = await self.get_user(uid)
         weak = user.get('weak_topics', []) if user else []
@@ -1244,6 +1272,10 @@ class DB:
     async def ticket_get_all(self, status: str = None):
         q = {'status': status} if status else {}
         return await self.tickets.find(q).sort('created_at', -1).to_list(100)
+
+    async def ticket_list_for_user(self, uid: int, limit: int = 10) -> list:
+        """⚠️ قابلیتِ جدید: تیکت‌های خودِ همین کاربر — برای get_my_tickets."""
+        return await self.tickets.find({'user_id': uid}).sort('created_at', -1).to_list(limit)
 
     async def ticket_get_user(self, uid: int):
         return await self.tickets.find({'user_id': uid}).sort('created_at', -1).to_list(20)
@@ -3027,6 +3059,39 @@ class DB:
             {'user_id': uid},
             {'$unset': {'ai_doc_uri': '', 'ai_doc_mime': '', 'ai_doc_name': '', 'ai_doc_at': ''}},
         )
+
+    # ══════════════════════════════════════════════════
+    #  ⚠️ قابلیتِ جدید: «پروفایلِ ماندگارِ فشرده» — به‌جای نگه‌داشتنِ کلِ
+    #  متنِ گفتگوها برای همیشه (که هم مشکلِ حریمِ خصوصی داره هم دیتابیس
+    #  رو پر می‌کنه)، فقط چند نکته‌ی مختصر و ماندگار که خودِ مدل تشخیص
+    #  می‌ده «ارزشِ به‌خاطرسپردن» رو داره، ذخیره می‌شه (حداکثر ۶ مورد،
+    #  با $slice همیشه فشرده می‌مونه). کاملاً جدا از حافظه‌ی مکالمه‌ی
+    #  ۶ساعته (ai_mem) — این یکی هیچ TTL ای نداره چون قراره ماندگار باشه.
+    # ══════════════════════════════════════════════════
+
+    async def ai_remember_fact(self, uid: int, fact: str, max_items: int = 6) -> None:
+        if not fact:
+            return
+        await self.users.update_one(
+            {'user_id': uid},
+            {'$push': {'ai_profile_notes': {'$each': [fact[:300]], '$slice': -max_items}}},
+        )
+
+    async def ai_get_profile_notes(self, uid: int) -> list:
+        user = await self.get_user(uid) or {}
+        return user.get('ai_profile_notes', []) or []
+
+    async def ai_forget_profile(self, uid: int) -> None:
+        await self.users.update_one({'user_id': uid}, {'$unset': {'ai_profile_notes': ''}})
+
+    async def faq_search_text(self, query_text: str, limit: int = 8) -> list:
+        """جستجوی آزادِ متنی توی FAQ — برای Function Callingِ هوشیار."""
+        if not query_text:
+            return []
+        rx = {'$regex': query_text, '$options': 'i'}
+        return await self.faq.find(
+            {'$or': [{'question': rx}, {'answer': rx}]}
+        ).limit(limit).to_list(limit)
 
 
 db = DB()
