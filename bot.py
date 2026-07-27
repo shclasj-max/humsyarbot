@@ -763,7 +763,7 @@ INTERRUPTIBLE_SIMPLE_MODES = {
     # سیستمیِ جدید ست می‌شد).
     'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
     'ai_reset_quota_search', 'ai_save_persona_name', 'ai_set_disabled_msg',
-    'ai_ban_search',
+    'ai_ban_search', 'ai_profile_search',
     # FIX جدید: طراحی سوال با هوشیار (AI) — همین موضوع برای مرحله‌ی
     # «نکته‌ی اختیاری» هم صادقه.
     'ai_question_note',
@@ -862,7 +862,7 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') in (
         'ai_set_key', 'ai_set_model', 'ai_set_limit', 'ai_set_prompt',
         'ai_reset_quota_search', 'ai_save_persona_name', 'ai_set_disabled_msg',
-        'ai_ban_search',
+        'ai_ban_search', 'ai_profile_search',
     ):
         return await ai_admin_text_handler(update, context)
 
