@@ -8,7 +8,7 @@ from database import db
 
 router = APIRouter()
 
-@router.get("/")
+@router.get("")
 async def get_dashboard(user=Depends(get_current_user)):
     uid = user["id"]; db_user = user["_db"]
     stats, exams, tickets = await asyncio.gather(
