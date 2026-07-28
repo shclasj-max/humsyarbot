@@ -1,6 +1,7 @@
 """📖 References"""
 from fastapi import APIRouter, Depends, HTTPException
 from api.auth import get_current_user
+from api.telegram_send import send_document_to_user
 from database import db
 
 router = APIRouter()
@@ -43,5 +44,9 @@ async def files(bid: str, user=Depends(get_current_user)):
 async def download(fid: str, user=Depends(get_current_user)):
     item = await db.ref_get_file(fid)
     if not item: raise HTTPException(404,"پیدا نشد")
+    file_id = item.get("file_id","")
+    sent = await send_document_to_user(user["id"], file_id, caption=item.get("name",""))
+    if not sent:
+        raise HTTPException(502, "ارسال فایل از طریق ربات ناموفق بود. لطفاً ابتدا یک پیام به ربات بفرستید یا دوباره تلاش کنید.")
     await db.ref_inc_download(fid, user["id"])
-    return {"file_id":item.get("file_id",""),"lang":item.get("lang","fa"),"volume":item.get("volume",1)}
+    return {"sent": True, "lang":item.get("lang","fa"),"volume":item.get("volume",1)}
