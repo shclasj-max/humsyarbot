@@ -3,7 +3,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-from api.auth import get_current_user
+from api.auth import get_current_user, ADMIN_ID
 from api.level import get_level
 from database import db
 
@@ -14,10 +14,11 @@ async def get_profile(user=Depends(get_current_user)):
     uid = user["id"]; db_user = user["_db"]
     stats, weekly, tickets = await __import__("asyncio").gather(
         db.user_stats(uid), db.weekly_activity(uid), db.ticket_get_user(uid))
+    role = "admin" if uid == ADMIN_ID else db_user.get("role","student")
     return {
         "user":{"name":db_user.get("name",""),"intake":db_user.get("intake",""),
             "group":db_user.get("group",""),"student_id":db_user.get("student_id",""),
-            "role":db_user.get("role","student"),"telegram_id":uid},
+            "role":role,"telegram_id":uid},
         "stats":{**stats,"level":get_level(stats["percentage"]),
             "weekly_chart":[{"date":d,"count":c} for d,c in weekly]},
         "tickets":{"open":sum(1 for t in tickets if t.get("status")=="open"),
