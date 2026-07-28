@@ -20,7 +20,7 @@ class ReportIn(BaseModel):
     target_type: str; target_id: str; reason: str
     note: Optional[str] = ""
 
-@router.post("/")
+@router.post("")
 async def create_report(body: ReportIn, user=Depends(get_current_user)):
     if body.target_type not in ("question","resource"): raise HTTPException(422)
     if body.reason not in {r["key"] for r in REASONS}: raise HTTPException(422)
