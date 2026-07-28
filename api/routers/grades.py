@@ -5,7 +5,7 @@ from database import db
 
 router = APIRouter()
 
-@router.get("/")
+@router.get("")
 async def get_grades(user=Depends(get_current_user)):
     grades = await db.grade_list_for_student(user["id"])
     result = []
