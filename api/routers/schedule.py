@@ -18,7 +18,7 @@ def _fmt(s):
         except Exception: doc["days_left"] = None
     return doc
 
-@router.get("/")
+@router.get("")
 async def get_schedule(user=Depends(get_current_user), stype: str=Query(None)):
     group = str(user["_db"].get("group",""))
     items = await db.get_schedules(stype=stype, upcoming=True, group=group)
