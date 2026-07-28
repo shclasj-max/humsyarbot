@@ -20,7 +20,7 @@ def _fmt(t, detail=False):
             "at":rep.get("at","")[:16]} for rep in replies]
     return r
 
-@router.get("/")
+@router.get("")
 async def list_tickets(user=Depends(get_current_user)):
     tickets = await db.ticket_get_user(user["id"])
     return {"tickets":[_fmt(t) for t in tickets],"subjects":SUBJECTS}
@@ -35,7 +35,7 @@ async def get_ticket(tid: int, user=Depends(get_current_user)):
 class NewTicket(BaseModel):
     subject: str; message: str
 
-@router.post("/")
+@router.post("")
 async def create_ticket(body: NewTicket, user=Depends(get_current_user)):
     uid = user["id"]; db_user = user["_db"]
     if len(body.message.strip()) < 10: raise HTTPException(422,"متن کوتاه است")
