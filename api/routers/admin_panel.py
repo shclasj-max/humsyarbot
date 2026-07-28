@@ -10,6 +10,13 @@ from database import db
 router = APIRouter()
 ADMIN_ID = int(os.getenv("ADMIN_ID","0"))
 
+
+def _notify(chat_id: int, text: str, ntype: str = "admin_notice"):
+    notif = db.client["medicalbot"]["bot_notifications"]
+    return notif.insert_one({"type":ntype,"chat_id":chat_id,"text":text,
+        "sent":False,"created_at":datetime.now().isoformat()})
+
+
 @router.get("/stats")
 async def stats(admin=Depends(get_admin_user)):
     return {
@@ -39,12 +46,19 @@ async def bot_status(admin=Depends(get_admin_user)):
     except Exception: pass
     return {"db_status":db_status,"db_ping":db_ping,"sys":sys_info}
 
+# ══════════════════════════════════════════════
+# 👥 کاربران
+# ══════════════════════════════════════════════
+
 @router.get("/users")
-async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(None)):
+async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(None),
+                      group: Optional[str]=Query(None), intake: Optional[str]=Query(None)):
     q={}
     if search:
         import re; pat=re.compile(re.escape(search),re.IGNORECASE)
-        q["$or"]=[{"name":pat},{"student_id":pat}]
+        q["$or"]=[{"name":pat},{"student_id":pat},{"username":pat}]
+    if group: q["group"]=group
+    if intake: q["intake"]=intake
     users = await db.users.find(q).sort("registered_at",-1).to_list(500)
     return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
@@ -57,17 +71,22 @@ async def pending_users(admin=Depends(get_admin_user)):
     return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"registered_at":u.get("registered_at","")[:10]} for u in users]}
 
+@router.get("/users/{uid}")
+async def user_detail(uid: int, admin=Depends(get_admin_user)):
+    u = await db.get_user(uid)
+    if not u: raise HTTPException(404, "کاربر پیدا نشد")
+    return {"user":{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
+        "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
+        "approved":u.get("approved",False),"suspended":u.get("suspended",False),
+        "registered_at":u.get("registered_at","")[:10],"total_answers":u.get("total_answers",0),
+        "correct_answers":u.get("correct_answers",0),"downloads":u.get("downloads",0)}}
+
 @router.post("/users/{uid}/approve")
 async def approve(uid: int, admin=Depends(get_admin_user)):
     user = await db.get_user(uid)
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"approved":True})
-    try:
-        notif = db.client["medicalbot"]["bot_notifications"]
-        await notif.insert_one({"type":"user_approved","chat_id":uid,
-            "text":"✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از همیار استفاده کنید.\n/start بزنید.",
-            "sent":False,"created_at":datetime.now().isoformat()})
-    except Exception: pass
+    _notify(uid, "✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از همیار استفاده کنید.\n/start بزنید.", "user_approved")
     return {"ok":True}
 
 @router.post("/users/{uid}/reject")
@@ -80,22 +99,149 @@ async def suspend(uid: int, admin=Depends(get_admin_user)):
     user = await db.get_user(uid)
     if not user: raise HTTPException(404)
     suspended = not user.get("suspended",False)
-    await db.update_user(uid,{"suspended":suspended})
+    await db.update_user(uid,{"suspended":suspended, "approved": not suspended})
+    if suspended:
+        _notify(uid, "⚠️ دسترسی شما موقتاً تعلیق شد.", "user_suspended")
     return {"ok":True,"suspended":suspended}
 
+@router.post("/users/{uid}/delete")
+async def delete_user_ep(uid: int, admin=Depends(get_admin_user)):
+    if uid == ADMIN_ID: raise HTTPException(403,"نمی‌توانید ادمین ارشد را حذف کنید")
+    user = await db.get_user(uid)
+    if not user: raise HTTPException(404)
+    _notify(uid, "❌ حساب شما حذف شد.", "user_deleted")
+    await db.delete_user(uid)
+    return {"ok":True}
+
+@router.post("/users/{uid}/block")
+async def block_user_ep(uid: int, admin=Depends(get_admin_user)):
+    if uid == ADMIN_ID: raise HTTPException(403,"نمی‌توانید ادمین ارشد را بلاک کنید")
+    user = await db.get_user(uid)
+    if not user: raise HTTPException(404)
+    actor_name = admin["_db"].get("name","مدیر ارشد")
+    await db.block_user(uid, blocked_by=admin["id"], blocked_by_name=actor_name)
+    _notify(uid, "🚫 حساب شما مسدود شد و امکان ثبت‌نام مجدد ندارید.", "user_blocked")
+    return {"ok":True}
+
+@router.post("/users/{uid}/unblock")
+async def unblock_user_ep(uid: int, admin=Depends(get_admin_user)):
+    ok = await db.unblock_user(uid)
+    if not ok: raise HTTPException(404,"این آیدی در بلک‌لیست نبود")
+    return {"ok":True}
+
+@router.get("/blacklist")
+async def blacklist(admin=Depends(get_admin_user)):
+    # ⚠️ نکته برای توسعه‌دهنده: نام تابع دقیق دیتابیس برای گرفتن لیست بلک‌لیست
+    # تأیید نشده (چون database.py در دسترس نبود). اگه این اندپوینت خطا داد،
+    # اسم تابع صحیح رو جایگزین کن.
+    items = []
+    if hasattr(db, "get_blacklist"):
+        items = await db.get_blacklist()
+    elif hasattr(db, "blacklist_list"):
+        items = await db.blacklist_list()
+    else:
+        try:
+            items = await db.client["medicalbot"]["blacklist"].find().to_list(1000)
+        except Exception:
+            items = []
+    return {"blacklist":[{"id":b.get("user_id") or b.get("_id"),"name":b.get("name",""),
+        "blocked_by_name":b.get("blocked_by_name",""),"blocked_at":str(b.get("blocked_at",""))[:10]} for b in items]}
+
+# ══════════════════════════════════════════════
+# 🎓 ادمین‌های محتوا
+# ══════════════════════════════════════════════
+
+@router.get("/content-admins")
+async def content_admins_list(admin=Depends(get_admin_user)):
+    admins = await db.get_content_admins()
+    return {"admins":[{"id":a.get("user_id"),"name":a.get("name","")} for a in admins]}
+
+@router.post("/content-admins/{uid}")
+async def grant_content_admin(uid: int, admin=Depends(get_admin_user)):
+    user = await db.get_user(uid)
+    if not user: raise HTTPException(404)
+    await db.update_user(uid,{"role":"content_admin"})
+    _notify(uid, "🎓 <b>دسترسی ادمین محتوا به شما داده شد!</b>", "content_admin_granted")
+    return {"ok":True}
+
+@router.delete("/content-admins/{uid}")
+async def revoke_content_admin(uid: int, admin=Depends(get_admin_user)):
+    await db.update_user(uid,{"role":"student"})
+    _notify(uid, "⚠️ دسترسی ادمین محتوای شما لغو شد.", "content_admin_revoked")
+    return {"ok":True}
+
+@router.get("/students")
+async def students_list(admin=Depends(get_admin_user), q: Optional[str]=Query(None)):
+    users = await db.all_users(approved_only=True)
+    students = [u for u in users if u.get("role","student")=="student"]
+    if q:
+        ql=q.lower()
+        students=[u for u in students if ql in u.get("name","").lower() or ql in u.get("student_id","").lower()]
+    return {"students":[{"id":u.get("user_id"),"name":u.get("name",""),"group":u.get("group","")} for u in students[:50]]}
+
+# ══════════════════════════════════════════════
+# ✏️ ویرایش کاربر
+# ══════════════════════════════════════════════
+
 class UserPatch(BaseModel):
-    group: Optional[str]=None; intake: Optional[str]=None; role: Optional[str]=None
+    name: Optional[str]=None; group: Optional[str]=None
+    intake: Optional[str]=None; student_id: Optional[str]=None
+    role: Optional[str]=None
 
 @router.patch("/users/{uid}")
 async def edit_user(uid: int, body: UserPatch, admin=Depends(get_admin_user)):
     updates={}
-    if body.group  is not None: updates["group"]=body.group
-    if body.intake is not None: updates["intake"]=body.intake
-    if body.role   is not None:
-        if body.role not in ("student","content_admin","support"): raise HTTPException(422)
+    if body.name       is not None: updates["name"]=body.name.strip()
+    if body.group      is not None: updates["group"]=body.group
+    if body.intake     is not None: updates["intake"]=body.intake
+    if body.student_id is not None: updates["student_id"]=body.student_id.strip()
+    if body.role       is not None:
+        if body.role not in ("student","content_admin","support"): raise HTTPException(422,"نقش نامعتبر")
         updates["role"]=body.role
     if updates: await db.update_user(uid,updates)
     return {"ok":True}
+
+# ══════════════════════════════════════════════
+# 📅 ورودی‌ها (Intakes)
+# ══════════════════════════════════════════════
+
+@router.get("/intakes")
+async def intakes_list(admin=Depends(get_admin_user)):
+    items = await db.get_all_intakes()
+    result=[]
+    for i in items:
+        st = await db.intake_stats(i.get("code",""))
+        result.append({"code":i.get("code",""),"label":i.get("label",""),
+            "active":i.get("active",True),"total":st.get("total",0),"groups":st.get("groups",{})})
+    return {"intakes":result}
+
+class IntakeCreate(BaseModel):
+    code: str; label: str
+
+@router.post("/intakes")
+async def add_intake_ep(body: IntakeCreate, admin=Depends(get_admin_user)):
+    code=body.code.strip(); label=body.label.strip()
+    if not code or not label: raise HTTPException(422,"کد و برچسب الزامی است")
+    # ⚠️ نام تابع افزودن ورودی تأیید نشده — اگه خطا داد، اسم صحیح را جایگزین کن.
+    if hasattr(db, "add_intake"):
+        await db.add_intake(code, label)
+    else:
+        raise HTTPException(500, "تابع add_intake در database.py پیدا نشد")
+    return {"ok":True}
+
+@router.post("/intakes/{code}/toggle")
+async def toggle_intake_ep(code: str, admin=Depends(get_admin_user)):
+    new_state = await db.toggle_intake(code)
+    return {"ok":True,"active":new_state}
+
+@router.delete("/intakes/{code}")
+async def delete_intake_ep(code: str, admin=Depends(get_admin_user)):
+    await db.delete_intake(code)
+    return {"ok":True}
+
+# ══════════════════════════════════════════════
+# 🎫 تیکت‌ها
+# ══════════════════════════════════════════════
 
 @router.get("/tickets")
 async def all_tickets(admin=Depends(get_admin_user), status: Optional[str]=Query(None)):
@@ -125,12 +271,7 @@ async def admin_reply(tid: int, body: AdminReply, admin=Depends(get_admin_user))
     msg=body.message.strip()
     if not msg: raise HTTPException(422)
     await db.ticket_add_reply(tid, msg)
-    try:
-        notif = db.client["medicalbot"]["bot_notifications"]
-        await notif.insert_one({"type":"ticket_admin_reply","chat_id":t["user_id"],
-            "text":f"💬 <b>پاسخ پشتیبانی #{tid}</b>\n{msg}",
-            "sent":False,"created_at":datetime.now().isoformat()})
-    except Exception: pass
+    _notify(t["user_id"], f"💬 <b>پاسخ پشتیبانی #{tid}</b>\n{msg}", "ticket_admin_reply")
     return {"ok":True}
 
 @router.post("/tickets/{tid}/close")
@@ -140,6 +281,10 @@ async def close_ticket(tid: int, admin=Depends(get_admin_user)):
 @router.post("/tickets/{tid}/reopen")
 async def reopen_ticket(tid: int, admin=Depends(get_admin_user)):
     await db.ticket_reopen(tid); return {"ok":True}
+
+# ══════════════════════════════════════════════
+# 📢 و 📥
+# ══════════════════════════════════════════════
 
 class BroadcastBody(BaseModel):
     text: str; target: str="all"
@@ -160,7 +305,5 @@ async def broadcast(body: BroadcastBody, admin=Depends(get_admin_user)):
 
 @router.post("/export/excel")
 async def export_excel(admin=Depends(get_admin_user)):
-    notif=db.client["medicalbot"]["bot_notifications"]
-    await notif.insert_one({"type":"excel_export_request","chat_id":ADMIN_ID,
-        "text":"__EXCEL_EXPORT__","sent":False,"created_at":datetime.now().isoformat()})
+    _notify(ADMIN_ID, "__EXCEL_EXPORT__", "excel_export_request")
     return {"ok":True,"message":"📊 فایل اکسل از طریق ربات ارسال می‌شود."}
