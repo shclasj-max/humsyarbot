@@ -11,7 +11,7 @@ DEFAULT_FAQS = [
     {"category":"⚙️ مشکلات فنی","question":"ربات جواب نمی‌ده؟","answer":"/start بزنید. اگر ادامه داشت تیکت بزنید."},
 ]
 
-@router.get("/")
+@router.get("")
 async def get_faq(user=Depends(get_current_user)):
     db_faqs = await db.faq_get_all()
     raw = [{"id":str(f["_id"]),"category":f.get("category","عمومی"),
