@@ -570,7 +570,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔒 <b>افزودن کانال اجباری</b>\n\n"
             "آیدی عددی کانال (با علامت منفی، مثل <code>-1001234567890</code>) "
             "و سپس نام کانال را با کاما جدا کنید:\n\n"
-            "📌 مثال:\n<code>-1001234567890, کانال اطلاع‌رسانی همیار</code>\n\n"
+            "📌 مثال:\n<code>-1001234567890, کانال اطلاع‌رسانی هامزیار</code>\n\n"
             "<i>⚠️ ربات باید ادمین آن کانال باشد تا بتواند عضویت را چک کند.</i>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[
