@@ -1,4 +1,4 @@
-"""🏥 همیار Mini App — FastAPI Backend v2.0"""
+"""🏥 هامزیار Mini App — FastAPI Backend v2.0"""
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
