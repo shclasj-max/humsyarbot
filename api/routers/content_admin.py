@@ -61,20 +61,24 @@ async def schedule_list(admin=Depends(get_content_admin_user), stype: Optional[s
     items=await db.get_schedules(stype=stype, upcoming=False)
     return {"schedule":[{"id":str(s["_id"]),"type":s.get("type",""),"lesson":s.get("lesson",""),
         "teacher":s.get("teacher",""),"date":s.get("date",""),"time":s.get("time",""),
-        "group":s.get("group",""),"note":s.get("note","")} for s in items]}
+        "location":s.get("location",""),"group":s.get("group","هر دو"),"note":s.get("notes",""),
+        "flex_type":s.get("flex_type","fixed"),"flex_note":s.get("flex_note","")} for s in items]}
 
 class ScheduleCreate(BaseModel):
-    type: str; lesson: str; teacher: str=""; date: str; time: str=""; group: str="0"; note: str=""
+    type: str; lesson: str; teacher: str=""; date: str; time: str=""; group: str="هر دو"
+    location: str=""; note: str=""; flex_type: str="fixed"
 
 @router.post("/schedule")
 async def add_schedule(body: ScheduleCreate, admin=Depends(get_content_admin_user)):
     if body.type not in ("class","exam","makeup"): raise HTTPException(422)
+    if body.flex_type not in ("fixed","flexible"): raise HTTPException(422,"نوع زمان‌بندی نامعتبر")
     try: datetime.strptime(body.date,"%Y-%m-%d")
     except ValueError: raise HTTPException(422,"فرمت تاریخ YYYY-MM-DD")
     await db.add_schedule(stype=body.type,lesson=body.lesson,teacher=body.teacher,
-        date=body.date,time=body.time,location="",notes=body.note)
+        date=body.date,time=body.time,location=body.location,notes=body.note,
+        group=body.group,flex_type=body.flex_type)
     try:
-        users=await db.notif_users("schedule")
+        users=await db.notif_users("schedule", group=body.group)
         notif=db.client["medicalbot"]["bot_notifications"]
         icon={"class":"🏫","exam":"📝","makeup":"🔄"}.get(body.type,"📅")
         type_fa={"class":"کلاس","exam":"امتحان","makeup":"جبرانی"}.get(body.type,"")
@@ -85,11 +89,58 @@ async def add_schedule(body: ScheduleCreate, admin=Depends(get_content_admin_use
     except Exception: pass
     return {"ok":True}
 
+class ScheduleUpdate(BaseModel):
+    lesson: str; teacher: str=""; date: str; time: str=""; group: str="هر دو"
+    location: str=""; note: str=""; flex_type: str="fixed"
+
+@router.patch("/schedule/{sid}")
+async def edit_schedule(sid: str, body: ScheduleUpdate, admin=Depends(get_content_admin_user)):
+    try: datetime.strptime(body.date,"%Y-%m-%d")
+    except ValueError: raise HTTPException(422,"فرمت تاریخ YYYY-MM-DD")
+    ok = await db.update_schedule_full(sid, body.lesson, body.teacher, body.date, body.time,
+        body.location, body.note, body.group, body.flex_type)
+    if not ok: raise HTTPException(404)
+    return {"ok":True}
+
 @router.delete("/schedule/{sid}")
 async def del_schedule(sid: str, admin=Depends(get_content_admin_user)):
     try: await db.delete_schedule(sid)
     except Exception: raise HTTPException(404)
     return {"ok":True}
+
+# ── 🔄 اعلام تغییر زمان کلاس منعطف (flex) ──
+
+@router.get("/schedule/flex")
+async def flex_list(admin=Depends(get_content_admin_user)):
+    items = await db.get_schedules(upcoming=True)
+    flex = [s for s in items if s.get("flex_type")=="flexible"]
+    return {"items":[{"id":str(s["_id"]),"lesson":s.get("lesson",""),"teacher":s.get("teacher",""),
+        "date":s.get("date",""),"time":s.get("time",""),"flex_note":s.get("flex_note","")} for s in flex]}
+
+class FlexChange(BaseModel):
+    date: str; time: str; note: str=""
+
+@router.post("/schedule/{sid}/flex-change")
+async def flex_change(sid: str, body: FlexChange, admin=Depends(get_content_admin_user)):
+    try: datetime.strptime(body.date,"%Y-%m-%d")
+    except ValueError: raise HTTPException(422,"فرمت تاریخ YYYY-MM-DD")
+    sched = await db.get_schedule_by_id(sid)
+    if not sched: raise HTTPException(404)
+    ok = await db.update_schedule_time(sid, body.date, body.time, body.note)
+    if not ok: raise HTTPException(500)
+    try:
+        users=await db.notif_users("schedule", group=sched.get("group","هر دو"))
+        notif=db.client["medicalbot"]["bot_notifications"]
+        text=(f"🔄 <b>تغییر زمان کلاس</b>\n\n📚 {sched.get('lesson','')}\n"
+              f"👨‍🏫 {sched.get('teacher','')}\n\n📅 <b>زمان جدید:</b> {body.date}  ⏰ {body.time}\n"
+              f"📍 {sched.get('location','')}" + (f"\n\n📝 {body.note}" if body.note else ""))
+        docs=[{"type":"schedule_flex_change","chat_id":u["user_id"],"text":text,
+            "sent":False,"created_at":datetime.now().isoformat()} for u in users]
+        if docs: await notif.insert_many(docs)
+        sent_count = len(docs)
+    except Exception:
+        sent_count = 0
+    return {"ok":True, "notified": sent_count}
 
 @router.get("/faq")
 async def faq_list(admin=Depends(get_content_admin_user)):
@@ -111,13 +162,64 @@ async def del_faq(fid: str, admin=Depends(get_content_admin_user)):
     return {"ok":True}
 
 class GradeBulk(BaseModel):
-    entries: List[dict]; lesson: str; exam_title: str; exam_date: str; max_score: float=20.0
+    entries: List[dict]; lesson: str; exam_title: str; exam_date: str
 
 @router.post("/grades/bulk")
 async def bulk_grades(body: GradeBulk, admin=Depends(get_content_admin_user)):
-    count=await db.grade_bulk_upsert(entries=body.entries,lesson=body.lesson,
-        exam_title=body.exam_title,exam_date=body.exam_date,max_score=body.max_score)
-    return {"ok":True,"updated":count}
+    saved = await db.grade_bulk_upsert(entries=body.entries, lesson=body.lesson,
+        exam_title=body.exam_title, exam_date=body.exam_date, entered_by=admin["id"])
+    try:
+        notif = db.client["medicalbot"]["bot_notifications"]
+        docs = [{"type":"grade_notif","chat_id":e["student_id"],
+            "text":f"📊 <b>نمره‌ی جدید ثبت شد</b>\n📚 {body.lesson} — {body.exam_title}\n🎯 نمره: {e['score']}",
+            "sent":False,"created_at":datetime.now().isoformat()} for e in saved]
+        if docs: await notif.insert_many(docs)
+    except Exception: pass
+    return {"ok":True,"updated":len(saved)}
+
+@router.get("/grades/recent")
+async def grades_recent(admin=Depends(get_content_admin_user), skip: int=Query(0), limit: int=Query(30),
+                         intake: Optional[str]=Query(None)):
+    items = await db.grade_list_recent(skip=skip, limit=limit, intake=intake)
+    total = await db.grade_count_recent(intake=intake)
+    # اسم دانشجوها رو batch می‌گیریم تا برای هر نمره کوئری جدا نزنیم
+    uids = list({g.get("student_id") for g in items if g.get("student_id")})
+    names = {}
+    for uid in uids:
+        u = await db.get_user(uid)
+        names[uid] = u.get("name","") if u else f"#{uid}"
+    return {"total": total, "grades":[{"id":str(g["_id"]),"student_id":g.get("student_id"),
+        "student_name":names.get(g.get("student_id"),""),"lesson":g.get("lesson",""),
+        "exam_title":g.get("exam_title",""),"exam_date":g.get("exam_date",""),
+        "score":g.get("score",0)} for g in items]}
+
+@router.get("/grades/find-student")
+async def grades_find_student(name: str = Query(...), admin=Depends(get_content_admin_user)):
+    students = await db.find_students_by_name(name)
+    return {"students":[{"id":s.get("user_id"),"name":s.get("name",""),"group":s.get("group","")} for s in students]}
+
+class GradeUpdate(BaseModel):
+    score: float
+
+@router.patch("/grades/{gid}")
+async def edit_grade(gid: str, body: GradeUpdate, admin=Depends(get_content_admin_user)):
+    from bson import ObjectId
+    try:
+        r = await db.grades.update_one({"_id":ObjectId(gid)}, {"$set":{"score":body.score}})
+    except Exception:
+        raise HTTPException(422,"شناسه نامعتبر")
+    if r.matched_count == 0: raise HTTPException(404)
+    return {"ok":True}
+
+@router.delete("/grades/{gid}")
+async def del_grade(gid: str, admin=Depends(get_content_admin_user)):
+    from bson import ObjectId
+    try:
+        r = await db.grades.delete_one({"_id":ObjectId(gid)})
+    except Exception:
+        raise HTTPException(422,"شناسه نامعتبر")
+    if r.deleted_count == 0: raise HTTPException(404)
+    return {"ok":True}
 
 # ══════════════════════════════════════════════
 # 🧬 علوم پایه — ترم‌ها / درس‌ها / جلسات / محتوا
