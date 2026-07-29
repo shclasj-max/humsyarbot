@@ -18,6 +18,30 @@ CONTENT_ICONS = {
 }
 
 
+async def upload_and_get_file_id(chat_id: int, filename: str, file_bytes: bytes,
+                                  mime_type: str = "application/octet-stream") -> str | None:
+    """
+    آپلود فایل خام (که از مرورگر اومده) به تلگرام تا یه file_id قابل‌استفاده
+    برگرده — چون تلگرام فقط فایلی که از طریق خود ربات فرستاده بشه رو
+    file_id میده؛ آپلود مستقیم HTTP از مرورگر همچین چیزی تولید نمی‌کنه.
+    فایل به‌صورت بی‌صدا برای خود ادمینی که آپلود کرده فرستاده می‌شه.
+    """
+    if not BOT_TOKEN:
+        return None
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{API_BASE}/sendDocument",
+            data={"chat_id": chat_id, "disable_notification": True},
+            files={"document": (filename, file_bytes, mime_type)},
+        )
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+    if not data.get("ok"):
+        return None
+    return data["result"]["document"]["file_id"]
+
+
 async def _send(method: str, payload: dict) -> bool:
     if not BOT_TOKEN:
         return False
