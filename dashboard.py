@@ -6,28 +6,30 @@
 import os
 import asyncio
 import logging
-from datetime import datetime
+from datetime import date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db
-from utils import progress_bar, get_rank, exam_countdown, fmt_jalali
+from utils import progress_bar, get_rank, exam_countdown, now_tehran
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
 
 async def build_dashboard_text(uid: int) -> tuple:
-    user, stats, exams, new_res, donation_enabled, donation_link = await asyncio.gather(
-        db.get_user(uid),
+    # The user's group is needed before loading exams so students never see
+    # another group's schedule. Other independent queries still run in parallel.
+    user = await db.get_user(uid)
+    if not user:
+        return "❌ کاربر پیدا نشد.", None
+
+    stats, exams, new_res, donation_enabled, donation_link = await asyncio.gather(
         db.user_stats(uid),
-        db.upcoming_exams(7),
+        db.upcoming_exams(7, group=str(user.get('group', '') or '')),
         db.new_resources_count(7),
         db.get_setting('donation_enabled', False),
         db.get_setting('donation_link', None),
     )
-
-    if not user:
-        return "❌ کاربر پیدا نشد.", None
 
     open_tickets = 0
     try:
@@ -37,15 +39,15 @@ async def build_dashboard_text(uid: int) -> tuple:
         pass
 
     exam_lines = []
-    for e in exams[:2]:
+    today = now_tehran().date()
+    for e in (exams or [])[:2]:
         try:
-            d = datetime.strptime(e['date'], '%Y-%m-%d')
-            days = max(0, (
-                d.replace(hour=0, minute=0, second=0, microsecond=0)
-                - datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            ).days)
-            exam_lines.append(f"  📝 {e['lesson']} — {exam_countdown(days)}")
-        except Exception:
+            exam_date = date.fromisoformat(str(e.get('date', '')))
+            days = max(0, (exam_date - today).days)
+            exam_lines.append(
+                f"  📝 {e.get('lesson', '')} — {exam_countdown(days)}"
+            )
+        except (TypeError, ValueError):
             exam_lines.append(f"  📝 {e.get('lesson', '')}")
     exam_text = '\n'.join(exam_lines) if exam_lines else "  ✅ امتحانی نزدیک نیست"
 

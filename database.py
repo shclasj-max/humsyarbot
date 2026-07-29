@@ -1173,7 +1173,13 @@ class DB:
         if stype:    q['type'] = stype
         if upcoming: q['date'] = {'$gte': now_tehran().strftime('%Y-%m-%d')}
         if group:
-            q['$or'] = [{'group': group}, {'group': 'هر دو'}, {'group': {'$exists': False}}]
+            q['$or'] = [
+                {'group': group},
+                {'group': 'هر دو'},
+                {'group': ''},
+                {'group': None},
+                {'group': {'$exists': False}},
+            ]
         return await self.schedules.find(q).sort('date', 1).to_list(200)
 
     async def delete_schedule(self, sid: str):
@@ -1181,13 +1187,30 @@ class DB:
             await self.schedules.delete_one({'_id': ObjectId(sid)})
         except Exception: pass
 
-    async def upcoming_exams(self, days: int = 7):
+    async def upcoming_exams(self, days: int = 7, group: str = None):
+        """Return near exams, optionally limited to a student's group.
+
+        Empty/missing and ``هر دو`` group values are shared schedule entries and
+        must remain visible to every student. ``group`` is optional so existing
+        bot/admin callers keep their previous all-groups behaviour.
+        """
         from utils import now_tehran
-        today  = now_tehran().strftime('%Y-%m-%d')
-        future = (now_tehran() + timedelta(days=days)).strftime('%Y-%m-%d')
-        return await self.schedules.find({
-            'type': 'exam', 'date': {'$gte': today, '$lte': future},
-        }).sort('date', 1).to_list(20)
+        today = now_tehran().strftime('%Y-%m-%d')
+        future = (now_tehran() + timedelta(days=max(0, days))).strftime('%Y-%m-%d')
+        query = {
+            'type': 'exam',
+            'date': {'$gte': today, '$lte': future},
+        }
+        normalized_group = str(group or '').strip()
+        if normalized_group:
+            query['$or'] = [
+                {'group': normalized_group},
+                {'group': 'هر دو'},
+                {'group': ''},
+                {'group': None},
+                {'group': {'$exists': False}},
+            ]
+        return await self.schedules.find(query).sort('date', 1).to_list(20)
 
     async def get_exams_for_reminder(self, remind_days: int):
         target = (datetime.now() + timedelta(days=remind_days)).strftime('%Y-%m-%d')

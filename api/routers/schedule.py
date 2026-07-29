@@ -1,30 +1,72 @@
-"""📅 Schedule"""
-from datetime import datetime
+"""Class and exam schedule endpoints."""
+from datetime import date
+from typing import Any, Mapping
+
 from fastapi import APIRouter, Depends, Query
+
 from api.auth import get_current_user
 from database import db
+from utils import now_tehran
 
 router = APIRouter()
 
-def _fmt(s):
-    if not s: return None
-    doc = {"id":str(s["_id"]),"type":s.get("type",""),"lesson":s.get("lesson",""),
-        "teacher":s.get("teacher",""),"date":s.get("date",""),"time":s.get("time",""),
-        "note":s.get("note",""),"group":s.get("group","")}
-    if s.get("type")=="exam" and s.get("date"):
+
+def _text(value: Any) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _format_schedule(item: Mapping[str, Any] | None) -> dict | None:
+    if not isinstance(item, Mapping):
+        return None
+
+    document = {
+        "id": _text(item.get("_id")),
+        "type": _text(item.get("type")),
+        "lesson": _text(item.get("lesson")),
+        "teacher": _text(item.get("teacher")),
+        "date": _text(item.get("date")),
+        "time": _text(item.get("time")),
+        "note": _text(item.get("note")),
+        "group": _text(item.get("group")),
+    }
+    if document["type"] == "exam" and document["date"]:
         try:
-            d = datetime.strptime(s["date"],"%Y-%m-%d")
-            doc["days_left"] = max(0,(d.date()-datetime.now().date()).days)
-        except Exception: doc["days_left"] = None
-    return doc
+            exam_date = date.fromisoformat(document["date"])
+            document["days_left"] = max(
+                0, (exam_date - now_tehran().date()).days
+            )
+        except (TypeError, ValueError):
+            document["days_left"] = None
+    return document
+
 
 @router.get("")
-async def get_schedule(user=Depends(get_current_user), stype: str=Query(None)):
-    group = str(user["_db"].get("group",""))
+async def get_schedule(
+    user=Depends(get_current_user), stype: str | None = Query(default=None)
+):
+    group = _text(user["_db"].get("group"))
     items = await db.get_schedules(stype=stype, upcoming=True, group=group)
-    return {"schedule": [_fmt(s) for s in items], "group": group}
+    return {
+        "schedule": [
+            formatted
+            for item in (items if isinstance(items, list) else [])
+            if (formatted := _format_schedule(item)) is not None
+        ],
+        "group": group,
+    }
+
 
 @router.get("/exams")
-async def get_exams(user=Depends(get_current_user), days: int=Query(30)):
-    exams = await db.upcoming_exams(days)
-    return {"exams": [_fmt(e) for e in exams]}
+async def get_exams(
+    user=Depends(get_current_user),
+    days: int = Query(default=30, ge=1, le=365),
+):
+    group = _text(user["_db"].get("group"))
+    exams = await db.upcoming_exams(days, group=group)
+    return {
+        "exams": [
+            formatted
+            for exam in (exams if isinstance(exams, list) else [])
+            if (formatted := _format_schedule(exam)) is not None
+        ]
+    }
