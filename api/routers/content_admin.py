@@ -195,8 +195,15 @@ async def grades_recent(admin=Depends(get_content_admin_user), skip: int=Query(0
 
 @router.get("/grades/find-student")
 async def grades_find_student(name: str = Query(...), admin=Depends(get_content_admin_user)):
-    students = await db.find_students_by_name(name)
-    return {"students":[{"id":s.get("user_id"),"name":s.get("name",""),"group":s.get("group","")} for s in students]}
+    # FIX جدید: به‌جای تطبیق دقیق نام (find_students_by_name که با کوچیک‌ترین
+    # اختلاف تایپی یا سرچ جزئی هیچی برنمی‌گردوند)، حالا از search_users
+    # استفاده می‌شه — همون تابع جامعی که توی خود ربات (پنل ادمین، جست‌وجوی
+    # اشتراک، AI ادمین) استفاده می‌شه: نام (جزئی)، شماره دانشجویی (جزئی)،
+    # یوزرنیم تلگرام با/بدون @ (جزئی)، آیدی عددی تلگرام (دقیق) — همه با یک کوئری.
+    results = await db.search_users(name)
+    students = [s for s in results if s.get("approved")]
+    return {"students":[{"id":s.get("user_id"),"name":s.get("name",""),
+        "student_id":s.get("student_id",""),"group":s.get("group","")} for s in students]}
 
 class GradeUpdate(BaseModel):
     score: float
