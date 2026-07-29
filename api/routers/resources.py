@@ -1,7 +1,7 @@
 """📚 Resources"""
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api.auth import get_current_user
-from api.telegram_send import send_document_to_user
+from api.telegram_send import send_bs_content
 from database import db
 
 router = APIRouter()
@@ -45,11 +45,11 @@ async def files(session_id: str, user=Depends(get_current_user)):
 async def download(cid: str, user=Depends(get_current_user)):
     item = await db.bs_get_content_item(cid)
     if not item: raise HTTPException(404,"فایل پیدا نشد")
-    file_id = item.get("file_id","")
-    sent = await send_document_to_user(user["id"], file_id, caption=item.get("name",""))
+    await db.bs_inc_download(cid, user["id"])
+    item = await db.bs_get_content_item(cid)  # برای گرفتن شمارنده‌ی به‌روز، مثل خود ربات
+    sent = await send_bs_content(user["id"], cid, item)
     if not sent:
         raise HTTPException(502, "ارسال فایل از طریق ربات ناموفق بود. لطفاً ابتدا یک پیام به ربات بفرستید یا دوباره تلاش کنید.")
-    await db.bs_inc_download(cid, user["id"])
     return {"sent": True, "type":item.get("type",""),"name":item.get("name","")}
 
 @router.get("/search")
