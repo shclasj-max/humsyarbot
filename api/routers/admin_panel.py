@@ -86,7 +86,7 @@ async def approve(uid: int, admin=Depends(get_admin_user)):
     user = await db.get_user(uid)
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"approved":True})
-    _notify(uid, "✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از همیار استفاده کنید.\n/start بزنید.", "user_approved")
+    _notify(uid, "✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از هامزیار استفاده کنید.\n/start بزنید.", "user_approved")
     return {"ok":True}
 
 @router.post("/users/{uid}/reject")
