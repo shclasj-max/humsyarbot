@@ -29,6 +29,7 @@ from api.routers import (
     ai,
     global_search,
     subscription_management,
+    ai_management,
     admin_panel,
     content_admin,
     academic_admin,
@@ -152,6 +153,11 @@ app.include_router(
 app.include_router(
     subscription_management.router,
     prefix="/api/subscription-admin",
+)
+
+app.include_router(
+    ai_management.router,
+    prefix="/api/ai-admin",
 )
 
 app.include_router(
