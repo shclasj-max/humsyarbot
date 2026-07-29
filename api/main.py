@@ -3,9 +3,7 @@
 import asyncio
 import os
 
-from contextlib import (
-    asynccontextmanager,
-)
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -28,6 +26,7 @@ from api.routers import (
     reports,
     grades,
     subscription,
+    ai,
     admin_panel,
     content_admin,
     academic_admin,
@@ -40,7 +39,6 @@ async def lifespan(
 ):
     await asyncio.gather(
         db.ensure_indexes(),
-
         questions.ensure_indexes(),
     )
 
@@ -51,9 +49,7 @@ async def lifespan(
 
 app = FastAPI(
     title="Humsyar API",
-
     version="2.0.0",
-
     lifespan=lifespan,
 )
 
@@ -86,84 +82,75 @@ app.include_router(
     prefix="/api/dashboard",
 )
 
-
 app.include_router(
     questions.router,
     prefix="/api/questions",
 )
-
 
 app.include_router(
     schedule.router,
     prefix="/api/schedule",
 )
 
-
 app.include_router(
     resources.router,
     prefix="/api/resources",
 )
-
 
 app.include_router(
     profile.router,
     prefix="/api/profile",
 )
 
-
 app.include_router(
     notifications.router,
     prefix="/api/notifications",
 )
-
 
 app.include_router(
     references.router,
     prefix="/api/references",
 )
 
-
 app.include_router(
     faq.router,
     prefix="/api/faq",
 )
-
 
 app.include_router(
     tickets.router,
     prefix="/api/tickets",
 )
 
-
 app.include_router(
     reports.router,
     prefix="/api/reports",
 )
-
 
 app.include_router(
     grades.router,
     prefix="/api/grades",
 )
 
-
 app.include_router(
     subscription.router,
     prefix="/api/subscription",
 )
 
+app.include_router(
+    ai.router,
+    prefix="/api/ai",
+)
 
 app.include_router(
     content_admin.router,
     prefix="/api/content",
 )
 
-
 app.include_router(
     academic_admin.router,
     prefix="/api/academic-admin",
 )
-
 
 app.include_router(
     admin_panel.router,
