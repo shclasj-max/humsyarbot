@@ -120,6 +120,7 @@ async def block_user_ep(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     actor_name = admin["_db"].get("name","مدیر ارشد")
     await db.block_user(uid, blocked_by=admin["id"], blocked_by_name=actor_name)
+    await db.blacklist.update_one({"_id":uid},{"$set":{"name":user.get("name","")}})
     _notify(uid, "🚫 حساب شما مسدود شد و امکان ثبت‌نام مجدد ندارید.", "user_blocked")
     return {"ok":True}
 
@@ -131,20 +132,8 @@ async def unblock_user_ep(uid: int, admin=Depends(get_admin_user)):
 
 @router.get("/blacklist")
 async def blacklist(admin=Depends(get_admin_user)):
-    # ⚠️ نکته برای توسعه‌دهنده: نام تابع دقیق دیتابیس برای گرفتن لیست بلک‌لیست
-    # تأیید نشده (چون database.py در دسترس نبود). اگه این اندپوینت خطا داد،
-    # اسم تابع صحیح رو جایگزین کن.
-    items = []
-    if hasattr(db, "get_blacklist"):
-        items = await db.get_blacklist()
-    elif hasattr(db, "blacklist_list"):
-        items = await db.blacklist_list()
-    else:
-        try:
-            items = await db.client["medicalbot"]["blacklist"].find().to_list(1000)
-        except Exception:
-            items = []
-    return {"blacklist":[{"id":b.get("user_id") or b.get("_id"),"name":b.get("name",""),
+    items = await db.get_blacklist()
+    return {"blacklist":[{"id":b.get("_id"),"name":b.get("name",""),
         "blocked_by_name":b.get("blocked_by_name",""),"blocked_at":str(b.get("blocked_at",""))[:10]} for b in items]}
 
 # ══════════════════════════════════════════════
@@ -222,11 +211,7 @@ class IntakeCreate(BaseModel):
 async def add_intake_ep(body: IntakeCreate, admin=Depends(get_admin_user)):
     code=body.code.strip(); label=body.label.strip()
     if not code or not label: raise HTTPException(422,"کد و برچسب الزامی است")
-    # ⚠️ نام تابع افزودن ورودی تأیید نشده — اگه خطا داد، اسم صحیح را جایگزین کن.
-    if hasattr(db, "add_intake"):
-        await db.add_intake(code, label)
-    else:
-        raise HTTPException(500, "تابع add_intake در database.py پیدا نشد")
+    await db.add_intake(code, label)
     return {"ok":True}
 
 @router.post("/intakes/{code}/toggle")
