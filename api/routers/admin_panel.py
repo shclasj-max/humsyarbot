@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from api.auth import get_admin_user
 from database import db
 
@@ -268,25 +268,137 @@ async def reopen_ticket(tid: int, admin=Depends(get_admin_user)):
     await db.ticket_reopen(tid); return {"ok":True}
 
 # ══════════════════════════════════════════════
-# 📢 و 📥
+# 📢 Broadcast پیشرفته — preview / تأیید / زمان‌دار / هدفمند
 # ══════════════════════════════════════════════
 
-class BroadcastBody(BaseModel):
-    text: str; target: str="all"
+class BroadcastTarget(BaseModel):
+    scope: str = "all"                    # all | intake | intake_group
+    intake: Optional[str] = None
+    group: Optional[str] = None           # "1" | "2"
+
+async def _resolve_broadcast_users(target: BroadcastTarget):
+    users = await db.all_users(approved_only=True)
+    if target.scope == "intake" and target.intake:
+        users = [u for u in users if u.get("intake") == target.intake]
+    elif target.scope == "intake_group" and target.intake and target.group:
+        users = [u for u in users if u.get("intake") == target.intake and u.get("group") == target.group]
+    return [u for u in users if u.get("user_id") != ADMIN_ID]
+
+class BroadcastPreview(BaseModel):
+    target: BroadcastTarget
+
+@router.post("/broadcast/preview")
+async def broadcast_preview(body: BroadcastPreview, admin=Depends(get_admin_user)):
+    users = await _resolve_broadcast_users(body.target)
+    return {"recipient_count": len(users)}
+
+class BroadcastSend(BaseModel):
+    text: str
+    target: BroadcastTarget
+    send_at: Optional[str] = None   # ISO datetime — اگه خالی باشه فوری ارسال می‌شه
 
 @router.post("/broadcast")
-async def broadcast(body: BroadcastBody, admin=Depends(get_admin_user)):
-    text=body.text.strip()
-    if len(text)<5: raise HTTPException(422)
-    q={"approved":True}
-    if body.target=="group_1": q["group"]="1"
-    elif body.target=="group_2": q["group"]="2"
-    users=await db.users.find(q).to_list(5000)
-    notif=db.client["medicalbot"]["bot_notifications"]
-    docs=[{"type":"broadcast","chat_id":u["user_id"],"text":text,"sent":False,
-        "created_at":datetime.now().isoformat()} for u in users if u.get("user_id")!=ADMIN_ID]
+async def broadcast(body: BroadcastSend, admin=Depends(get_admin_user)):
+    text = body.text.strip()
+    if len(text) < 5: raise HTTPException(422, "متن پیام خیلی کوتاهه")
+    if body.send_at:
+        try: datetime.fromisoformat(body.send_at)
+        except ValueError: raise HTTPException(422, "فرمت زمان نامعتبر است")
+    users = await _resolve_broadcast_users(body.target)
+    notif = db.client["medicalbot"]["bot_notifications"]
+    doc_base = {"type":"broadcast","text":text,"sent":False,"created_at":datetime.now().isoformat()}
+    if body.send_at: doc_base["send_at"] = body.send_at
+    docs = [{**doc_base, "chat_id": u["user_id"]} for u in users]
     if docs: await notif.insert_many(docs)
-    return {"ok":True,"queued":len(docs)}
+    return {"ok":True, "queued": len(docs), "scheduled": bool(body.send_at)}
+
+@router.get("/broadcast/history")
+async def broadcast_history(admin=Depends(get_admin_user), limit: int=Query(20)):
+    notif = db.client["medicalbot"]["bot_notifications"]
+    pipeline = [
+        {"$match": {"type": "broadcast"}},
+        {"$group": {"_id": {"text":"$text","created_at":"$created_at"},
+            "total": {"$sum": 1}, "sent": {"$sum": {"$cond": ["$sent", 1, 0]}},
+            "failed": {"$sum": {"$cond": [{"$eq": ["$failed", True]}, 1, 0]}}}},
+        {"$sort": {"_id.created_at": -1}}, {"$limit": limit},
+    ]
+    rows = await notif.aggregate(pipeline).to_list(limit)
+    return {"history":[{"text":r["_id"]["text"][:80],"created_at":r["_id"]["created_at"],
+        "total":r["total"],"sent":r["sent"],"failed":r["failed"]} for r in rows]}
+
+# ══════════════════════════════════════════════
+# 📊 نظرسنجی کانال
+# ══════════════════════════════════════════════
+
+@router.get("/poll/status")
+async def poll_status(admin=Depends(get_admin_user)):
+    channel_id = await db.get_setting("poll_channel_id", None)
+    return {"channel_id": channel_id, "configured": bool(channel_id)}
+
+class PollChannelSet(BaseModel):
+    channel_id: str
+
+@router.post("/poll/channel")
+async def poll_channel_set(body: PollChannelSet, admin=Depends(get_admin_user)):
+    await db.set_setting("poll_channel_id", body.channel_id.strip())
+    return {"ok":True}
+
+class PollCreate(BaseModel):
+    question: str; options: List[str]; anonymous: bool = False
+
+@router.post("/poll")
+async def poll_create(body: PollCreate, admin=Depends(get_admin_user)):
+    if len(body.options) < 2: raise HTTPException(422, "حداقل ۲ گزینه لازم است")
+    channel_id = await db.get_setting("poll_channel_id", None)
+    if not channel_id: raise HTTPException(400, "کانال نظرسنجی تنظیم نشده — اول از بخش تنظیمات کانال رو وارد کن")
+    from api.telegram_send import BOT_TOKEN, API_BASE
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(f"{API_BASE}/sendPoll", json={
+            "chat_id": channel_id, "question": body.question, "options": body.options,
+            "is_anonymous": body.anonymous, "allows_multiple_answers": False,
+        })
+    data = resp.json()
+    if not data.get("ok"):
+        raise HTTPException(502, f"ارسال ناموفق — مطمئن شو ربات ادمین کانال هست ({data.get('description','')})")
+    return {"ok":True}
+
+# ══════════════════════════════════════════════
+# 🔔 مدیریت اعلان‌ها — فاصله زمانی / تاریخچه / retry
+# ══════════════════════════════════════════════
+
+@router.get("/notifications/settings")
+async def notif_settings(admin=Depends(get_admin_user)):
+    interval = await db.get_setting("resource_notif_interval_hours", 24)
+    last_sent = await db.get_setting("resource_notif_last_sent", None)
+    last_error = await db.get_setting("resource_notif_last_error", None)
+    return {"interval_hours": interval, "last_sent": last_sent, "last_error": last_error}
+
+class NotifSettingsUpdate(BaseModel):
+    interval_hours: int
+
+@router.post("/notifications/settings")
+async def notif_settings_update(body: NotifSettingsUpdate, admin=Depends(get_admin_user)):
+    if body.interval_hours not in (24, 48, 72): raise HTTPException(422, "مقدار مجاز: ۲۴، ۴۸ یا ۷۲")
+    await db.set_setting("resource_notif_interval_hours", body.interval_hours)
+    return {"ok":True}
+
+@router.get("/notifications/history")
+async def notif_history(admin=Depends(get_admin_user), job_name: Optional[str]=Query(None), limit: int=Query(15)):
+    runs = await db.get_recent_notif_runs(job_name=job_name, limit=limit)
+    return {"runs":[{"id":str(r["_id"]),"job_name":r.get("job_name",""),"status":r.get("status",""),
+        "sent":r.get("sent",0),"failed":r.get("failed",0),"total":r.get("total",0),
+        "started_at":r.get("started_at",""),"finished_at":r.get("finished_at")} for r in runs]}
+
+@router.post("/notifications/history/{run_id}/retry")
+async def notif_retry(run_id: str, admin=Depends(get_admin_user)):
+    targets = await db.get_failed_notif_details(run_id)
+    if not targets: raise HTTPException(404, "موردی برای تلاش مجدد پیدا نشد")
+    notif = db.client["medicalbot"]["bot_notifications"]
+    docs = [{"type":"notif_retry","chat_id":t["user_id"],"text":t["message"],"sent":False,
+        "created_at":datetime.now().isoformat()} for t in targets if t.get("message")]
+    if docs: await notif.insert_many(docs)
+    return {"ok":True, "requeued": len(docs)}
 
 @router.post("/export/excel")
 async def export_excel(admin=Depends(get_admin_user)):
