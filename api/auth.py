@@ -1,50 +1,110 @@
-"""🔐 احراز هویت HMAC تلگرام"""
-import os, hmac, hashlib, json, time
-from urllib.parse import unquote
-from fastapi import Header, HTTPException, Depends
+"""احراز هویت امن Telegram Mini App با HMAC-SHA256."""
+import hashlib
+import hmac
+import json
+import os
+import time
+from urllib.parse import parse_qsl
+
+from fastapi import Depends, Header, HTTPException
+
 from database import db
 
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-ADMIN_ID  = int(os.getenv("ADMIN_ID", "0"))
+
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+except (TypeError, ValueError):
+    ADMIN_ID = 0
+
+INIT_DATA_MAX_AGE = 3600
+
+
+def _auth_error(detail: str = "invalid_init_data") -> HTTPException:
+    return HTTPException(status_code=401, detail=detail)
+
 
 def verify_telegram_init_data(init_data: str) -> dict:
-    if not BOT_TOKEN: raise HTTPException(500, "BOT_TOKEN not set")
-    if not init_data: raise HTTPException(401, "Missing init data")
-    parsed = {}
-    for part in init_data.split("&"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            parsed[k] = unquote(v)
-    received_hash = parsed.pop("hash", "")
-    if not received_hash: raise HTTPException(401, "Missing hash")
-    if time.time() - int(parsed.get("auth_date", 0)) > 3600:
-        raise HTTPException(401, "initData expired")
-    data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    computed   = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(computed, received_hash):
-        raise HTTPException(401, "Invalid signature")
-    try:
-        return json.loads(parsed.get("user", "{}"))
-    except Exception:
-        raise HTTPException(401, "Invalid user data")
+    """Validate Telegram WebApp initData and return its user object.
 
-async def get_current_user(x_init_data: str = Header(..., alias="X-Init-Data")) -> dict:
+    Telegram signs the decoded query-string values.  ``parse_qsl`` is used
+    instead of manually splitting the string so encoded characters and plus
+    signs are handled correctly.  No user-provided id is trusted before the
+    signature has been verified.
+    """
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="BOT_TOKEN not set")
+    if not isinstance(init_data, str) or not init_data.strip():
+        raise _auth_error("missing_init_data")
+
+    try:
+        pairs = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        parsed = dict(pairs)
+    except (TypeError, ValueError):
+        raise _auth_error()
+
+    received_hash = parsed.pop("hash", "")
+    if not received_hash or len(received_hash) != 64:
+        raise _auth_error()
+
+    try:
+        auth_date = int(parsed.get("auth_date", "0"))
+    except (TypeError, ValueError):
+        raise _auth_error()
+
+    now = int(time.time())
+    if auth_date <= 0 or auth_date > now + 60 or now - auth_date > INIT_DATA_MAX_AGE:
+        raise _auth_error("init_data_expired")
+
+    data_check_string = "\n".join(
+        f"{key}={value}" for key, value in sorted(parsed.items())
+    )
+    secret_key = hmac.new(
+        b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256
+    ).digest()
+    computed_hash = hmac.new(
+        secret_key, data_check_string.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(computed_hash, received_hash):
+        raise _auth_error()
+
+    try:
+        user = json.loads(parsed.get("user", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        raise _auth_error("invalid_user_data")
+    if not isinstance(user, dict) or not user.get("id"):
+        raise _auth_error("invalid_user_data")
+    return user
+
+
+async def get_current_user(
+    x_init_data: str = Header(default="", alias="X-Init-Data"),
+) -> dict:
     tg_user = verify_telegram_init_data(x_init_data)
-    uid = tg_user.get("id")
-    if not uid: raise HTTPException(401, "User ID missing")
+    try:
+        uid = int(tg_user["id"])
+    except (KeyError, TypeError, ValueError):
+        raise _auth_error("invalid_user_data")
+
     db_user = await db.get_user(uid)
-    if not db_user: raise HTTPException(403, detail="not_registered")
-    if not db_user.get("approved"): raise HTTPException(403, detail="pending_approval")
-    if db_user.get("suspended"): raise HTTPException(403, detail="suspended")
-    return {**tg_user, "_db": db_user}
+    if not db_user:
+        raise HTTPException(status_code=403, detail="not_registered")
+    if not db_user.get("approved"):
+        raise HTTPException(status_code=403, detail="pending_approval")
+    if db_user.get("suspended"):
+        raise HTTPException(status_code=403, detail="suspended")
+    return {**tg_user, "id": uid, "_db": db_user}
+
 
 async def get_admin_user(user=Depends(get_current_user)) -> dict:
-    if user["id"] != ADMIN_ID: raise HTTPException(403, "Admin only")
+    if user["id"] != ADMIN_ID:
+        raise HTTPException(status_code=403, detail="admin_only")
     return user
+
 
 async def get_content_admin_user(user=Depends(get_current_user)) -> dict:
     role = user["_db"].get("role", "student")
     if user["id"] != ADMIN_ID and role not in ("admin", "content_admin"):
-        raise HTTPException(403, "Content admin only")
+        raise HTTPException(status_code=403, detail="content_admin_only")
     return user
