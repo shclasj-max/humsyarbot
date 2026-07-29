@@ -323,6 +323,42 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
     await _run_new_resources_notif(context.bot, force=False)
 
 
+async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    🔴 FIX حیاتی: پردازش صف «bot_notifications» که بک‌اند Mini App
+    (FastAPI) توش پیام می‌ذاره — تأیید/رد/تعلیق/بلاک کاربر، پاسخ
+    تیکت، تغییر زمان کلاس، نمره‌ی جدید، broadcast و... .
+    قبل از این job، هیچ‌چیزی این کالکشن رو نمی‌خوند — یعنی این پیام‌ها
+    فقط توی دیتابیس می‌موندن و هرگز واقعاً برای کاربر ارسال نمی‌شدن.
+    از فیلد send_at هم پشتیبانی می‌کنه — یعنی broadcast زمان‌دار هم از
+    همین صف رد می‌شه، فقط تا زمان مقرر sent:False می‌مونه.
+    """
+    try:
+        coll = db.client["medicalbot"]["bot_notifications"]
+        now_iso = datetime.now().isoformat()
+        cursor = coll.find({
+            "sent": False,
+            "$or": [{"send_at": {"$exists": False}}, {"send_at": None}, {"send_at": {"$lte": now_iso}}],
+        }).limit(200)
+        docs = await cursor.to_list(200)
+        for d in docs:
+            text = d.get("text", "")
+            # قراردادِ داخلی: پیام‌هایی که با "__" شروع می‌شن (مثل سیگنال
+            # درخواست خروجی اکسل) پیام متنیِ ساده نیستن — باید جای دیگه
+            # پردازش بشن، نه این‌که عیناً برای کاربر فرستاده بشن.
+            if text.startswith("__"):
+                await coll.update_one({"_id": d["_id"]}, {"$set": {"sent": True, "skipped": True}})
+                continue
+            ok = await safe_send(context.bot, d["chat_id"], text, parse_mode="HTML")
+            await coll.update_one({"_id": d["_id"]}, {"$set": {
+                "sent": ok, "sent_at": datetime.now().isoformat(), "failed": not ok,
+            }})
+        if docs:
+            logger.info(f"📤 mini_app_outbox: {len(docs)} پیام پردازش شد")
+    except Exception as e:
+        logger.error(f"mini_app_outbox_job error: {e}")
+
+
 async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     """
     FIX جدید: جاب روزانه‌ی سیستم اشتراک —
@@ -1186,6 +1222,14 @@ async def post_init(application: Application):
             time=dtime(hour=6, minute=0, tzinfo=timezone.utc),
             days=(0,),
             name='weekly_report'
+        )
+
+        # 🔴 FIX حیاتی: پردازش صف پیام‌های Mini App — هر ۲۰ ثانیه چک می‌شود
+        application.job_queue.run_repeating(
+            mini_app_outbox_job,
+            interval=20,
+            first=10,
+            name='mini_app_outbox'
         )
 
         # FIX جدید: نوتیف منابع جدید — هر ساعت چک می‌شود، خودش تشخیص
