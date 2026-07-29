@@ -1,7 +1,7 @@
 """📖 References"""
 from fastapi import APIRouter, Depends, HTTPException
 from api.auth import get_current_user
-from api.telegram_send import send_document_to_user
+from api.telegram_send import send_ref_file
 from database import db
 
 router = APIRouter()
@@ -44,9 +44,9 @@ async def files(bid: str, user=Depends(get_current_user)):
 async def download(fid: str, user=Depends(get_current_user)):
     item = await db.ref_get_file(fid)
     if not item: raise HTTPException(404,"پیدا نشد")
-    file_id = item.get("file_id","")
-    sent = await send_document_to_user(user["id"], file_id, caption=item.get("name",""))
+    await db.ref_inc_download(fid, user["id"])
+    item = await db.ref_get_file(fid)  # برای گرفتن شمارنده‌ی به‌روز، مثل خود ربات
+    sent = await send_ref_file(user["id"], item)
     if not sent:
         raise HTTPException(502, "ارسال فایل از طریق ربات ناموفق بود. لطفاً ابتدا یک پیام به ربات بفرستید یا دوباره تلاش کنید.")
-    await db.ref_inc_download(fid, user["id"])
     return {"sent": True, "lang":item.get("lang","fa"),"volume":item.get("volume",1)}
