@@ -168,9 +168,7 @@ def _public_reference(document: dict | None) -> dict | None:
     }
 
 
-async def _active_reference(
-    user_id: int,
-) -> dict | None:
+async def _active_reference(user_id: int) -> dict | None:
     document = await db.ai_get_doc(user_id)
     public = _public_reference(document)
 
@@ -198,9 +196,7 @@ def _clean_filename(
     return (cleaned or fallback)[:100]
 
 
-def _normalise_content_type(
-    value: str | None,
-) -> str:
+def _normalise_content_type(value: str | None) -> str:
     return (
         str(value or "")
         .split(";", 1)[0]
@@ -217,12 +213,8 @@ def _detect_media(
     """Detect supported media using magic bytes."""
 
     head = data[:64]
-    declared = _normalise_content_type(
-        declared_type
-    )
-    suffix = PurePath(
-        filename or ""
-    ).suffix.lower()
+    declared = _normalise_content_type(declared_type)
+    suffix = PurePath(filename or "").suffix.lower()
 
     if head.startswith(b"%PDF-"):
         return "pdf", "application/pdf"
@@ -230,9 +222,7 @@ def _detect_media(
     if head.startswith(b"\xff\xd8\xff"):
         return "image", "image/jpeg"
 
-    if head.startswith(
-        b"\x89PNG\r\n\x1a\n"
-    ):
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image", "image/png"
 
     if (
@@ -255,35 +245,23 @@ def _detect_media(
     if head.startswith(b"fLaC"):
         return "audio", "audio/flac"
 
-    if head.startswith(
-        b"\x1aE\xdf\xa3"
-    ):
+    if head.startswith(b"\x1aE\xdf\xa3"):
         return "audio", "audio/webm"
 
-    if (
-        head.startswith(b"ID3")
-        or (
-            len(head) >= 2
-            and head[0] == 0xFF
-            and (head[1] & 0xE0) == 0xE0
-        )
+    if head.startswith(b"ID3") or (
+        len(head) >= 2
+        and head[0] == 0xFF
+        and (head[1] & 0xE0) == 0xE0
     ):
         if (
-            declared
-            in {
-                "audio/aac",
-                "audio/x-aac",
-            }
+            declared in {"audio/aac", "audio/x-aac"}
             or suffix == ".aac"
         ):
             return "audio", "audio/aac"
 
         return "audio", "audio/mpeg"
 
-    if (
-        len(head) >= 12
-        and head[4:8] == b"ftyp"
-    ):
+    if len(head) >= 12 and head[4:8] == b"ftyp":
         if declared.startswith("video/"):
             raise HTTPException(
                 status_code=415,
@@ -337,19 +315,14 @@ def _detect_media(
     )
 
 
-async def _read_upload_limited(
-    upload: UploadFile,
-) -> bytes:
+async def _read_upload_limited(upload: UploadFile) -> bytes:
     declared_size = getattr(
         upload,
         "size",
         None,
     )
 
-    if (
-        declared_size
-        and declared_size > MAX_MEDIA_BYTES
-    ):
+    if declared_size and declared_size > MAX_MEDIA_BYTES:
         raise HTTPException(
             status_code=413,
             detail=(
@@ -363,9 +336,7 @@ async def _read_upload_limited(
     total = 0
 
     while True:
-        chunk = await upload.read(
-            _READ_CHUNK_BYTES
-        )
+        chunk = await upload.read(_READ_CHUNK_BYTES)
 
         if not chunk:
             break
@@ -398,9 +369,7 @@ def _validate_message(
     *,
     required: bool,
 ) -> str:
-    text = str(
-        message or ""
-    ).strip()
+    text = str(message or "").strip()
 
     if required and not text:
         raise HTTPException(
@@ -420,9 +389,7 @@ def _validate_message(
     return text
 
 
-def _acquire_user(
-    user_id: int,
-) -> None:
+def _acquire_user(user_id: int) -> None:
     if user_id in _busy_users:
         raise HTTPException(
             status_code=409,
@@ -435,9 +402,7 @@ def _acquire_user(
     _busy_users.add(user_id)
 
 
-async def _ensure_available(
-    user_id: int,
-) -> dict:
+async def _ensure_available(user_id: int) -> dict:
     if await db.ai_is_banned(user_id):
         raise HTTPException(
             status_code=403,
@@ -453,9 +418,7 @@ async def _ensure_available(
         raise HTTPException(
             status_code=503,
             detail=(
-                config.get(
-                    "disabled_message"
-                )
+                config.get("disabled_message")
                 or (
                     "هوشیار فعلاً توسط "
                     "مدیریت غیرفعال است"
@@ -475,13 +438,9 @@ async def _ensure_available(
     return config
 
 
-async def _consume_quota(
-    user_id: int,
-) -> tuple[int, int]:
-    allowed, used, limit = (
-        await check_and_consume_quota(
-            user_id
-        )
+async def _consume_quota(user_id: int) -> tuple[int, int]:
+    allowed, used, limit = await check_and_consume_quota(
+        user_id
     )
 
     used = max(
@@ -540,16 +499,12 @@ async def _ask_provider(
         uid=user_id,
     )
 
-    answer = str(
-        answer or ""
-    ).strip()
+    answer = str(answer or "").strip()
 
     if not answer:
         raise HTTPException(
             status_code=502,
-            detail=(
-                "هوشیار پاسخی برنگرداند"
-            ),
+            detail="هوشیار پاسخی برنگرداند",
         )
 
     token_count = max(
@@ -668,10 +623,7 @@ async def _wait_for_gemini_file(
                 if response.status_code != 200:
                     continue
 
-                current = (
-                    response.json()
-                    or {}
-                )
+                current = response.json() or {}
 
                 current_state = str(
                     current.get("state")
@@ -714,8 +666,7 @@ async def _delete_remote_reference(
     """Best-effort privacy cleanup."""
 
     if (
-        config.get("provider")
-        != "gemini"
+        config.get("provider") != "gemini"
         or not config.get("api_key")
     ):
         return
@@ -770,11 +721,9 @@ async def _store_pdf_reference(
         filename,
     )
 
-    uploaded = (
-        await _wait_for_gemini_file(
-            config["api_key"],
-            uploaded,
-        )
+    uploaded = await _wait_for_gemini_file(
+        config["api_key"],
+        uploaded,
     )
 
     uri = uploaded.get("uri")
@@ -816,9 +765,7 @@ async def status(
     user=Depends(get_current_user),
 ):
     config = await get_ai_config()
-    database_user = (
-        user.get("_db") or {}
-    )
+    database_user = user.get("_db") or {}
 
     banned = await db.ai_is_banned(
         user["id"]
@@ -844,10 +791,7 @@ async def status(
                 )
             ),
         )
-        if database_user.get(
-            "ai_usage_date"
-        )
-        == today
+        if database_user.get("ai_usage_date") == today
         else 0
     )
 
@@ -878,16 +822,11 @@ async def status(
             )
             or ""
         ),
-        "max_input_chars": (
-            MAX_INPUT_CHARS
-        ),
-        "max_media_bytes": (
-            MAX_MEDIA_BYTES
-        ),
+        "max_input_chars": MAX_INPUT_CHARS,
+        "max_media_bytes": MAX_MEDIA_BYTES,
         "capabilities": {
             "text": True,
-            "image": provider
-            in {
+            "image": provider in {
                 "gemini",
                 "openrouter",
             },
@@ -1021,9 +960,7 @@ async def ask_media(
         fallback_names = {
             "image": "تصویر.jpg",
             "pdf": "سند.pdf",
-            "audio": (
-                "صدای ضبط‌شده.webm"
-            ),
+            "audio": "صدای ضبط‌شده.webm",
         }
 
         filename = _clean_filename(
@@ -1033,8 +970,7 @@ async def ask_media(
 
         if (
             kind in {"pdf", "audio"}
-            and config.get("provider")
-            != "gemini"
+            and config.get("provider") != "gemini"
         ):
             raise HTTPException(
                 status_code=422,
@@ -1045,22 +981,18 @@ async def ask_media(
                 ),
             )
 
-        active_reference = (
-            await _active_reference(
-                user_id
-            )
+        active_reference = await _active_reference(
+            user_id
         )
 
         media_bytes: bytes | None = data
 
         if kind == "pdf":
-            active_reference = (
-                await _store_pdf_reference(
-                    user_id=user_id,
-                    config=config,
-                    data=data,
-                    filename=filename,
-                )
+            active_reference = await _store_pdf_reference(
+                user_id=user_id,
+                config=config,
+                data=data,
+                filename=filename,
             )
 
             media_bytes = None
@@ -1069,10 +1001,8 @@ async def ask_media(
             kind == "audio"
             and mime == "audio/ogg"
         ):
-            converted = (
-                await _transcode_ogg_opus_to_wav(
-                    data
-                )
+            converted = await _transcode_ogg_opus_to_wav(
+                data
             )
 
             if not converted:
@@ -1124,14 +1054,10 @@ async def ask_media(
         )
 
         if prompt:
-            memory_label += (
-                f"\n{prompt}"
-            )
+            memory_label += f"\n{prompt}"
 
-        used, limit = (
-            await _consume_quota(
-                user_id
-            )
+        used, limit = await _consume_quota(
+            user_id
         )
 
         result = await _ask_provider(
@@ -1209,10 +1135,7 @@ async def upload_reference(
         user_id
     )
 
-    if (
-        config.get("provider")
-        != "gemini"
-    ):
+    if config.get("provider") != "gemini":
         raise HTTPException(
             status_code=422,
             detail=(
@@ -1226,10 +1149,8 @@ async def upload_reference(
 
     try:
         try:
-            data = (
-                await _read_upload_limited(
-                    file
-                )
+            data = await _read_upload_limited(
+                file
             )
         finally:
             await file.close()
@@ -1254,13 +1175,11 @@ async def upload_reference(
             "سند.pdf",
         )
 
-        reference = (
-            await _store_pdf_reference(
-                user_id=user_id,
-                config=config,
-                data=data,
-                filename=filename,
-            )
+        reference = await _store_pdf_reference(
+            user_id=user_id,
+            config=config,
+            data=data,
+            filename=filename,
         )
 
         return {
@@ -1286,9 +1205,7 @@ async def upload_reference(
 
         raise HTTPException(
             status_code=502,
-            detail=(
-                "آپلود سند مرجع ناموفق بود"
-            ),
+            detail="آپلود سند مرجع ناموفق بود",
         ) from error
 
     finally:
