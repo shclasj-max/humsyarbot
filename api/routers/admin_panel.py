@@ -526,6 +526,39 @@ async def export_excel(admin=Depends(get_admin_user)):
     _notify(ADMIN_ID, "__EXCEL_EXPORT__", "excel_export_request")
     return {"ok":True,"message":"📊 فایل اکسل از طریق ربات ارسال می‌شود."}
 
+
+# ── بخش‌های بکاپ — دقیقاً همان‌هایی که منوی backup.py در ربات دارد ──
+BACKUP_SECTION_LABELS_FA = {
+    "all":          "کامل — همه بخش‌ها",
+    "users":        "کاربران",
+    "content":      "علوم پایه",
+    "refs":         "رفرنس‌ها",
+    "qbank":        "بانک سوال",
+    "subscription": "اشتراک و پرداخت",
+    "grades":       "نمرات",
+    "access":       "دسترسی‌ها و تنظیمات",
+}
+
+class BackupRequestBody(BaseModel):
+    section: str = "all"
+
+@router.post("/backup")
+async def request_backup(body: BackupRequestBody, admin=Depends(get_admin_user)):
+    """درخواست فایل پشتیبان JSON از پنل وب — با همان الگوی خروجی اکسل:
+    سیگنال __BACKUP_REQUEST__ در صف bot_notifications می‌نشیند و
+    mini_app_outbox_job در ربات فایل را می‌سازد و به چت ادمین می‌فرستد
+    (همان build_full_backup_data / build_section_backup_data مشترک ربات)."""
+    if body.section not in BACKUP_SECTION_LABELS_FA:
+        raise HTTPException(422, "بخش بکاپ نامعتبر است")
+    signal = ("__BACKUP_REQUEST__" if body.section == "all"
+              else f"__BACKUP_REQUEST__:{body.section}")
+    _notify(admin.get("id", ADMIN_ID), signal, f"backup_request_{body.section}")
+    await _audit(admin, "درخواست فایل پشتیبان از پنل وب", "Backup", severity="HIGH",
+        details=f"بخش: {BACKUP_SECTION_LABELS_FA[body.section]}",
+        tags=["بکاپ", "پنل_وب"])
+    return {"ok": True,
+            "message": "💾 فایل پشتیبان از طریق ربات ارسال می‌شود (بسته به حجم دیتابیس ممکن است چند ثانیه طول بکشد)."}
+
 # ══════════════════════════════════════════════
 # ⚙️ تنظیمات ربات — همان کلیدهایی که پنل ربات
 # استفاده می‌کند تا هر دو کانال سینک بمانند
@@ -542,6 +575,13 @@ async def bot_settings_get(admin=Depends(get_admin_user)):
         # قابل مشاهده/تغییر باشد (None یعنی تنظیم نشده)
         "log_group_admin": await db.get_setting("log_group_admin", None),
         "log_group_content": await db.get_setting("log_group_content", None),
+        # 💙 حمایت مالی — همان کلیدهای پنل ربات (admin:donation_manage)
+        "donation_enabled": bool(await db.get_setting("donation_enabled", False)),
+        "donation_link": await db.get_setting("donation_link", None),
+        # 💾 بکاپ خودکار — همان کلیدهای backup.py (backup:auto_settings)
+        "auto_backup_enabled": bool(await db.get_setting("auto_backup_enabled", False)),
+        "auto_backup_hour": int(await db.get_setting("auto_backup_hour", 3) or 0),
+        "auto_backup_last_run": await db.get_setting("auto_backup_last_run", None),
     }
 
 class BotSettingsPatch(BaseModel):
@@ -551,6 +591,12 @@ class BotSettingsPatch(BaseModel):
     # None صریح در بدنه = حذف تنظیم گروه (با model_fields_set تشخیص داده می‌شود)
     log_group_admin: Optional[int] = None
     log_group_content: Optional[int] = None
+    donation_enabled: Optional[bool] = None
+    # '' یا None = حذف لینک
+    donation_link: Optional[str] = None
+    auto_backup_enabled: Optional[bool] = None
+    # ساعت اجرا به‌وقت تهران ۰ تا ۲۳
+    auto_backup_hour: Optional[int] = None
 
 @router.patch("/settings")
 async def bot_settings_patch(body: BotSettingsPatch, admin=Depends(get_admin_user)):
@@ -615,6 +661,62 @@ async def bot_settings_patch(body: BotSettingsPatch, admin=Depends(get_admin_use
                     after={"گروه": str(val) if val is not None else "حذف شد"},
                     tags=["گروه_لاگ", "پنل_وب"])
                 changed.append(key)
+
+    # ── 💙 حمایت مالی — برچسب‌های لاگ دقیقاً مثل پنل ربات ──
+    if body.donation_enabled is not None:
+        old = bool(await db.get_setting("donation_enabled", False))
+        if old != body.donation_enabled:
+            await db.set_setting("donation_enabled", body.donation_enabled)
+            await _audit(admin,
+                "فعال‌شدن بخش حمایت مالی" if body.donation_enabled else "غیرفعال‌شدن بخش حمایت مالی",
+                "Settings", severity="HIGH",
+                before={"وضعیت": "غیرفعال" if body.donation_enabled else "فعال"},
+                after={"وضعیت": "فعال" if body.donation_enabled else "غیرفعال"},
+                tags=["حمایت_مالی", "پنل_وب"])
+            changed.append("donation_enabled")
+
+    if body.donation_link is not None or "donation_link" in body.model_fields_set:
+        link = (body.donation_link or "").strip()
+        if link and not (link.startswith("http://") or link.startswith("https://")):
+            raise HTTPException(422, "لینک باید با http:// یا https:// شروع شود")
+        if len(link) > 300:
+            raise HTTPException(422, "لینک نباید بیشتر از ۳۰۰ کاراکتر باشد")
+        new_val = link or None
+        old = await db.get_setting("donation_link", None)
+        if old != new_val:
+            await db.set_setting("donation_link", new_val)
+            await _audit(admin,
+                "تنظیم لینک حمایت مالی" if new_val else "حذف لینک حمایت مالی",
+                "Settings", severity="HIGH",
+                before={"لینک": old or "تنظیم نشده"},
+                after={"لینک": new_val or "حذف شد"},
+                tags=["حمایت_مالی", "پنل_وب"])
+            changed.append("donation_link")
+
+    # ── 💾 بکاپ خودکار — همان منطق backup:auto_settings در ربات ──
+    if body.auto_backup_enabled is not None:
+        old = bool(await db.get_setting("auto_backup_enabled", False))
+        if old != body.auto_backup_enabled:
+            await db.set_setting("auto_backup_enabled", body.auto_backup_enabled)
+            await _audit(admin,
+                "فعال‌سازی بکاپ خودکار روزانه" if body.auto_backup_enabled else "غیرفعال‌سازی بکاپ خودکار روزانه",
+                "Backup", severity="HIGH",
+                before={"بکاپ خودکار": "غیرفعال" if body.auto_backup_enabled else "فعال"},
+                after={"بکاپ خودکار": "فعال" if body.auto_backup_enabled else "غیرفعال"},
+                tags=["بکاپ", "پنل_وب"])
+            changed.append("auto_backup_enabled")
+
+    if body.auto_backup_hour is not None:
+        if not (0 <= body.auto_backup_hour <= 23):
+            raise HTTPException(422, "ساعت بکاپ خودکار باید بین ۰ تا ۲۳ باشد")
+        old = int(await db.get_setting("auto_backup_hour", 3) or 0)
+        if old != body.auto_backup_hour:
+            await db.set_setting("auto_backup_hour", body.auto_backup_hour)
+            await _audit(admin, "تغییر ساعت بکاپ خودکار", "Backup", severity="HIGH",
+                before={"ساعت": f"{old}:00"},
+                after={"ساعت": f"{body.auto_backup_hour}:00"},
+                tags=["بکاپ", "پنل_وب"])
+            changed.append("auto_backup_hour")
 
     return {"ok": True, "changed": changed}
 
