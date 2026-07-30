@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from api.auth import get_current_user
+from api.auth import get_resource_access_user
 from api.telegram_send import send_bs_content
 from database import db
 
@@ -77,7 +77,7 @@ def _public_file(
 
 @router.get("/terms")
 async def terms(
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     raw_terms = await db.bs_lessons.distinct(
         "term"
@@ -118,7 +118,7 @@ async def terms(
 @router.get("/lessons/{term}")
 async def lessons(
     term: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     items = await db.bs_get_lessons(
         term
@@ -177,7 +177,7 @@ async def lessons(
 @router.get("/sessions/{lesson_id}")
 async def sessions(
     lesson_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     items = await db.bs_get_sessions(
         lesson_id
@@ -238,7 +238,7 @@ async def sessions(
 @router.get("/files/{session_id}")
 async def files(
     session_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     items = await db.bs_get_content(
         session_id
@@ -266,7 +266,7 @@ async def files(
 @router.post("/download/{content_id}")
 async def download(
     content_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     """فقط همان فایل انتخاب‌شده را در تلگرام ارسال می‌کند."""
 
@@ -387,7 +387,7 @@ async def search(
         min_length=2,
         max_length=100,
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     results = await db.search_resources(
         q.strip()
