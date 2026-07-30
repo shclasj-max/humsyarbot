@@ -2715,91 +2715,20 @@ async def _show_audit_log(query, category: str, min_severity: str = None, module
 
 async def _export_excel(query, context):
     """
-    FIX جدید: خروجی کامل دیتابیس (کاربران، تیکت‌ها، آمار سوالات)
-    به‌صورت یک فایل اکسل با چند شیت، آماده دانلود.
-
-    🐛 باگ واقعی که اینجا بود: متغیر uid هیچ‌جا تعریف نشده بود، پس
-    بلافاصله بعد از ارسال موفق فایل اکسل (reply_document)، خط ثبت
-    گزارش (audit log) با NameError کرش می‌کرد. نتیجه: ادمین فایل
-    اکسل را واقعاً دریافت می‌کرد، اما بلافاصله بعدش پیام «❌ خطا در
-    ساخت فایل» را هم می‌دید — گیج‌کننده و اشتباه، چون فایل در واقع
-    درست ساخته و ارسال شده بود.
+    خروجی کامل دیتابیس از پنل ربات — حالا روی ماژول مشترک
+    excel_report سوار است تا سمت web (صف bot_notifications)
+    هم دقیقاً همان خروجی را تحویل بگیرد.
     """
     uid = query.from_user.id
     await query.edit_message_text("⏳ <b>در حال ساخت فایل اکسل...</b>", parse_mode='HTML')
     try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill
-        import io
-
-        wb = openpyxl.Workbook()
-        header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
-        header_font = Font(color='FFFFFF', bold=True)
-
-        # ── شیت کاربران ──
-        ws = wb.active
-        ws.title = 'کاربران'
-        headers = ['آیدی', 'نام', 'شماره دانشجویی', 'گروه', 'ورودی', 'یوزرنیم', 'وضعیت', 'تاریخ ثبت‌نام', 'تعداد پاسخ', 'پاسخ صحیح']
-        ws.append(headers)
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-        users = await db.all_users(approved_only=False)
-        for u in users:
-            ws.append([
-                u.get('user_id', ''), u.get('name', ''), u.get('student_id', '') or '—',
-                u.get('group', ''), u.get('intake', '') or '—', u.get('username', '') or '—',
-                'تأییدشده' if u.get('approved') else 'در انتظار',
-                fmt_jalali_dt(u.get('registered_at', ''), with_time=False),
-                u.get('total_answers', 0), u.get('correct_answers', 0),
-            ])
-
-        # ── شیت تیکت‌ها ──
-        ws2 = wb.create_sheet('تیکت‌ها')
-        headers2 = ['شماره تیکت', 'کاربر', 'موضوع', 'وضعیت', 'تاریخ ثبت']
-        ws2.append(headers2)
-        for cell in ws2[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-        tickets = await db.tickets.find({}).sort('created_at', -1).to_list(2000)
-        for t in tickets:
-            ws2.append([
-                t.get('ticket_id', ''), t.get('user_name', ''), t.get('subject', ''),
-                'باز' if t.get('status') == 'open' else 'بسته',
-                fmt_jalali_dt(t.get('created_at', ''), with_time=False),
-            ])
-
-        # ── شیت آمار سوالات ──
-        ws3 = wb.create_sheet('بانک سوال')
-        headers3 = ['درس', 'مبحث', 'سختی', 'تعداد پاسخ', 'پاسخ صحیح', 'وضعیت تأیید']
-        ws3.append(headers3)
-        for cell in ws3[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-        questions = await db.questions.find({}).to_list(5000)
-        for q in questions:
-            ws3.append([
-                q.get('lesson', ''), q.get('topic', ''), q.get('difficulty', ''),
-                q.get('attempt_count', 0), q.get('correct_count', 0),
-                'تأییدشده' if q.get('approved') else 'در انتظار',
-            ])
-
-        for sheet in wb.worksheets:
-            for col in sheet.columns:
-                max_len = max((len(str(c.value)) for c in col if c.value is not None), default=10)
-                sheet.column_dimensions[col[0].column_letter].width = min(max_len + 3, 35)
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        fname = f"humsyar_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        from excel_report import build_database_excel
+        buf, fname, caption, counts = await build_database_excel()
         await query.message.reply_document(
-            document=buf, filename=fname,
-            caption=f"📥 <b>خروجی کامل دیتابیس</b>\n👥 {len(users)} کاربر | 🎫 {len(tickets)} تیکت | 🧪 {len(questions)} سوال",
-            parse_mode='HTML'
+            document=buf, filename=fname, caption=caption, parse_mode='HTML'
         )
-        # FIX جدید طبق سند: خروجی گرفتن دیتابیس شامل اطلاعات حساس
-        # کاربران است — باید ثبت شود که کِی و توسط کدام مدیر دانلود شد.
+        # خروجی گرفتن دیتابیس شامل اطلاعات حساس کاربران است —
+        # باید ثبت شود که کِی و توسط کدام مدیر دانلود شد.
         admin_user_doc = await db.get_user(uid)
         actor_name = admin_user_doc.get('name', 'مدیر ارشد') if admin_user_doc else 'مدیر ارشد'
         actor_role = await db.get_actor_role_label(uid)
@@ -2807,20 +2736,12 @@ async def _export_excel(query, context):
             context.bot, 'admin', actor_name, uid,
             "خروجی اکسل دیتابیس", module='Backup', severity='HIGH',
             actor_role=actor_role,
-            details=f"{len(users)} کاربر | {len(tickets)} تیکت | {len(questions)} سوال",
+            details=f"{counts['users']} کاربر | {counts['tickets']} تیکت | {counts['questions']} سوال",
             tags=['خروجی_اکسل']
         )
-        await query.edit_message_text(
-            "✅ فایل اکسل ارسال شد!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')]])
-        )
     except Exception as e:
-        logger.error(f"_export_excel error: {e}")
-        await query.edit_message_text(
-            f"❌ خطا در ساخت فایل: {e}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')]])
-        )
-
+        logger.error(f"excel export error: {e}")
+        await query.message.reply_text("❌ خطا در ساخت فایل اکسل — جزئیات در لاگ سرور.")
 
 async def _show_intakes(query):
     intakes = await db.get_all_intakes()
