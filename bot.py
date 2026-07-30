@@ -360,13 +360,45 @@ async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
                         "sent": True, "sent_at": datetime.now().isoformat()}})
                 except Exception as e:
                     logger.error(f"__EXCEL_EXPORT__ failed: {e}")
+                    # FIX باگ پنهان: قبلاً sent:False می‌ماند و پیام هر چرخه
+                    # بی‌نهایت retry می‌شد. حالا مصرف‌شده علامت می‌خورد و
+                    # به درخواست‌کننده هم اطلاع می‌دهیم.
                     await coll.update_one({"_id": d["_id"]}, {"$set": {
-                        "sent": False, "failed": True,
+                        "sent": True, "failed": True,
                         "error": str(e)[:200],
                         "sent_at": datetime.now().isoformat(),
-                        # اجازه تلاش مجدد در چرخه بعد:
-                        "retry_after": (datetime.now()).isoformat(),
                     }})
+                    try:
+                        await safe_send(context.bot, d["chat_id"],
+                            "❌ ساخت فایل اکسل ناموفق بود — جزئیات در لاگ سرور.")
+                    except Exception:
+                        pass
+                continue
+
+            # ── سیگنال درخواست فایل پشتیبان از پنل وب (فاز B) ──
+            # الگوی مشترک با اکسل: وب می‌نویسد، ربات می‌سازد و می‌فرستد.
+            if text.startswith("__BACKUP_REQUEST__"):
+                try:
+                    section = text.split(":", 1)[1] if ":" in text else "all"
+                    from backup import send_backup_from_web
+                    total = await send_backup_from_web(
+                        context.bot, d["chat_id"], section)
+                    await coll.update_one({"_id": d["_id"]}, {"$set": {
+                        "sent": True, "sent_at": datetime.now().isoformat()}})
+                    logger.info(
+                        f"💾 web backup sent: section={section} records={total}")
+                except Exception as e:
+                    logger.error(f"__BACKUP_REQUEST__ failed: {e}")
+                    await coll.update_one({"_id": d["_id"]}, {"$set": {
+                        "sent": True, "failed": True,
+                        "error": str(e)[:200],
+                        "sent_at": datetime.now().isoformat(),
+                    }})
+                    try:
+                        await safe_send(context.bot, d["chat_id"],
+                            "❌ ساخت فایل پشتیبان ناموفق بود — جزئیات در لاگ سرور.")
+                    except Exception:
+                        pass
                 continue
 
             # سایر سیگنال‌های داخلی (__*) متنی نیستند — skip
