@@ -343,9 +343,33 @@ async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
         docs = await cursor.to_list(200)
         for d in docs:
             text = d.get("text", "")
-            # قراردادِ داخلی: پیام‌هایی که با "__" شروع می‌شن (مثل سیگنال
-            # درخواست خروجی اکسل) پیام متنیِ ساده نیستن — باید جای دیگه
-            # پردازش بشن، نه این‌که عیناً برای کاربر فرستاده بشن.
+
+            # ── سیگنال درخواست خروجی اکسل از پنل وب ──
+            # قبلاً همه پیام‌های __* به‌صورت skipped رد می‌شدند و
+            # خروجی هرگز به ادمین نمی‌رسید (فیچر مرده). حالا مصرف می‌شود.
+            if text == "__EXCEL_EXPORT__":
+                try:
+                    from excel_report import build_database_excel
+                    buf, fname, caption, _counts = await build_database_excel()
+                    buf.seek(0)
+                    await context.bot.send_document(
+                        chat_id=d["chat_id"], document=buf,
+                        filename=fname, caption=caption, parse_mode="HTML",
+                    )
+                    await coll.update_one({"_id": d["_id"]}, {"$set": {
+                        "sent": True, "sent_at": datetime.now().isoformat()}})
+                except Exception as e:
+                    logger.error(f"__EXCEL_EXPORT__ failed: {e}")
+                    await coll.update_one({"_id": d["_id"]}, {"$set": {
+                        "sent": False, "failed": True,
+                        "error": str(e)[:200],
+                        "sent_at": datetime.now().isoformat(),
+                        # اجازه تلاش مجدد در چرخه بعد:
+                        "retry_after": (datetime.now()).isoformat(),
+                    }})
+                continue
+
+            # سایر سیگنال‌های داخلی (__*) متنی نیستند — skip
             if text.startswith("__"):
                 await coll.update_one({"_id": d["_id"]}, {"$set": {"sent": True, "skipped": True}})
                 continue
