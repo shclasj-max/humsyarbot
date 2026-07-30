@@ -501,6 +501,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data='admin:settings')]])
         )
 
+    elif action == 'test_log_groups':
+        await _test_log_groups(query, context)
+
     elif action == 'set_poll_channel':
         context.user_data['mode'] = 'set_poll_channel'
         current = await db.get_setting('poll_channel_id', None)
@@ -2611,11 +2614,53 @@ async def _show_settings(query):
         [InlineKeyboardButton("✏️ متن حالت تعمیر", callback_data='admin:set_maintenance_text')],
         [InlineKeyboardButton("🛡 تنظیم گروه لاگ ادمین", callback_data='admin:set_log_group_admin')],
         [InlineKeyboardButton("🎓 تنظیم گروه لاگ محتوا", callback_data='admin:set_log_group_content')],
+        [InlineKeyboardButton("🧪 تست ارسال به گروه‌های لاگ", callback_data='admin:test_log_groups')],
         [InlineKeyboardButton("📊 تنظیم کانال نظرسنجی", callback_data='admin:set_poll_channel')],
         [InlineKeyboardButton(channel_label, callback_data='admin:channel_lock')],
         [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data='admin:cat_settings')],
     ]
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _test_log_groups(query, context):
+    """
+    🧪 FIX جدید: فرستادن یک پیام تست واقعی به هر دو گروه لاگ و گزارش
+    نتیجه‌ی دقیق (✅/❌ + متن خطا) در همین‌جا — تا سلامت اتصال گروه‌ها
+    بدون حدس‌زدن قابل بررسی باشد. اگر ارسال شکست بخورد، send_audit_log
+    هم از این پس به پیوی مدیر ارشد یک‌بار هشدار می‌دهد.
+    """
+    results = []
+    for key, label in (('log_group_admin', '🛡 گروه لاگ مدیریت'),
+                       ('log_group_content', '🎓 گروه لاگ محتوا')):
+        chat_id = await db.get_setting(key, None)
+        if not chat_id:
+            results.append(f"{label}: ⬜ تنظیم نشده")
+            continue
+        try:
+            await context.bot.send_message(
+                int(chat_id),
+                f"🧪 <b>پیام تست</b>\n\nاگر این پیام را می‌بینی، اتصال "
+                f"{label} سالم است. ✅\n"
+                f"🕒 {now_tehran_str()}",
+                parse_mode='HTML'
+            )
+            results.append(f"{label}: ✅ پیام تست ارسال شد (<code>{chat_id}</code>)")
+        except Exception as e:
+            results.append(
+                f"{label}: ❌ خطا در ارسال\n<code>{str(e)[:150]}</code>\n"
+                f"💡 ربات را دوباره به گروه اضافه/ادمین کن یا آیدی را دوباره تنظیم کن."
+            )
+    results.append(
+        "\n<i>از این پس اگر ارسال یک لاگ واقعی هم شکست بخورد، یک‌بار به "
+        "پیوی مدیر ارشد هشدار داده می‌شود (تا با اصلاح گروه).</i>"
+    )
+    await query.edit_message_text(
+        "🧪 <b>نتیجه‌ی تست گروه‌های لاگ</b>\n━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(results),
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ بازگشت به تنظیمات", callback_data='admin:settings')
+        ]])
+    )
 
 
 async def _show_donation_manage(query):
@@ -3089,6 +3134,18 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # — با فوروارد یک پیام به @RawDataBot یا @userinfobot پیدا می‌شود
         elif text.lstrip('-').isdigit():
             chat_id = int(text)
+            # FIX: آیدی گروه/سوپرگروه/کانال همیشه منفی است؛ آیدی مثبت
+            # مال یک کاربر است و ذخیره‌اش فقط باعث می‌شد همه‌ی لاگ‌ها
+            # بعداً بی‌صدا در ارسال شکست بخورند
+            if chat_id >= 0:
+                await update.message.reply_text(
+                    "⚠️ آیدی گروه باید <b>عدد منفی</b> باشد (مثل "
+                    "<code>-1001234567890</code>) — عدد مثبت آیدی یک کاربر است، نه گروه.\n\n"
+                    "💡 یک پیام از گروه را به @RawDataBot فوروارد کنید و مقدار "
+                    "<code>chat.id</code> را اینجا بفرستید.",
+                    parse_mode='HTML'
+                )
+                return True
         if not chat_id:
             await update.message.reply_text(
                 "⚠️ آیدی عددی گروه (با علامت منفی، مثلاً <code>-1001234567890</code>) را بفرستید.\n\n"
