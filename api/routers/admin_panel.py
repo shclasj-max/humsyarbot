@@ -498,6 +498,70 @@ async def export_excel(admin=Depends(get_admin_user)):
     return {"ok":True,"message":"📊 فایل اکسل از طریق ربات ارسال می‌شود."}
 
 # ══════════════════════════════════════════════
+# ⚙️ تنظیمات ربات — همان کلیدهایی که پنل ربات
+# استفاده می‌کند تا هر دو کانال سینک بمانند
+# ══════════════════════════════════════════════
+
+@router.get("/settings")
+async def bot_settings_get(admin=Depends(get_admin_user)):
+    """خواندن تنظیمات مشترک ربات/مینی‌اپ."""
+    return {
+        "maintenance_mode": bool(await db.get_setting("maintenance_mode", False)),
+        "maintenance_text": (await db.get_setting("maintenance_text", "")) or "",
+        "require_student_id": bool(await db.get_setting("require_student_id", False)),
+    }
+
+class BotSettingsPatch(BaseModel):
+    maintenance_mode: Optional[bool] = None
+    maintenance_text: Optional[str] = None
+    require_student_id: Optional[bool] = None
+
+@router.patch("/settings")
+async def bot_settings_patch(body: BotSettingsPatch, admin=Depends(get_admin_user)):
+    """تغییر تنظیمات — دقیقاً با همان سطح حساسیت لاگ پنل ربات:
+    حالت تعمیر → CRITICAL، الزام شماره دانشجویی → HIGH."""
+    changed = []
+
+    if body.maintenance_mode is not None:
+        old = bool(await db.get_setting("maintenance_mode", False))
+        if old != body.maintenance_mode:
+            await db.set_setting("maintenance_mode", body.maintenance_mode)
+            await _audit(admin,
+                "فعال‌شدن حالت تعمیر" if body.maintenance_mode else "غیرفعال‌شدن حالت تعمیر",
+                "Settings", severity="CRITICAL",
+                before={"وضعیت": "غیرفعال" if body.maintenance_mode else "فعال"},
+                after={"وضعیت": "فعال" if body.maintenance_mode else "غیرفعال"},
+                tags=["حالت_تعمیر", "پنل_وب"])
+            changed.append("maintenance_mode")
+
+    if body.maintenance_text is not None:
+        text = body.maintenance_text.strip()
+        if len(text) > 400:
+            raise HTTPException(422, "متن حالت تعمیر نباید بیشتر از ۴۰۰ کاراکتر باشد")
+        old = (await db.get_setting("maintenance_text", "")) or ""
+        if old != text:
+            await db.set_setting("maintenance_text", text)
+            await _audit(admin, "تغییر متن حالت تعمیر", "Settings", severity="HIGH",
+                before={"متن": old or "(پیش‌فرض)"},
+                after={"متن": text or "(پیش‌فرض)"},
+                tags=["حالت_تعمیر", "پنل_وب"])
+            changed.append("maintenance_text")
+
+    if body.require_student_id is not None:
+        old = bool(await db.get_setting("require_student_id", False))
+        if old != body.require_student_id:
+            await db.set_setting("require_student_id", body.require_student_id)
+            await _audit(admin,
+                "اجباری‌شدن شماره دانشجویی" if body.require_student_id else "اختیاری‌شدن شماره دانشجویی",
+                "Settings", severity="HIGH",
+                before={"شماره دانشجویی": "اختیاری" if body.require_student_id else "اجباری"},
+                after={"شماره دانشجویی": "اجباری" if body.require_student_id else "اختیاری"},
+                tags=["تنظیمات_ثبت_نام", "پنل_وب"])
+            changed.append("require_student_id")
+
+    return {"ok": True, "changed": changed}
+
+# ══════════════════════════════════════════════
 # 🛡 لاگ فعالیت مدیران (نمایش در پنل وب)
 # ══════════════════════════════════════════════
 
