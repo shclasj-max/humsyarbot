@@ -108,3 +108,21 @@ async def get_content_admin_user(user=Depends(get_current_user)) -> dict:
     if user["id"] != ADMIN_ID and role not in ("admin", "content_admin"):
         raise HTTPException(status_code=403, detail="content_admin_only")
     return user
+
+
+async def get_resource_access_user(user=Depends(get_current_user)) -> dict:
+    """گیت اشتراک برای «منابع علوم پایه» و «رفرنس‌ها».
+
+    دقیقاً همان قانونِ واحد ربات (subscription.has_access) اجرا می‌شود:
+    کلید سراسری subscription_enforced → بای‌پس مدیر اصلی → db.sub_is_active.
+    بدون این گیت، مینی‌اپ محتوای قفلِ ربات را آزاد سرو می‌کرد؛ بک‌اند
+    مرجع نهایی است و فرانت فقط UI قفل را نشان می‌دهد.
+    """
+    # import تنبل — گرفتن has_access از ماژول ربات بدون کشیدن وابستگی‌های
+    # تلگرام به گرافِ بوت FastAPI و بدون دوباره‌نویسی منطق
+    from subscription import has_access
+
+    if not await has_access(user["id"]):
+        raise HTTPException(status_code=403, detail="subscription_required")
+    return user
+
