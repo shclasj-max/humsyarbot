@@ -23,22 +23,51 @@ async def _audit(admin, action: str, module: str, *, severity: str = "INFO",
                  target_label: str = "", details: str = "",
                  before: dict = None, after: dict = None,
                  tags: list = None):
-    """ثبت رویداد در audit_logs برای اقدامات انجام‌شده از پنل وب.
+    """ثبت رویداد در audit_logs برای اقدامات انجام‌شده از پنل وب +
+    ارسال همان رویداد به گروه لاگ تلگرام از طریق صف bot_notifications.
 
     مقادیر به‌صورت موضعی (positional) به db.log_action داده می‌شوند تا
-    دقیقاً با امضای موجود در database.py سازگار بمانند. هر خطایی در لاگ
-    نباید اقدام اصلی را شکست دهد، پس در try/except قرار گرفته است.
+    دقیقاً با امضای موجود در database.py سازگار بمانند.
+
+    FIX سینک: قبلاً لاگ‌های وب فقط در دیتابیس می‌ماندند و گروه لاگ
+    تلگرام هرگز اقدامات پنل وب را نمی‌دید (فقط لاگ‌های ربات را).
+    حالا متن با همان build_audit_log_text مشترکِ ربات ساخته می‌شود و به
+    گروه log_group_admin صف می‌شود — قالب پیام در گروه برای هر دو کانال
+    کاملاً یکدست است و لاگ‌های وب با تگ #پنل_وب مشخص می‌شوند.
+    هر خطایی در لاگ نباید اقدام اصلی را شکست دهد، پس در try/except است.
     """
     try:
         actor = admin.get("_db") or {}
+        uid  = actor.get("user_id", admin.get("id", 0))
+        name = actor.get("name", "مدیر ارشد")
+        # نقش واقعی با همان منطق ربات (مدیر ارشد/نقش‌های فرعی/...) تا
+        # در گروه و دیتابیس دقیقاً مثل لاگ‌های ربات دیده شود
+        try:
+            role = await db.get_actor_role_label(uid)
+        except Exception:
+            role = actor.get("role", "admin")
         await db.log_action(
-            actor.get("user_id", admin.get("id", 0)),
-            actor.get("name", "مدیر ارشد"),
-            actor.get("role", "admin"),
+            uid, name, role,
             action, module, "admin", severity,
             str(target_id), target_type, target_label,
             before, after, details, tags,
         )
+        # سینک با گروه لاگ تلگرام — همان متنی که send_audit_log می‌سازد
+        try:
+            from utils import build_audit_log_text
+            chat_id = await db.get_setting("log_group_admin", None)
+            if chat_id:
+                sync_tags = list(dict.fromkeys((tags or []) + ["پنل_وب"]))
+                text = build_audit_log_text(
+                    "admin", name, uid, action,
+                    module=module, severity=severity, actor_role=role,
+                    target_id=str(target_id), target_type=target_type,
+                    target_label=target_label, before=before, after=after,
+                    details=details, tags=sync_tags,
+                )
+                _notify(int(chat_id), text, "audit_log_web")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -509,12 +538,19 @@ async def bot_settings_get(admin=Depends(get_admin_user)):
         "maintenance_mode": bool(await db.get_setting("maintenance_mode", False)),
         "maintenance_text": (await db.get_setting("maintenance_text", "")) or "",
         "require_student_id": bool(await db.get_setting("require_student_id", False)),
+        # گروه‌های لاگ تلگرام — همان کلیدهای پنل ربات تا وضعیتش از وب هم
+        # قابل مشاهده/تغییر باشد (None یعنی تنظیم نشده)
+        "log_group_admin": await db.get_setting("log_group_admin", None),
+        "log_group_content": await db.get_setting("log_group_content", None),
     }
 
 class BotSettingsPatch(BaseModel):
     maintenance_mode: Optional[bool] = None
     maintenance_text: Optional[str] = None
     require_student_id: Optional[bool] = None
+    # None صریح در بدنه = حذف تنظیم گروه (با model_fields_set تشخیص داده می‌شود)
+    log_group_admin: Optional[int] = None
+    log_group_content: Optional[int] = None
 
 @router.patch("/settings")
 async def bot_settings_patch(body: BotSettingsPatch, admin=Depends(get_admin_user)):
@@ -559,7 +595,52 @@ async def bot_settings_patch(body: BotSettingsPatch, admin=Depends(get_admin_use
                 tags=["تنظیمات_ثبت_نام", "پنل_وب"])
             changed.append("require_student_id")
 
+    # ── گروه‌های لاگ تلگرام — None صریح یعنی حذف تنظیم ──
+    for field, key, label in (
+        ("log_group_admin",   "log_group_admin",   "گروه لاگ مدیریت"),
+        ("log_group_content", "log_group_content", "گروه لاگ محتوا"),
+    ):
+        if field in body.model_fields_set:
+            val = getattr(body, field)
+            if val is not None and val >= 0:
+                raise HTTPException(422,
+                    "آیدی گروه باید عدد منفی باشد (مثل -1001234567890) — عدد مثبت آیدی کاربر است")
+            old = await db.get_setting(key, None)
+            if old != val:
+                await db.set_setting(key, val)
+                await _audit(admin,
+                    f"تنظیم {label}" if val is not None else f"حذف {label}",
+                    "Settings", severity="HIGH",
+                    before={"گروه": str(old) if old else "تنظیم نشده"},
+                    after={"گروه": str(val) if val is not None else "حذف شد"},
+                    tags=["گروه_لاگ", "پنل_وب"])
+                changed.append(key)
+
     return {"ok": True, "changed": changed}
+
+class LogGroupTestBody(BaseModel):
+    kind: str  # 'admin' | 'content'
+
+@router.post("/settings/test-log-group")
+async def test_log_group(body: LogGroupTestBody, admin=Depends(get_admin_user)):
+    """ارسال پیام تست به گروه لاگ از مسیر واقعی ربات (صف bot_notifications)
+    تا سلامت کل زنجیره‌ی وب→دیتابیس→ربات→گروه با یک دکمه قابل بررسی باشد."""
+    if body.kind not in ("admin", "content"):
+        raise HTTPException(422, "kind باید admin یا content باشد")
+    key   = "log_group_admin" if body.kind == "admin" else "log_group_content"
+    label = "🛡 لاگ مدیریت" if body.kind == "admin" else "🎓 لاگ محتوا"
+    chat_id = await db.get_setting(key, None)
+    if not chat_id:
+        raise HTTPException(404, "این گروه هنوز تنظیم نشده است")
+    _notify(int(chat_id),
+        f"🧪 <b>پیام تست گروه {label}</b>\n\n"
+        "این پیام از پنل وب مینی‌اپ ارسال شد — اگر آن را می‌خوانی، "
+        "اتصال کامل وب ← ربات ← گروه لاگ سالم است. ✅",
+        "log_group_test")
+    await _audit(admin, f"ارسال پیام تست به گروه {label}", "Settings",
+        severity="INFO", target_id=str(chat_id), target_type="group",
+        tags=["گروه_لاگ", "پنل_وب"])
+    return {"ok": True, "message": "پیام تست از طریق ربات ارسال می‌شود (ظرف چند ثانیه در گروه می‌رسد)."}
 
 # ══════════════════════════════════════════════
 # 🛡 لاگ فعالیت مدیران (نمایش در پنل وب)
