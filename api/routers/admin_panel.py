@@ -1,6 +1,7 @@
 """👑 Admin Panel"""
+import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional, List
@@ -15,6 +16,31 @@ def _notify(chat_id: int, text: str, ntype: str = "admin_notice"):
     notif = db.client["medicalbot"]["bot_notifications"]
     return notif.insert_one({"type":ntype,"chat_id":chat_id,"text":text,
         "sent":False,"created_at":datetime.now().isoformat()})
+
+
+async def _audit(admin, action: str, module: str, *, severity: str = "INFO",
+                 target_id: str = "", target_type: str = "",
+                 target_label: str = "", details: str = "",
+                 before: dict = None, after: dict = None,
+                 tags: list = None):
+    """ثبت رویداد در audit_logs برای اقدامات انجام‌شده از پنل وب.
+
+    مقادیر به‌صورت موضعی (positional) به db.log_action داده می‌شوند تا
+    دقیقاً با امضای موجود در database.py سازگار بمانند. هر خطایی در لاگ
+    نباید اقدام اصلی را شکست دهد، پس در try/except قرار گرفته است.
+    """
+    try:
+        actor = admin.get("_db") or {}
+        await db.log_action(
+            actor.get("user_id", admin.get("id", 0)),
+            actor.get("name", "مدیر ارشد"),
+            actor.get("role", "admin"),
+            action, module, "admin", severity,
+            str(target_id), target_type, target_label,
+            before, after, details, tags,
+        )
+    except Exception:
+        pass
 
 
 @router.get("/stats")
@@ -87,11 +113,20 @@ async def approve(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"approved":True})
     _notify(uid, "✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از هامزیار استفاده کنید.\n/start بزنید.", "user_approved")
+    await _audit(admin, "تأیید حساب کاربر", "Users", severity="INFO",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        tags=["تأیید_کاربر","پنل_وب"])
     return {"ok":True}
 
 @router.post("/users/{uid}/reject")
 async def reject(uid: int, admin=Depends(get_admin_user)):
-    await db.users.delete_one({"user_id":uid}); return {"ok":True}
+    user = await db.get_user(uid)
+    await db.users.delete_one({"user_id":uid})
+    await _audit(admin, "رد درخواست عضویت", "Users", severity="WARNING",
+        target_id=uid, target_type="user",
+        target_label=(user or {}).get("name",""),
+        tags=["رد_کاربر","پنل_وب"])
+    return {"ok":True}
 
 @router.post("/users/{uid}/suspend")
 async def suspend(uid: int, admin=Depends(get_admin_user)):
@@ -102,6 +137,12 @@ async def suspend(uid: int, admin=Depends(get_admin_user)):
     await db.update_user(uid,{"suspended":suspended, "approved": not suspended})
     if suspended:
         _notify(uid, "⚠️ دسترسی شما موقتاً تعلیق شد.", "user_suspended")
+    await _audit(admin,
+        "تعلیق حساب کاربر" if suspended else "رفع تعلیق حساب کاربر",
+        "Users", severity="HIGH" if suspended else "INFO",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        before={"suspended":not suspended}, after={"suspended":suspended},
+        tags=["تعلیق_کاربر","پنل_وب"])
     return {"ok":True,"suspended":suspended}
 
 @router.post("/users/{uid}/delete")
@@ -111,6 +152,9 @@ async def delete_user_ep(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     _notify(uid, "❌ حساب شما حذف شد.", "user_deleted")
     await db.delete_user(uid)
+    await _audit(admin, "حذف حساب کاربر", "Users", severity="CRITICAL",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        tags=["حذف_کاربر","پنل_وب"])
     return {"ok":True}
 
 @router.post("/users/{uid}/block")
@@ -122,12 +166,17 @@ async def block_user_ep(uid: int, admin=Depends(get_admin_user)):
     await db.block_user(uid, blocked_by=admin["id"], blocked_by_name=actor_name)
     await db.blacklist.update_one({"_id":uid},{"$set":{"name":user.get("name","")}})
     _notify(uid, "🚫 حساب شما مسدود شد و امکان ثبت‌نام مجدد ندارید.", "user_blocked")
+    await _audit(admin, "مسدودسازی کاربر (بلک‌لیست)", "Users", severity="CRITICAL",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        tags=["بلاک_کاربر","پنل_وب"])
     return {"ok":True}
 
 @router.post("/users/{uid}/unblock")
 async def unblock_user_ep(uid: int, admin=Depends(get_admin_user)):
     ok = await db.unblock_user(uid)
     if not ok: raise HTTPException(404,"این آیدی در بلک‌لیست نبود")
+    await _audit(admin, "رفع مسدودیت کاربر", "Users", severity="HIGH",
+        target_id=uid, target_type="user", tags=["آنبلاک_کاربر","پنل_وب"])
     return {"ok":True}
 
 @router.get("/blacklist")
@@ -151,12 +200,18 @@ async def grant_content_admin(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"role":"content_admin"})
     _notify(uid, "🎓 <b>دسترسی ادمین محتوا به شما داده شد!</b>", "content_admin_granted")
+    await _audit(admin, "اعطای دسترسی مدیر محتوا", "Roles", severity="HIGH",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        tags=["اعطای_نقش","پنل_وب"])
     return {"ok":True}
 
 @router.delete("/content-admins/{uid}")
 async def revoke_content_admin(uid: int, admin=Depends(get_admin_user)):
     await db.update_user(uid,{"role":"student"})
     _notify(uid, "⚠️ دسترسی ادمین محتوای شما لغو شد.", "content_admin_revoked")
+    await _audit(admin, "لغو دسترسی مدیر محتوا", "Roles", severity="HIGH",
+        target_id=uid, target_type="user",
+        tags=["لغو_نقش","پنل_وب"])
     return {"ok":True}
 
 @router.get("/students")
@@ -187,7 +242,12 @@ async def edit_user(uid: int, body: UserPatch, admin=Depends(get_admin_user)):
     if body.role       is not None:
         if body.role not in ("student","content_admin","support"): raise HTTPException(422,"نقش نامعتبر")
         updates["role"]=body.role
-    if updates: await db.update_user(uid,updates)
+    if updates:
+        await db.update_user(uid,updates)
+        await _audit(admin, "ویرایش اطلاعات کاربر", "Users", severity="WARNING",
+            target_id=uid, target_type="user",
+            details=" / ".join(f"{k}: {v}" for k, v in updates.items())[:400],
+            tags=["ویرایش_کاربر","پنل_وب"])
     return {"ok":True}
 
 # ══════════════════════════════════════════════
@@ -212,16 +272,26 @@ async def add_intake_ep(body: IntakeCreate, admin=Depends(get_admin_user)):
     code=body.code.strip(); label=body.label.strip()
     if not code or not label: raise HTTPException(422,"کد و برچسب الزامی است")
     await db.add_intake(code, label)
+    await _audit(admin, "افزودن ورودی جدید", "Users", severity="INFO",
+        target_id=code, target_type="intake", target_label=label,
+        tags=["ورودی","پنل_وب"])
     return {"ok":True}
 
 @router.post("/intakes/{code}/toggle")
 async def toggle_intake_ep(code: str, admin=Depends(get_admin_user)):
     new_state = await db.toggle_intake(code)
+    await _audit(admin,
+        "فعال‌سازی پذیرش ورودی" if new_state else "توقف پذیرش ورودی",
+        "Users", severity="WARNING",
+        target_id=code, target_type="intake",
+        tags=["ورودی","پنل_وب"])
     return {"ok":True,"active":new_state}
 
 @router.delete("/intakes/{code}")
 async def delete_intake_ep(code: str, admin=Depends(get_admin_user)):
     await db.delete_intake(code)
+    await _audit(admin, "حذف ورودی", "Users", severity="HIGH",
+        target_id=code, target_type="intake", tags=["ورودی","پنل_وب"])
     return {"ok":True}
 
 # ══════════════════════════════════════════════
@@ -257,15 +327,24 @@ async def admin_reply(tid: int, body: AdminReply, admin=Depends(get_admin_user))
     if not msg: raise HTTPException(422)
     await db.ticket_add_reply(tid, msg)
     _notify(t["user_id"], f"💬 <b>پاسخ پشتیبانی #{tid}</b>\n{msg}", "ticket_admin_reply")
+    await _audit(admin, "پاسخ به تیکت پشتیبانی", "Tickets", severity="INFO",
+        target_id=tid, target_type="ticket", target_label=t.get("subject",""),
+        tags=["تیکت","پنل_وب"])
     return {"ok":True}
 
 @router.post("/tickets/{tid}/close")
 async def close_ticket(tid: int, admin=Depends(get_admin_user)):
-    await db.ticket_close(tid); return {"ok":True}
+    await db.ticket_close(tid)
+    await _audit(admin, "بستن تیکت", "Tickets", severity="INFO",
+        target_id=tid, target_type="ticket", tags=["تیکت","پنل_وب"])
+    return {"ok":True}
 
 @router.post("/tickets/{tid}/reopen")
 async def reopen_ticket(tid: int, admin=Depends(get_admin_user)):
-    await db.ticket_reopen(tid); return {"ok":True}
+    await db.ticket_reopen(tid)
+    await _audit(admin, "بازگشایی تیکت", "Tickets", severity="INFO",
+        target_id=tid, target_type="ticket", tags=["تیکت","پنل_وب"])
+    return {"ok":True}
 
 # ══════════════════════════════════════════════
 # 📢 Broadcast پیشرفته — preview / تأیید / زمان‌دار / هدفمند
@@ -310,6 +389,11 @@ async def broadcast(body: BroadcastSend, admin=Depends(get_admin_user)):
     if body.send_at: doc_base["send_at"] = body.send_at
     docs = [{**doc_base, "chat_id": u["user_id"]} for u in users]
     if docs: await notif.insert_many(docs)
+    await _audit(admin, "ارسال همگانی" + (" (زمان‌دار)" if body.send_at else ""),
+        "Notifications", severity="HIGH",
+        target_type="broadcast", target_label=f"{len(docs)} گیرنده",
+        details=text[:300],
+        tags=["ارسال_همگانی","پنل_وب"])
     return {"ok":True, "queued": len(docs), "scheduled": bool(body.send_at)}
 
 @router.get("/broadcast/history")
@@ -361,6 +445,9 @@ async def poll_create(body: PollCreate, admin=Depends(get_admin_user)):
     data = resp.json()
     if not data.get("ok"):
         raise HTTPException(502, f"ارسال ناموفق — مطمئن شو ربات ادمین کانال هست ({data.get('description','')})")
+    await _audit(admin, "ایجاد نظرسنجی در کانال", "Notifications", severity="INFO",
+        target_type="poll", target_label=body.question[:100],
+        tags=["نظرسنجی","پنل_وب"])
     return {"ok":True}
 
 # ══════════════════════════════════════════════
@@ -380,7 +467,12 @@ class NotifSettingsUpdate(BaseModel):
 @router.post("/notifications/settings")
 async def notif_settings_update(body: NotifSettingsUpdate, admin=Depends(get_admin_user)):
     if body.interval_hours not in (24, 48, 72): raise HTTPException(422, "مقدار مجاز: ۲۴، ۴۸ یا ۷۲")
+    old = await db.get_setting("resource_notif_interval_hours", 24)
     await db.set_setting("resource_notif_interval_hours", body.interval_hours)
+    await _audit(admin, "تغییر فاصله اعلان منابع", "Settings", severity="WARNING",
+        target_type="settings",
+        before={"فاصله(ساعت)": old}, after={"فاصله(ساعت)": body.interval_hours},
+        tags=["تنظیمات_اعلان","پنل_وب"])
     return {"ok":True}
 
 @router.get("/notifications/history")
@@ -404,3 +496,169 @@ async def notif_retry(run_id: str, admin=Depends(get_admin_user)):
 async def export_excel(admin=Depends(get_admin_user)):
     _notify(ADMIN_ID, "__EXCEL_EXPORT__", "excel_export_request")
     return {"ok":True,"message":"📊 فایل اکسل از طریق ربات ارسال می‌شود."}
+
+# ══════════════════════════════════════════════
+# 🛡 لاگ فعالیت مدیران (نمایش در پنل وب)
+# ══════════════════════════════════════════════
+
+@router.get("/audit-logs")
+async def audit_logs_admin(
+    admin=Depends(get_admin_user),
+    category: Optional[str] = Query(None),
+    min_severity: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=100),
+):
+    """فهرست لاگ فعالیت با فیلتر دسته/سطح/جست‌وجو + شمارنده سطوح.
+
+    داده همان audit_logs مشترک با بات است؛ اکشن‌های ثبت‌شده از پنل وب
+    (تگ «پنل_وب») و اکشن‌های بات هر دو اینجا دیده می‌شوند.
+    """
+    query = {}
+    if category in ("admin", "content"):
+        query["category"] = category
+    if min_severity:
+        order = ["INFO", "WARNING", "HIGH", "CRITICAL"]
+        idx = order.index(min_severity) if min_severity in order else 0
+        query["severity"] = {"$in": order[idx:]}
+    if q:
+        import re
+        pat = re.compile(re.escape(q), re.IGNORECASE)
+        query["$or"] = [
+            {"action": pat},
+            {"actor.name": pat},
+            {"target.label": pat},
+            {"details": pat},
+            {"module": pat},
+        ]
+
+    total = await db.audit_logs.count_documents(query)
+
+    # شمارنده سطوح (با همان فیلترهای دسته/جست‌وجو، بدون فیلتر سطح)
+    counter_query = {k: v for k, v in query.items() if k != "severity"}
+    sev_counts = await db.audit_logs.aggregate([
+        {"$match": counter_query},
+        {"$group": {"_id": "$severity", "count": {"$sum": 1}}},
+    ]).to_list(10)
+    counters = {
+        r["_id"]: r["count"] for r in sev_counts if r.get("_id")
+    }
+
+    rows = await db.audit_logs.find(query).sort(
+        "timestamp", -1
+    ).skip(skip).limit(limit).to_list(limit)
+
+    logs = [{
+        "id": str(r.get("_id")),
+        "timestamp": r.get("timestamp", ""),
+        "severity": r.get("severity", "INFO"),
+        "category": r.get("category", "admin"),
+        "module": r.get("module", ""),
+        "action": r.get("action", ""),
+        "actor": r.get("actor") or {},
+        "target": r.get("target") or {},
+        "details": r.get("details", ""),
+        "changes": r.get("changes") or [],
+        "tags": r.get("tags") or [],
+    } for r in rows]
+
+    return {"logs": logs, "total": total, "counters": counters}
+
+# ══════════════════════════════════════════════
+# 📊 آمار تحلیلی (نمودارهای پنل وب)
+# ══════════════════════════════════════════════
+
+@router.get("/analytics")
+async def analytics_admin(
+    admin=Depends(get_admin_user),
+    days: int = Query(14, ge=7, le=90),
+):
+    """آمار روزانه بازه اخیر + کاربران فعال + توزیع عملیات و ساعات اوج.
+
+    timestamp ها به‌صورت رشته ISO ذخیره می‌شوند، پس تاریخ روز با
+    $substrBytes روی ۱۰ کاراکتر اول استخراج می‌شود (سازگار با الگوی
+    موجود در database.py).
+    """
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+
+    async def _daily(col, ts_field):
+        expr = {"$substrBytes": [f"${ts_field}", 0, 10]}
+        rows = await col.aggregate([
+            {"$match": {ts_field: {"$gte": since}}},
+            {"$group": {"_id": expr, "count": {"$sum": 1}}},
+            {"$sort": {"_id": 1}},
+        ]).to_list(days + 2)
+        return [{"date": r["_id"], "count": r["count"]}
+                for r in rows if r.get("_id")]
+
+    users_daily, activity_daily, tickets_daily = (
+        await asyncio.gather(
+            _daily(db.users, "registered_at"),
+            _daily(db.stats_col, "timestamp"),
+            _daily(db.tickets, "created_at"),
+        )
+    )
+
+    # KPI ها
+    active_uids = await db.stats_col.distinct(
+        "user_id", {"timestamp": {"$gte": since}}
+    )
+    new_users = await db.users.count_documents(
+        {"registered_at": {"$gte": since}}
+    )
+    total_actions = await db.stats_col.count_documents(
+        {"timestamp": {"$gte": since}}
+    )
+    new_tickets = await db.tickets.count_documents(
+        {"created_at": {"$gte": since}}
+    )
+    open_reports = await db.content_reports.count_documents(
+        {"status": "new"}
+    )
+
+    # پرکاربردترین عملیات‌ها
+    top_actions_rows = await db.stats_col.aggregate([
+        {"$match": {"timestamp": {"$gte": since}}},
+        {"$group": {"_id": "$action", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 8},
+    ]).to_list(8)
+    top_actions = [
+        {"action": r["_id"] or "نامشخص", "count": r["count"]}
+        for r in top_actions_rows
+    ]
+
+    # ساعت‌های اوج فعالیت (ساعت از کاراکترهای ۱۱ تا ۱۳ رشته ISO)
+    hourly_rows = await db.stats_col.aggregate([
+        {"$match": {"timestamp": {"$gte": since}}},
+        {"$group": {
+            "_id": {"$substrBytes": ["$timestamp", 11, 2]},
+            "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 6},
+    ]).to_list(6)
+    hourly = sorted(
+        [{"hour": int(r["_id"]), "count": r["count"]}
+         for r in hourly_rows
+         if r.get("_id") and str(r["_id"]).isdigit()],
+        key=lambda x: x["hour"],
+    )
+
+    return {
+        "days": days,
+        "kpis": {
+            "active_users": len(active_uids),
+            "new_users": new_users,
+            "total_actions": total_actions,
+            "new_tickets": new_tickets,
+            "open_reports": open_reports,
+        },
+        "daily": {
+            "users": users_daily,
+            "activity": activity_daily,
+            "tickets": tickets_daily,
+        },
+        "top_actions": top_actions,
+        "hourly": hourly,
+    }
