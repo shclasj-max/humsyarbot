@@ -2,6 +2,7 @@
 🛠️ Utilities — ثابت‌ها، کیبوردها، و توابع کمکی مشترک
 """
 import os
+import html
 import logging
 from datetime import datetime
 from typing import Optional, List
@@ -444,6 +445,91 @@ def _fa_module(module: str) -> str:
     return db.MODULE_LABELS_FA.get(module, module)
 
 
+def build_audit_log_text(category: str, actor_name: str, actor_id: int,
+                          action: str, module: str = '', details: str = '',
+                          severity: str = 'INFO', actor_role: str = '',
+                          target_id: str = '', target_type: str = '',
+                          target_label: str = '', before: dict = None,
+                          after: dict = None, tags: list = None) -> str:
+    """
+    🧱 متن نهایی پیام لاگ — تابع خالص بدون وابستگی به تلگرام، تا هم
+    ربات (send_audit_log) و هم بک‌اند مینی‌اپ (صف bot_notifications)
+    دقیقاً همان قالب را تولید کنند و لاگ هر دو کانال در گروه یکدست
+    به‌نظر برسد.
+
+    FIX باگ: همه‌ی فیلدهای داینامیک html-escape می‌شوند — پیام با
+    parse_mode=HTML فرسته می‌شود و قبل از این، یک نام یا جزئیات حاوی
+    «<» یا «&» کل پیام را BadRequest می‌کرد و لاگ بی‌صدا گم می‌شد.
+    FIX باگ: سقف ۴۰۹۶ کاراکتر تلگرام — متن به ۴۰۰۰ کاراکتر محدود
+    می‌شود تا لاگ‌های پرجزئیات (مثل broadcast) هرگز drop نشوند.
+    """
+    def esc(v) -> str:
+        return html.escape(str(v))
+
+    sev_meta  = SEVERITY_META.get(severity, SEVERITY_META['INFO'])
+    cat_icon  = '🛡' if category == 'admin' else '🎓'
+    cat_title = 'گزارش فعالیت مدیریتی' if category == 'admin' else 'گزارش فعالیت محتوا'
+    now_str   = now_tehran_str()
+    module_fa = _fa_module(module) if module else ''
+
+    lines = [
+        f"{cat_icon} <b>{cat_title}</b>",
+        "",
+        f"🕒 <b>زمان</b>",
+        esc(now_str),
+        "",
+        f"👤 <b>انجام‌دهنده</b>",
+        f"• نام: {esc(actor_name)}",
+        f"• نقش: {esc(actor_role or 'نامشخص')}",
+        f"• شناسه: <code>{esc(actor_id)}</code>",
+        "",
+        f"⚡ <b>عملیات</b>",
+        esc(action),
+    ]
+
+    if target_label or target_id:
+        lines += ["", f"🎯 <b>هدف</b>"]
+        if target_label:
+            lines.append(f"• عنوان: {esc(target_label)}")
+        if target_id:
+            lines.append(f"• شناسه: <code>{esc(target_id)}</code>")
+
+    if module_fa:
+        lines += ["", f"📂 <b>بخش</b>", esc(module_fa)]
+
+    if details:
+        lines += ["", f"📝 <b>جزئیات</b>", esc(details)]
+
+    if before and after:
+        change_lines = []
+        for key in after:
+            old_val = before.get(key, '—')
+            new_val = after.get(key, '—')
+            change_lines.append(f"• {esc(key)}: {esc(old_val)} ← {esc(new_val)}")
+        if change_lines:
+            lines += ["", f"🔄 <b>تغییرات</b>"] + change_lines
+
+    lines += ["", f"🏷 <b>سطح اهمیت</b>", f"{sev_meta['icon']} {sev_meta['label']}"]
+
+    # تگ‌های جستجو — همیشه ماژول فارسی + نقش، به‌علاوه تگ‌های اضافی
+    auto_tags = []
+    if module_fa:
+        auto_tags.append(module_fa.replace(' ', '_'))
+    if actor_role:
+        clean_role = actor_role.split('(')[0].strip().replace(' ', '_')
+        if clean_role:
+            auto_tags.append(clean_role)
+    # حذف تگ تکراری با حفظ ترتیب
+    all_tags = list(dict.fromkeys(auto_tags + (tags or [])))
+    if all_tags:
+        lines += ["", ' '.join(f"#{esc(t)}" for t in all_tags if t)]
+
+    text = '\n'.join(lines)
+    if len(text) > 4000:
+        text = text[:3960] + "\n… <i>(ادامه در لاگ دیتابیس)</i>"
+    return text
+
+
 async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
                           action: str, module: str = '', details: str = '',
                           severity: str = 'INFO', actor_role: str = '',
@@ -452,15 +538,14 @@ async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
                           after: dict = None, tags: list = None,
                           correlation_id: str = None) -> str:
     """
-    FIX بازطراحی کامل — ساختار ثابت طبق سند:
-    🛡 گزارش فعالیت → 🕒 زمان → 👤 انجام‌دهنده(نام+نقش+شناسه) →
-    ⚡ عملیات → 🎯 هدف(برچسب قابل‌فهم، نه فقط ObjectId خام) →
-    📂 بخش(فارسی) → 📝 جزئیات → 🔄 تغییرات → 🏷 سطح اهمیت → #تگ‌ها
+    ثبت در دیتابیس + ارسال همان متن به گروه لاگ تلگرام.
+    متن پیام را build_audit_log_text می‌سازد (مشترک با وب‌پنل).
 
-    target_label: نام/متن قابل‌فهم هدف — مثلاً نام کاربر یا عنوان سوال.
-    اگر خالی باشد، فقط target_id (در صورت وجود) نشان داده می‌شود.
-    correlation_id: برای پیوند دادن چند رویداد یک عملیات (مثل شروع/
-    پایان broadcast) — اختیاری.
+    FIX پایداری: اگر ارسال به گروه شکست بخورد (ربات اخراج شده، گروه
+    حذف یا به سوپرگروه تبدیل شده و آیدی عوض شده)، قبلاً فقط یک warning
+    در لاگ سرور می‌ماند و کسی متوجه نمی‌شد. حالا فقط در اولین شکست،
+    یک هشدار به پیوی مدیر ارشد می‌رود (فلگ log_group_alerted_*) و با
+    اولین موفقیت مجدد، فلگ پاک می‌شود — نه اسپم، نه سکوت مرگبار.
     اگر گروه لاگ تنظیم نشده باشد، فقط در دیتابیس ثبت می‌شود — هرگز
     به پیوی شخصی ادمین ارشد نمی‌رود.
     """
@@ -473,73 +558,43 @@ async def send_audit_log(bot, category: str, actor_name: str, actor_id: int,
     )
 
     group_key = 'log_group_admin' if category == 'admin' else 'log_group_content'
+    alert_key = f'log_group_alerted_{category}'
     chat_id   = await db.get_setting(group_key, None)
     if not chat_id:
         return log_id
 
-    sev_meta  = SEVERITY_META.get(severity, SEVERITY_META['INFO'])
-    cat_icon  = '🛡' if category == 'admin' else '🎓'
-    cat_title = 'گزارش فعالیت مدیریتی' if category == 'admin' else 'گزارش فعالیت محتوا'
-    now_str   = now_tehran_str()
-    module_fa = _fa_module(module) if module else ''
-
-    lines = [
-        f"{cat_icon} <b>{cat_title}</b>",
-        "",
-        f"🕒 <b>زمان</b>",
-        f"{now_str}",
-        "",
-        f"👤 <b>انجام‌دهنده</b>",
-        f"• نام: {actor_name}",
-        f"• نقش: {actor_role or 'نامشخص'}",
-        f"• شناسه: <code>{actor_id}</code>",
-        "",
-        f"⚡ <b>عملیات</b>",
-        f"{action}",
-    ]
-
-    if target_label or target_id:
-        lines += ["", f"🎯 <b>هدف</b>"]
-        if target_label:
-            lines.append(f"• عنوان: {target_label}")
-        if target_id:
-            lines.append(f"• شناسه: <code>{target_id}</code>")
-
-    if module_fa:
-        lines += ["", f"📂 <b>بخش</b>", module_fa]
-
-    if details:
-        lines += ["", f"📝 <b>جزئیات</b>", f"{details}"]
-
-    if before and after:
-        change_lines = []
-        for key in after:
-            old_val = before.get(key, '—')
-            new_val = after.get(key, '—')
-            change_lines.append(f"• {key}: {old_val} ← {new_val}")
-        if change_lines:
-            lines += ["", f"🔄 <b>تغییرات</b>"] + change_lines
-
-    lines += ["", f"🏷 <b>سطح اهمیت</b>", f"{sev_meta['icon']} {sev_meta['label']}"]
-
-    # تگ‌های جستجو — همیشه ماژول فارسی + عملیات کوتاه، به‌علاوه تگ‌های اضافی
-    auto_tags = []
-    if module_fa:
-        auto_tags.append(module_fa.replace(' ', '_'))
-    if actor_role:
-        # FIX: حذف پرانتز و کاراکترهای نامناسب برای تگ تلگرام
-        clean_role = actor_role.split('(')[0].strip().replace(' ', '_')
-        auto_tags.append(clean_role)
-    all_tags = auto_tags + (tags or [])
-    if all_tags:
-        lines += ["", ' '.join(f"#{t}" for t in all_tags)]
-
-    text = '\n'.join(lines)
+    text = build_audit_log_text(
+        category, actor_name, actor_id, action,
+        module=module, details=details, severity=severity,
+        actor_role=actor_role, target_id=target_id, target_type=target_type,
+        target_label=target_label, before=before, after=after, tags=tags,
+    )
 
     try:
         await bot.send_message(int(chat_id), text, parse_mode='HTML')
+        # موفقیت — اگر قبلاً هشدار خرابی داده بودیم، فلگ را پاک کن
+        if await db.get_setting(alert_key, False):
+            await db.set_setting(alert_key, False)
     except Exception as e:
         logger.warning(f"send_audit_log failed for chat {chat_id}: {e}")
+        # هشدار یک‌باره به مدیر ارشد تا گروه را دوباره تنظیم کند
+        try:
+            if not await db.get_setting(alert_key, False):
+                await db.set_setting(alert_key, True)
+                group_fa = 'لاگ مدیریت' if category == 'admin' else 'لاگ محتوا'
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 <b>ارسال لاگ به گروه {group_fa} ناموفق بود</b>\n\n"
+                    f"🔑 گروه فعلی: <code>{chat_id}</code>\n"
+                    f"⚠️ خطا: <code>{str(e)[:300]}</code>\n\n"
+                    "💡 معمولاً یعنی ربات از گروه حذف/اخراج شده یا گروه به "
+                    "سوپرگروه تبدیل شده و آیدی‌اش عوض شده. لطفاً از مسیر «پنل "
+                    "مدیریت ← ⚙️ تنظیمات ← تنظیم گروه لاگ» دوباره تنظیمش کن.\n"
+                    "تا درست نشود، لاگ‌ها فقط در دیتابیس ثبت می‌شوند و هیچ‌جا "
+                    "نمایش داده نمی‌شوند.",
+                    parse_mode='HTML')
+        except Exception:
+            pass
 
     return log_id
 
