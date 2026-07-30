@@ -49,31 +49,31 @@ async def backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == 'export_users':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'users')
+        await _export_section(query, context, 'users')
 
     elif action == 'export_content':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'content')
+        await _export_section(query, context, 'content')
 
     elif action == 'export_refs':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'refs')
+        await _export_section(query, context, 'refs')
 
     elif action == 'export_qbank':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'qbank')
+        await _export_section(query, context, 'qbank')
 
     elif action == 'export_subscription':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'subscription')
+        await _export_section(query, context, 'subscription')
 
     elif action == 'export_grades':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'grades')
+        await _export_section(query, context, 'grades')
 
     elif action == 'export_access':
         await query.edit_message_text("⏳ در حال آماده‌سازی...", parse_mode='HTML')
-        await _export_section(query, 'access')
+        await _export_section(query, context, 'access')
 
     elif action == 'restore_prompt':
         await query.edit_message_text(
@@ -363,6 +363,21 @@ async def _export_all(query, context):
     try:
         data = await build_full_backup_data()
         await _send_json_file(query, data, filename='backup_full')
+        # FIX لاگ: دانلود کل دیتابیس حساس‌ترین عملیات است و قبلاً
+        # هیچ‌جا ثبت نمی‌شد — حالا مثل خروجی اکسل، در audit_logs و
+        # گروه لاگ ثبت می‌شود که کی و چه زمانی بکاپ گرفته است.
+        from utils import send_audit_log
+        uid = query.from_user.id
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "دریافت پشتیبان کامل دیتابیس", module='Backup', severity='HIGH',
+            actor_role=actor_role,
+            details=f"👥 کاربران: {data['summary'].get('users',0)} | 🧪 سوالات: {data['summary'].get('questions',0)}",
+            tags=['پشتیبان']
+        )
     except Exception as e:
         logger.error(f"Backup error: {e}")
         await query.edit_message_text(
@@ -373,10 +388,28 @@ async def _export_all(query, context):
             ]]))
 
 
-async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str = 'backup_auto'):
+def _count_section_records(data: dict) -> int:
+    """شمارش کل رکوردهای یک بکاپ بخشی — یا از فیلد count یا جمع count زیربخش‌ها"""
+    total = data.get('count')
+    if isinstance(total, int):
+        return total
+    return sum(
+        v.get('count', 0) for v in data.values()
+        if isinstance(v, dict) and isinstance(v.get('count'), int)
+    )
+
+
+async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str = 'backup_auto',
+                                   title: str = None):
     """
-    FIX جدید: ارسال فایل بکاپ مستقیماً با bot.send_document — برای
-    استفاده در job بکاپ خودکار، که query/callback در دسترس نیست.
+    ارسال فایل بکاپ مستقیماً با bot.send_document — برای job بکاپ
+    خودکار و همچنین درخواست‌های پنل وب (صف bot_notifications) که
+    query/callback در دسترس نیست.
+
+    FIX جدید: پارامتر title اختیاری — برای بکاپ خودکار «روزانه» و برای
+    درخواست دستی وب «پشتیبان‌گیری دستی (از پنل وب)» نمایش داده می‌شود.
+    FIX جدید: برای بکاپ بخشی (بدون summary کامل)، کپشن به‌جای آمار
+    صفرگونه، توضیح بخش و تعداد رکوردهایش را نشان می‌دهد.
     """
     json_str   = json.dumps(data, ensure_ascii=False, indent=2, cls=_Enc)
     file_bytes = json_str.encode('utf-8')
@@ -386,18 +419,24 @@ async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str =
     file_obj.name = fname
 
     summary = data.get('summary', {})
-    stats_lines = [
-        f"👥 کاربران: {summary.get('users',0)}",
-        f"📖 درس‌ها: {summary.get('lessons',0)}",
-        f"🧪 سوالات: {summary.get('questions',0)}",
-        f"🎫 تیکت‌ها: {summary.get('tickets',0)}",
-    ]
+    if summary:
+        stats_text = '\n'.join([
+            f"👥 کاربران: {summary.get('users',0)}",
+            f"📖 درس‌ها: {summary.get('lessons',0)}",
+            f"🧪 سوالات: {summary.get('questions',0)}",
+            f"🎫 تیکت‌ها: {summary.get('tickets',0)}",
+        ])
+    else:
+        desc  = data.get('description', 'بخشی از دیتابیس')
+        total = _count_section_records(data)
+        stats_text = f"🗂 بخش: {desc}\n📊 رکوردها: {total}"
+
     caption = (
-        f"💾 <b>بکاپ خودکار روزانه</b>\n"
+        f"{title or '💾 <b>بکاپ خودکار روزانه</b>'}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"🕐 {now_tehran_str()}\n\n"
-        + '\n'.join(stats_lines) +
-        f"\n\n📦 حجم: {len(file_bytes)//1024} KB"
+        f"{stats_text}\n\n"
+        f"📦 حجم: {len(file_bytes)//1024} KB"
     )
     await bot.send_document(
         chat_id, document=file_obj, caption=caption,
@@ -405,75 +444,135 @@ async def send_backup_to_bot_chat(bot, chat_id: int, data: dict, filename: str =
     )
 
 
-async def _export_section(query, section: str):
-    """پشتیبان از یک بخش خاص"""
+async def send_backup_from_web(bot, chat_id: int, section: str = 'all') -> int:
+    """
+    FIX جدید: بکاپ درخواستی از پنل وب مینی‌اپ — توسط mini_app_outbox_job
+    از روی سیگنال __BACKUP_REQUEST__ صدا زده می‌شود و فایل را به چت
+    درخواست‌کننده می‌فرستد. خروجی تعداد رکوردهاست (برای لاگ سرور).
+    """
+    if section == 'all':
+        data = await build_full_backup_data()
+        filename = 'backup_full_web'
+        total = sum(data.get('summary', {}).values())
+    else:
+        data = await build_section_backup_data(section)
+        filename = f'backup_{section}_web'
+        total = _count_section_records(data)
+    await send_backup_to_bot_chat(
+        bot, chat_id, data, filename=filename,
+        title="💾 <b>پشتیبان‌گیری دستی (از پنل وب)</b>"
+    )
+    return total
+
+
+# برچسب فارسی بخش‌های بکاپ — بین callback ربات، API وب و مینی‌اپ مشترک
+BACKUP_SECTION_LABELS = {
+    'users':        'کاربران',
+    'content':      'علوم پایه',
+    'refs':         'رفرنس‌ها',
+    'qbank':        'بانک سوال',
+    'subscription': 'اشتراک و پرداخت',
+    'grades':       'نمرات',
+    'access':       'دسترسی‌ها و تنظیمات',
+}
+
+
+async def build_section_backup_data(section: str) -> dict:
+    """
+    FIX جدید: منطق ساخت بکاپ یک بخش خاص از _export_section جدا شد تا
+    علاوه بر دکمه‌های ربات، از پنل وب (صف bot_notifications) هم همان
+    خروجی یکسان تولید شود. بخش نامعتبر → ValueError.
+    """
+    data = {
+        'backup_version': '2.0',
+        'section':        section,
+        'created_at':     datetime.now().isoformat(),
+    }
+
+    if section == 'users':
+        rows = await db.users.find({}).to_list(10000)
+        data['description'] = 'کاربران ثبت‌نام شده'
+        data['count']       = len(rows)
+        data['data']        = rows
+
+    elif section == 'content':
+        lessons  = await db.bs_lessons.find({}).to_list(1000)
+        sessions = await db.bs_sessions.find({}).to_list(5000)
+        content  = await db.bs_content.find({}).to_list(10000)
+        data['description'] = 'علوم پایه'
+        data['lessons']     = {'count': len(lessons),  'data': lessons}
+        data['sessions']    = {'count': len(sessions), 'data': sessions}
+        data['content']     = {'count': len(content),  'data': content}
+
+    elif section == 'refs':
+        subjects  = await db.ref_subjects.find({}).to_list(500)
+        books     = await db.ref_books.find({}).to_list(2000)
+        ref_files = await db.ref_files.find({}).to_list(5000)
+        data['description'] = 'رفرنس‌های درسی'
+        data['subjects']    = {'count': len(subjects),  'data': subjects}
+        data['books']       = {'count': len(books),     'data': books}
+        data['files']       = {'count': len(ref_files), 'data': ref_files}
+
+    elif section == 'qbank':
+        questions   = await db.questions.find({}).to_list(10000)
+        qbank_files = await db.qbank_files.find({}).to_list(1000)
+        data['description'] = 'بانک سوال'
+        data['questions']   = {'count': len(questions),   'data': questions}
+        data['files']       = {'count': len(qbank_files), 'data': qbank_files}
+
+    elif section == 'subscription':
+        sub_plans      = await db.sub_plans.find({}).to_list(200)
+        subscriptions  = await db.subscriptions.find({}).to_list(20000)
+        sub_payments   = await db.sub_payments.find({}).to_list(20000)
+        discount_codes = await db.discount_codes.find({}).to_list(1000)
+        data['description']     = 'سیستم اشتراک — پلن‌ها، وضعیت کاربران، رسیدها، کدهای تخفیف'
+        data['plans']           = {'count': len(sub_plans),      'data': sub_plans}
+        data['subscriptions']   = {'count': len(subscriptions),  'data': subscriptions}
+        data['payments']        = {'count': len(sub_payments),   'data': sub_payments}
+        data['discount_codes']  = {'count': len(discount_codes), 'data': discount_codes}
+
+    elif section == 'grades':
+        grades = await db.grades.find({}).to_list(20000)
+        data['description'] = 'نمرات ثبت‌شده'
+        data['count']       = len(grades)
+        data['data']        = grades
+
+    elif section == 'access':
+        admin_roles  = await db.admin_roles.find({}).to_list(1000)
+        blacklist    = await db.blacklist.find({}).to_list(5000)
+        intakes      = await db.intakes.find({}).to_list(500)
+        settings_doc = await db.settings.find_one({'_id': 'global'})
+        data['description'] = 'دسترسی‌ها (نقش/بلک‌لیست/ورودی) + تنظیمات ربات'
+        data['admin_roles'] = {'count': len(admin_roles), 'data': admin_roles}
+        data['blacklist']   = {'count': len(blacklist),   'data': blacklist}
+        data['intakes']     = {'count': len(intakes),     'data': intakes}
+        data['settings']    = {'count': 1 if settings_doc else 0, 'data': settings_doc or {}}
+
+    else:
+        raise ValueError(f"بخش نامعتبر: {section}")
+
+    return data
+
+
+async def _export_section(query, context, section: str):
+    """پشتیبان از یک بخش خاص — داده را build_section_backup_data می‌سازد"""
     try:
-        data = {
-            'backup_version': '2.0',
-            'section':        section,
-            'created_at':     datetime.now().isoformat(),
-        }
-
-        if section == 'users':
-            rows = await db.users.find({}).to_list(10000)
-            data['description'] = 'کاربران ثبت‌نام شده'
-            data['count']       = len(rows)
-            data['data']        = rows
-
-        elif section == 'content':
-            lessons  = await db.bs_lessons.find({}).to_list(1000)
-            sessions = await db.bs_sessions.find({}).to_list(5000)
-            content  = await db.bs_content.find({}).to_list(10000)
-            data['description'] = 'علوم پایه'
-            data['lessons']     = {'count': len(lessons),  'data': lessons}
-            data['sessions']    = {'count': len(sessions), 'data': sessions}
-            data['content']     = {'count': len(content),  'data': content}
-
-        elif section == 'refs':
-            subjects  = await db.ref_subjects.find({}).to_list(500)
-            books     = await db.ref_books.find({}).to_list(2000)
-            ref_files = await db.ref_files.find({}).to_list(5000)
-            data['description'] = 'رفرنس‌های درسی'
-            data['subjects']    = {'count': len(subjects),  'data': subjects}
-            data['books']       = {'count': len(books),     'data': books}
-            data['files']       = {'count': len(ref_files), 'data': ref_files}
-
-        elif section == 'qbank':
-            questions   = await db.questions.find({}).to_list(10000)
-            qbank_files = await db.qbank_files.find({}).to_list(1000)
-            data['description'] = 'بانک سوال'
-            data['questions']   = {'count': len(questions),   'data': questions}
-            data['files']       = {'count': len(qbank_files), 'data': qbank_files}
-
-        elif section == 'subscription':
-            sub_plans      = await db.sub_plans.find({}).to_list(200)
-            subscriptions  = await db.subscriptions.find({}).to_list(20000)
-            sub_payments   = await db.sub_payments.find({}).to_list(20000)
-            discount_codes = await db.discount_codes.find({}).to_list(1000)
-            data['description']     = 'سیستم اشتراک — پلن‌ها، وضعیت کاربران، رسیدها، کدهای تخفیف'
-            data['plans']           = {'count': len(sub_plans),      'data': sub_plans}
-            data['subscriptions']   = {'count': len(subscriptions),  'data': subscriptions}
-            data['payments']        = {'count': len(sub_payments),   'data': sub_payments}
-            data['discount_codes']  = {'count': len(discount_codes), 'data': discount_codes}
-
-        elif section == 'grades':
-            grades = await db.grades.find({}).to_list(20000)
-            data['description'] = 'نمرات ثبت‌شده'
-            data['count']       = len(grades)
-            data['data']        = grades
-
-        elif section == 'access':
-            admin_roles  = await db.admin_roles.find({}).to_list(1000)
-            blacklist    = await db.blacklist.find({}).to_list(5000)
-            intakes      = await db.intakes.find({}).to_list(500)
-            settings_doc = await db.settings.find_one({'_id': 'global'})
-            data['description'] = 'دسترسی‌ها (نقش/بلک‌لیست/ورودی) + تنظیمات ربات'
-            data['admin_roles'] = {'count': len(admin_roles), 'data': admin_roles}
-            data['blacklist']   = {'count': len(blacklist),   'data': blacklist}
-            data['intakes']     = {'count': len(intakes),     'data': intakes}
-            data['settings']    = {'count': 1 if settings_doc else 0, 'data': settings_doc or {}}
-
+        data = await build_section_backup_data(section)
         await _send_json_file(query, data, filename=f'backup_{section}')
+        # FIX لاگ: دریافت پشتیبان بخشی هم مثل بکاپ کامل ثبت شود
+        from utils import send_audit_log
+        uid = query.from_user.id
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        section_fa = BACKUP_SECTION_LABELS.get(section, section)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            f"دریافت پشتیبان بخش «{section_fa}»", module='Backup', severity='HIGH',
+            actor_role=actor_role,
+            details=f"📊 رکوردها: {_count_section_records(data)}",
+            tags=['پشتیبان']
+        )
 
     except Exception as e:
         logger.error(f"Backup section error: {e}")
