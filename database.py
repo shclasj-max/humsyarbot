@@ -69,6 +69,10 @@ class DB:
         self.discount_codes = _db['discount_codes']
         self.grades         = _db['grades']  # FIX جدید: سیستم نمرات
         self.ai_reports     = _db['ai_reports']  # FIX جدید: گزارش‌های «پاسخ نامناسب» هوشیار (پایدار، نه فقط RAM)
+        # FIX جدید (فاز چت مینی‌اپ): گفت‌وگوهای چندگانه‌ی هوشیار — هر سند یک
+        # گفت‌وگو با آرایه‌ی items (سقف‌دار)؛ مسیر قدیمی ai_mem (مشترک با
+        # ربات) عیناً حفظ می‌شود.
+        self.ai_conversations = _db['ai_conversations']
 
     # ══════════════════════════════════════════════════
     #  ایندکس‌ها
@@ -3051,6 +3055,110 @@ class DB:
 
     async def ai_clear_memory(self, uid: int) -> None:
         await self.users.update_one({'user_id': uid}, {'$unset': {'ai_mem': '', 'ai_mem_at': ''}})
+
+    # ══════════════════════════════════════════════════
+    #  گفت‌وگوهای چندگانه‌ی هوشیار (مینی‌اپ) — افزایشی:
+    #  حافظه‌ی تک‌رشته‌ای ai_mem بالا دست‌نخورده می‌ماند
+    #  تا چت ربات و مینی‌اپ همچنان مشترک باشد؛ این بخش
+    #  رشته‌های جداگانه‌ی مدیریت‌شده (پین/آرشیو/حذف) است.
+    # ══════════════════════════════════════════════════
+
+    async def ai_conv_create(self, uid: int, title: str = 'گفت‌وگوی جدید') -> str:
+        doc = {
+            'user_id':    uid,
+            'title':      title,
+            'pinned':     False,
+            'archived':   False,
+            'items':      [],
+            'preview':    '',
+            'msg_count':  0,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat(),
+        }
+        r = await self.ai_conversations.insert_one(doc)
+        return str(r.inserted_id)
+
+    async def ai_conv_list(self, uid: int, include_archived: bool = False) -> list:
+        q = {'user_id': uid}
+        if not include_archived:
+            q['archived'] = {'$ne': True}
+        docs = await self.ai_conversations.find(
+            q,
+            {'items': 0},   # فقط متا — آیتم‌ها را جداگانه می‌خوانیم
+        ).to_list(200)
+        docs.sort(key=lambda d: (
+            0 if d.get('pinned') else 1,
+            -(datetime.fromisoformat(d.get('updated_at', '1970-01-01')).timestamp()
+              if d.get('updated_at') else 0),
+        ))
+        return docs
+
+    async def ai_conv_get(self, cid: str, uid: int) -> dict | None:
+        try:
+            oid = ObjectId(cid)
+        except Exception:
+            return None
+        return await self.ai_conversations.find_one(
+            {'_id': oid, 'user_id': uid}
+        )
+
+    async def ai_conv_update(self, cid: str, uid: int, fields: dict) -> bool:
+        allowed = {'title', 'pinned', 'archived'}
+        patch = {k: v for k, v in fields.items() if k in allowed}
+        if not patch:
+            return False
+        patch['updated_at'] = datetime.now().isoformat()
+        try:
+            oid = ObjectId(cid)
+        except Exception:
+            return False
+        r = await self.ai_conversations.update_one(
+            {'_id': oid, 'user_id': uid}, {'$set': patch}
+        )
+        return r.matched_count == 1
+
+    async def ai_conv_delete(self, cid: str, uid: int) -> bool:
+        try:
+            oid = ObjectId(cid)
+        except Exception:
+            return False
+        r = await self.ai_conversations.delete_one(
+            {'_id': oid, 'user_id': uid}
+        )
+        return r.deleted_count == 1
+
+    async def ai_conv_delete_empty(self, uid: int) -> None:
+        """گفت‌وگوهای خالیِ رهاشده را پاک می‌کند — وقتی کاربر چند بار پشت
+        سرهم «گفت‌وگوی جدید» می‌سازد بدون اینکه چیزی بفرستد."""
+        await self.ai_conversations.delete_many(
+            {'user_id': uid, 'msg_count': {'$lte': 0}}
+        )
+
+    async def ai_conv_append(self, cid: str, uid: int,
+                             user_item: dict, ai_item: dict,
+                             title: str | None, preview: str,
+                             max_items: int = 120) -> bool:
+        """افزودن یک دورِ پرسش/پاسخ به گفت‌وگو (اتمیک) + به‌روزرسانی متا.
+        فقط وقتی title داده شود (اولین دور) عنوانی که ساخته‌ایم ست می‌شود."""
+        try:
+            oid = ObjectId(cid)
+        except Exception:
+            return False
+        set_fields = {
+            'updated_at': datetime.now().isoformat(),
+            'preview':    (preview or '')[:90],
+        }
+        if title:
+            set_fields['title'] = title
+        r = await self.ai_conversations.update_one(
+            {'_id': oid, 'user_id': uid},
+            {
+                '$push': {'items': {'$each': [user_item, ai_item], '$slice': -max_items}},
+                '$set':  set_fields,
+                '$inc':  {'msg_count': 2},
+            },
+        )
+        return r.matched_count == 1
 
     # ══════════════════════════════════════════════════
     #  سندِ مرجعِ فعال — ⚠️ قابلیتِ جدید: وقتی دانشجو یه PDF می‌فرسته،
