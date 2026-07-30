@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.auth import get_current_user
+from api.auth import get_resource_access_user
 from api.telegram_send import send_ref_file
 from database import db
 
@@ -77,7 +77,7 @@ def _public_reference_file(
 
 @router.get("/subjects")
 async def subjects(
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     items = await db.ref_get_subjects()
 
@@ -125,7 +125,7 @@ async def subjects(
 @router.get("/books/{subject_id}")
 async def books(
     subject_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     subject = await db.ref_get_subject(
         subject_id
@@ -206,7 +206,7 @@ async def books(
 @router.get("/files/{book_id}")
 async def files(
     book_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     book = await db.ref_get_book(
         book_id
@@ -287,7 +287,7 @@ async def files(
 @router.post("/download/{file_id}")
 async def download(
     file_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_resource_access_user),
 ):
     """فقط همان جلد انتخاب‌شده را ارسال می‌کند."""
 
