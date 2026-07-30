@@ -224,6 +224,22 @@ async def get_status(
         )
     )
 
+    # گیت از ماژول ربات — تک‌منبعِ قانون؛ فرانت فقط می‌خواند
+    from subscription import (
+        has_access,
+    )
+
+    resource_access = (
+        await has_access(user_id)
+    )
+
+    enforced = bool(
+        await db.get_setting(
+            "subscription_enforced",
+            False,
+        )
+    )
+
     has_pending = any(
         item.get("status")
         == "pending"
@@ -260,6 +276,12 @@ async def get_status(
 
         "has_pending_payment":
             has_pending,
+
+        "resource_access":
+            resource_access,
+
+        "enforced":
+            enforced,
 
         "plans": [
             normalize_plan(item)
