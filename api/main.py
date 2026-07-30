@@ -20,6 +20,7 @@ from api.routers import (
     profile,
     questions,
     references,
+    registration,
     reports,
     resources,
     schedule,
@@ -109,6 +110,11 @@ app.include_router(
 app.include_router(
     tickets.router,
     prefix="/api/tickets",
+)
+
+app.include_router(
+    registration.router,
+    prefix="/api/auth",
 )
 
 app.include_router(
