@@ -214,4 +214,29 @@ async def register_via_miniapp(
     except Exception as e:
         logger.warning(f"audit log for registration failed: {e}")
 
+    # ── FIX سینک: ثبت‌نام از ربات با send_audit_log به گروه لاگ هم
+    # می‌رسد؛ ثبت‌نام از مینی‌اپ هم باید همان‌طور به گروه برسد تا گروه
+    # تصویر کامل هر دو کانال را داشته باشد (با همان قالب مشترک) ──
+    try:
+        from utils import build_audit_log_text
+        chat_id = await db.get_setting("log_group_admin", None)
+        if chat_id:
+            text = build_audit_log_text(
+                "admin", name, uid, "ثبت‌نام کاربر جدید",
+                module="Users", severity="INFO", actor_role="دانشجو",
+                target_id=str(uid), target_type="user", target_label=name,
+                details=f"گروه: {group} | ورودی: {intake or 'نامشخص'} | منبع: مینی‌اپ",
+                tags=["ثبت_نام", "مینی_اپ"],
+            )
+            notif = db.client["medicalbot"]["bot_notifications"]
+            await notif.insert_one({
+                "type": "audit_log_web",
+                "chat_id": int(chat_id),
+                "text": text,
+                "sent": False,
+                "created_at": datetime.now().isoformat(),
+            })
+    except Exception as e:
+        logger.warning(f"registration log-group sync failed: {e}")
+
     return {"ok": True, "state": "pending"}
