@@ -1125,6 +1125,69 @@ async def delete_conversation(
     return {"ok": True}
 
 
+@router.post("/conversations/{cid}/duplicate")
+async def duplicate_conversation(
+    cid: str,
+    user=Depends(get_current_user),
+):
+    """رونوشت کامل گفت‌وگو در یک رشته‌ی جدید.
+    legacy هم پشتیبانی می‌شود: حافظه‌ی مشترک با ربات به یک رشته‌ی
+    مستقل تبدیل می‌شود (بدون دست‌خوردن به خودِ حافظه‌ی مشترک)."""
+    user_id = user["id"]
+    now_iso = datetime.now().isoformat()
+
+    if cid == "legacy":
+        raw, _ = await db.ai_get_memory(user_id)
+        items = [
+            {
+                "r": (
+                    "assistant"
+                    if it.get("r") == "model"
+                    else it.get("r")
+                ),
+                "t": str(it.get("t") or "")[:12000],
+                "at": now_iso,
+            }
+            for it in raw
+            if it.get("r") in ("user", "assistant", "model")
+        ]
+        title = "رونوشت گفت‌وگوی مشترک"
+
+    else:
+        doc = await _load_conv(cid, user_id)
+        items = [
+            {
+                "r": it.get("r"),
+                "t": str(it.get("t") or "")[:12000],
+                "at": now_iso,
+            }
+            for it in doc.get("items") or []
+            if it.get("r") in ("user", "assistant", "model")
+        ]
+        title = (
+            "رونوشت: "
+            + str(doc.get("title") or "گفت‌وگو")
+        )[:80]
+
+    new_id = await db.ai_conv_insert_copy(
+        user_id,
+        title,
+        items,
+        max_items=CONV_MAX_ITEMS,
+    )
+
+    await db.log_action(
+        user_id,
+        "ai_duplicate_conversation",
+        target_id=user_id,
+        category="ai",
+        severity="LOW",
+        meta={"source": cid},
+    )
+
+    return {"id": new_id}
+
+
 @router.post("/ask")
 async def ask(
     body: AskRequest,
