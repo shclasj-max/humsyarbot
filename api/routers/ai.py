@@ -62,6 +62,30 @@ class AskRequest(BaseModel):
         min_length=1,
         max_length=MAX_INPUT_CHARS,
     )
+    # گفت‌وگوی چندگانه — مقدار None یا 'legacy' یعنی رشته‌ی مشترک قدیمی
+    # با ربات؛ مقدار آیدی، یعنی گفت‌وگوی مستقل مینی‌اپ (مسیر افزایشی).
+    conversation_id: str | None = Field(
+        default=None,
+        max_length=40,
+    )
+
+
+class ConversationCreate(BaseModel):
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+    )
+
+
+class ConversationPatch(BaseModel):
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+    )
+    pinned: bool | None = None
+    archived: bool | None = None
 
 
 class ReportRequest(BaseModel):
@@ -490,6 +514,7 @@ async def _ask_provider(
     limit: int,
     media_bytes: bytes | None = None,
     media_mime: str = "image/jpeg",
+    conv: tuple | None = None,
 ) -> dict:
     answer, tokens = await ask_ai(
         text=prompt or None,
@@ -512,24 +537,62 @@ async def _ask_provider(
         _safe_int(tokens),
     )
 
-    await _remember(
-        user_id,
-        "user",
-        memory_label,
-    )
+    if conv is not None:
+        # مسیر گفت‌وگوی مستقل مینی‌اپ — به‌جای حافظه‌ی مشترک ai_mem،
+        # دورِ پرسش/پاسخ در سندِ خودِ گفت‌وگو ذخیره می‌شود (اتمیک).
+        conv_id, conv_doc = conv
+        now_iso = datetime.now().isoformat()
 
-    await _remember(
-        user_id,
-        "assistant",
-        answer,
-    )
+        title = None
+        if not _safe_int(conv_doc.get("msg_count")):
+            # اولین دور — عنوان خودکار از خودِ پیام کاربر
+            raw_title = re.sub(
+                r"^\[[^\]]*\]\s*", "", memory_label or ""
+            ).strip().split("\n")[0][:38]
+            title = raw_title or "گفت‌وگوی رسانه‌ای"
+
+        ok = await db.ai_conv_append(
+            conv_id,
+            user_id,
+            {
+                "r": "user",
+                "t": (memory_label or "")[:12000],
+                "at": now_iso,
+            },
+            {
+                "r": "assistant",
+                "t": answer[:12000],
+                "at": now_iso,
+            },
+            title,
+            preview=answer,
+            max_items=CONV_MAX_ITEMS,
+        )
+
+        if not ok:
+            logger.warning(
+                "append به گفت‌وگوی %s ناموفق بود", conv_id
+            )
+    else:
+        # مسیر legacy — دقیقاً همان رفتار قبلی: حافظه‌ی مشترک با ربات
+        await _remember(
+            user_id,
+            "user",
+            memory_label,
+        )
+
+        await _remember(
+            user_id,
+            "assistant",
+            answer,
+        )
 
     await record_token_usage(
         user_id,
         token_count,
     )
 
-    return {
+    result = {
         "answer": answer,
         "tokens": token_count,
         **_usage_payload(
@@ -537,6 +600,11 @@ async def _ask_provider(
             limit,
         ),
     }
+
+    if conv is not None:
+        result["conversation_id"] = conv_id
+
+    return result
 
 
 def _gemini_file_name(
@@ -859,6 +927,204 @@ async def history(
     }
 
 
+# ══════════════════════════════════════════════════
+#  گفت‌وگوهای چندگانه‌ی مینی‌اپ — افزایشی:
+#  مسیر legacy (حافظه‌ی مشترک ai_mem با ربات) بالا
+#  عیناً حفظ است؛ این بخش فقط رشته‌های مستقلِ
+#  مدیریت‌شده (پین/آرشیو/حذف/تغییر نام) را اضافه
+#  می‌کند. رشته‌ی legacy در لیست با id ثابت 'legacy'
+#  دیده می‌شود تا هیچ چیزی پنهان نشود.
+# ══════════════════════════════════════════════════
+
+CONV_MAX_ITEMS = 120       # سقف پیام‌های ذخیره‌شده در هر گفت‌وگو
+CONV_CONTEXT_ITEMS = 10    # ۵ دورِ آخر → کانتکست مدل
+
+
+def _conv_public(doc: dict) -> dict:
+    return {
+        "id": str(doc.get("_id")),
+        "title": str(doc.get("title") or "گفت‌وگوی جدید"),
+        "pinned": bool(doc.get("pinned")),
+        "archived": bool(doc.get("archived")),
+        "preview": str(doc.get("preview") or "")[:90],
+        "count": _safe_int(doc.get("msg_count")),
+        "legacy": False,
+        "created_at": doc.get("created_at"),
+        "updated_at": doc.get("updated_at"),
+    }
+
+
+def _conv_context_items(doc: dict) -> list:
+    """۵ دورِ آخر گفت‌وگو به شکل مورد انتظار ask_ai —
+    متن هر آیتم برای کنترل توکن مثل حافظه‌ی مشترک پیرایش می‌شود."""
+    items = doc.get("items") or []
+    return [
+        {
+            "role": it.get("r"),
+            "text": str(it.get("t") or "")[:1200],
+        }
+        for it in items[-CONV_CONTEXT_ITEMS:]
+        if it.get("r") in ("user", "assistant", "model")
+    ]
+
+
+def _conv_messages_public(doc: dict) -> list:
+    messages = []
+    for it in doc.get("items") or []:
+        if it.get("r") not in ("user", "assistant", "model"):
+            continue
+        messages.append({
+            "role": "assistant" if it.get("r") == "model" else it.get("r"),
+            "text": str(it.get("t") or "")[:12000],
+            "at": it.get("at"),
+        })
+    return messages
+
+
+async def _load_conv(cid: str, user_id: int) -> dict:
+    doc = await db.ai_conv_get(cid, user_id)
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail="گفت‌وگو پیدا نشد",
+        )
+    return doc
+
+
+@router.get("/conversations")
+async def list_conversations(
+    user=Depends(get_current_user),
+    include_archived: bool = False,
+):
+    user_id = user["id"]
+    docs = await db.ai_conv_list(
+        user_id,
+        include_archived=include_archived,
+    )
+    items = [_conv_public(d) for d in docs]
+
+    # رشته‌ی مشترک با ربات تلگرام — همان حافظه‌ی ai_mem که امروز هم
+    # بین دو کانال مشترک است؛ بعد از گفت‌وگوهای پین‌شده می‌نشیند.
+    mem, mem_at = await db.ai_get_memory(user_id)
+    if mem:
+        last = mem[-1]
+        legacy = {
+            "id": "legacy",
+            "title": "گفت‌وگوی مشترک با ربات",
+            "pinned": False,
+            "archived": False,
+            "preview": str(last.get("t") or "")[:90],
+            "count": len(mem),
+            "legacy": True,
+            "created_at": None,
+            "updated_at": (
+                mem_at.isoformat()
+                if isinstance(mem_at, datetime)
+                else None
+            ),
+        }
+        pinned_count = sum(
+            1 for i in items if i["pinned"]
+        )
+        items.insert(pinned_count, legacy)
+
+    return {"conversations": items}
+
+
+@router.post("/conversations")
+async def create_conversation(
+    body: ConversationCreate,
+    user=Depends(get_current_user),
+):
+    user_id = user["id"]
+    # تمیزکاری: گفت‌وگوهای خالیِ رهاشده‌ی قبلی نمانند
+    await db.ai_conv_delete_empty(user_id)
+    cid = await db.ai_conv_create(
+        user_id,
+        title=(body.title or "گفت‌وگوی جدید"),
+    )
+    return {"id": cid}
+
+
+@router.get("/conversations/{cid}/messages")
+async def conversation_messages(
+    cid: str,
+    user=Depends(get_current_user),
+):
+    if cid == "legacy":
+        # رشته‌ی مشترک — نسخه‌ی خام ai_mem بدون محدودیت TTL
+        raw, _ = await db.ai_get_memory(user["id"])
+        return {
+            "messages": [
+                {
+                    "role": (
+                        "assistant"
+                        if it.get("r") == "model"
+                        else it.get("r")
+                    ),
+                    "text": str(it.get("t") or "")[:12000],
+                    "at": None,
+                }
+                for it in raw
+                if it.get("r") in ("user", "assistant", "model")
+            ]
+        }
+
+    doc = await _load_conv(cid, user["id"])
+    return {"messages": _conv_messages_public(doc)}
+
+
+@router.patch("/conversations/{cid}")
+async def update_conversation(
+    cid: str,
+    body: ConversationPatch,
+    user=Depends(get_current_user),
+):
+    if cid == "legacy":
+        raise HTTPException(
+            status_code=400,
+            detail="رشته‌ی مشترک با ربات قابل ویرایش نیست",
+        )
+
+    patch = body.model_dump(exclude_unset=True)
+    ok = await db.ai_conv_update(
+        cid, user["id"], patch
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="گفت‌وگو پیدا نشد یا تغییری نکرد",
+        )
+    return {"ok": True}
+
+
+@router.delete("/conversations/{cid}")
+async def delete_conversation(
+    cid: str,
+    user=Depends(get_current_user),
+):
+    user_id = user["id"]
+
+    if cid == "legacy":
+        # پاک‌کردن رشته‌ی مشترک = همان DELETE /history + سند مرجع
+        await _clear_memory(user_id)
+        document = await db.ai_get_doc(user_id)
+        if document:
+            await _delete_remote_reference(
+                document.get("references") or []
+            )
+            await db.ai_clear_doc(user_id)
+        return {"ok": True, "legacy": True}
+
+    ok = await db.ai_conv_delete(cid, user_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="گفت‌وگو پیدا نشد",
+        )
+    return {"ok": True}
+
+
 @router.post("/ask")
 async def ask(
     body: AskRequest,
@@ -878,6 +1144,23 @@ async def ask(
         used, limit = await _consume_quota(
             user_id
         )
+
+        # انشعاب چندگفت‌وگو: با conversation_id معتبر (غیر legacy)
+        # کانتکست و ذخیره از سند خودِ گفت‌وگو می‌آید، نه حافظه‌ی مشترک
+        conv_id = (body.conversation_id or "").strip()
+        if conv_id and conv_id != "legacy":
+            conv_doc = await _load_conv(conv_id, user_id)
+            return await _ask_provider(
+                user_id=user_id,
+                prompt=message,
+                history_items=_conv_context_items(
+                    conv_doc
+                ),
+                memory_label=message,
+                used=used,
+                limit=limit,
+                conv=(conv_id, conv_doc),
+            )
 
         return await _ask_provider(
             user_id=user_id,
@@ -926,6 +1209,7 @@ async def ask(
 async def ask_media(
     message: str = Form(default=""),
     file: UploadFile = File(...),
+    conversation_id: str | None = Form(default=None),
     user=Depends(get_current_user),
 ):
     """Ask with image, PDF or audio."""
@@ -1060,20 +1344,38 @@ async def ask_media(
             user_id
         )
 
-        result = await _ask_provider(
-            user_id=user_id,
-            prompt=provider_prompt,
-            history_items=(
-                await _get_history(
-                    user_id
-                )
-            ),
-            memory_label=memory_label,
-            used=used,
-            limit=limit,
-            media_bytes=media_bytes,
-            media_mime=mime,
-        )
+        # انشعاب چندگفت‌وگو برای رسانه هم — همان قرارداد متن
+        conv_id = (conversation_id or "").strip()
+        if conv_id and conv_id != "legacy":
+            conv_doc = await _load_conv(conv_id, user_id)
+            result = await _ask_provider(
+                user_id=user_id,
+                prompt=provider_prompt,
+                history_items=_conv_context_items(
+                    conv_doc
+                ),
+                memory_label=memory_label,
+                used=used,
+                limit=limit,
+                media_bytes=media_bytes,
+                media_mime=mime,
+                conv=(conv_id, conv_doc),
+            )
+        else:
+            result = await _ask_provider(
+                user_id=user_id,
+                prompt=provider_prompt,
+                history_items=(
+                    await _get_history(
+                        user_id
+                    )
+                ),
+                memory_label=memory_label,
+                used=used,
+                limit=limit,
+                media_bytes=media_bytes,
+                media_mime=mime,
+            )
 
         result["attachment"] = {
             "kind": kind,
