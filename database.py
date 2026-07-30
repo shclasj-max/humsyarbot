@@ -3078,6 +3078,28 @@ class DB:
         r = await self.ai_conversations.insert_one(doc)
         return str(r.inserted_id)
 
+    async def ai_conv_insert_copy(self, uid: int, title: str,
+                                  items: list,
+                                  max_items: int = 120) -> str:
+        """درج رونوشتِ یک گفت‌وگو — آیتم‌ها عیناً (با نقش و متن) کپی
+        می‌شوند و برچسبِ زمانیِ ساخت/به‌روزرسانی، لحظه‌ی فعلی است."""
+        now = datetime.now().isoformat()
+        clipped = (items or [])[-max_items:]
+        doc = {
+            'user_id':    uid,
+            'title':      (title or 'رونوشت گفت‌وگو')[:80],
+            'pinned':     False,
+            'archived':   False,
+            'items':      clipped,
+            'preview':    (str(clipped[-1].get('t') or '')[:90]
+                           if clipped else ''),
+            'msg_count':  len(clipped),
+            'created_at': now,
+            'updated_at': now,
+        }
+        r = await self.ai_conversations.insert_one(doc)
+        return str(r.inserted_id)
+
     async def ai_conv_list(self, uid: int, include_archived: bool = False) -> list:
         q = {'user_id': uid}
         if not include_archived:
