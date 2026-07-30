@@ -169,7 +169,14 @@ async def register_via_miniapp(
         raise HTTPException(422, "شماره دانشجویی باید بین ۵ تا ۳۰ کاراکتر باشد")
 
     # ── ساخت کاربر — تابع مشترک با بات، schema یکسان ──
-    await db.create_user(uid, name, student_id, group, username, intake=intake)
+    # دابل‌کلیک/درخواست همزمان → ایندکس یکتای user_id خطا می‌دهد؛
+    # آن را به 409 تمیز تبدیل می‌کنیم (نه ۵۰۰).
+    try:
+        await db.create_user(uid, name, student_id, group, username, intake=intake)
+    except Exception as e:
+        if "duplicate key" in str(e).lower():
+            raise HTTPException(409, "already_registered")
+        raise
 
     if uid == ADMIN_ID:
         await db.update_user(uid, {"approved": True})
