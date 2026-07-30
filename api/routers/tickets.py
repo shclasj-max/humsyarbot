@@ -25,11 +25,43 @@ async def list_tickets(user=Depends(get_current_user)):
     tickets = await db.ticket_get_user(user["id"])
     return {"tickets":[_fmt(t) for t in tickets],"subjects":SUBJECTS}
 
+@router.get("/unread-count")
+async def unread_count(user=Depends(get_current_user)):
+    """تعداد تیکت‌هایی که آخرین پاسخ‌دهنده‌شان «پشتیبانی» است و کاربر
+    بعد از آن وارد گفت‌وگو نشده — برای Badge قرمز BottomNav.
+
+    قرارداد: باز کردن صفحه گفت‌وگوی تیکت، user_seen_at را به‌روز می‌کند
+    (در GET /{tid}). اگر خود کاربر آخرین پاسخ را داده باشد، چیزی برای
+    خواندن نیست و تیکت، خوانده‌نشده محسوب نمی‌شود.
+    """
+    tickets = await db.tickets.find(
+        {"user_id": user["id"]},
+        {"replies": 1, "user_seen_at": 1, "ticket_id": 1},
+    ).to_list(30)
+
+    count = 0
+    for t in tickets or []:
+        replies = t.get("replies") or []
+        if not replies:
+            continue
+        last = replies[-1]
+        if last.get("text", "").startswith("[دانشجو]"):
+            continue                    # آخرین پاسخ از خود کاربره
+        if last.get("at", "") > (t.get("user_seen_at") or ""):
+            count += 1
+
+    return {"unread": count}
+
 @router.get("/{tid}")
 async def get_ticket(tid: int, user=Depends(get_current_user)):
     ticket = await db.ticket_get(tid)
     if not ticket: raise HTTPException(404,"پیدا نشد")
     if ticket["user_id"] != user["id"]: raise HTTPException(403)
+    # باز شدن گفت‌وگو = خوانده شدن پاسخ‌های پشتیبانی
+    await db.tickets.update_one(
+        {"ticket_id": tid},
+        {"$set": {"user_seen_at": datetime.now().isoformat()}},
+    )
     return {"ticket":_fmt(ticket,detail=True)}
 
 class NewTicket(BaseModel):
