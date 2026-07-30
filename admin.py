@@ -559,6 +559,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == 'remove_donation_link':
         await db.set_setting('donation_link', None)
         await query.answer("✅ لینک حمایت مالی حذف شد", show_alert=True)
+        # FIX لاگ: حذف لینک مثل تاگل باید ثبت شود (پارتی با وب‌پنل)
+        admin_user = await db.get_user(uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, uid,
+            "حذف لینک حمایت مالی", module='Settings', severity='HIGH',
+            actor_role=actor_role,
+            before={'لینک': 'تنظیم شده'}, after={'لینک': 'حذف شد'},
+            tags=['حمایت_مالی']
+        )
         await _show_donation_manage(query)
 
     elif action == 'export_excel':
@@ -3207,8 +3218,21 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # تنظیم لینک حمایت مالی
     if mode == 'set_donation_link':
         context.user_data['mode'] = ''
+        admin_uid = update.effective_user.id
         if text in ('حذف', '-'):
+            old_link = await db.get_setting('donation_link', None)
             await db.set_setting('donation_link', None)
+            # FIX لاگ: حذف لینک از طریق پیام متنی هم ثبت شود (پارتی با وب‌پنل)
+            admin_user = await db.get_user(admin_uid)
+            actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+            actor_role = await db.get_actor_role_label(admin_uid)
+            await send_audit_log(
+                context.bot, 'admin', actor_name, admin_uid,
+                "حذف لینک حمایت مالی", module='Settings', severity='HIGH',
+                actor_role=actor_role,
+                before={'لینک': old_link or 'تنظیم نشده'}, after={'لینک': 'حذف شد'},
+                tags=['حمایت_مالی']
+            )
             await update.message.reply_text(
                 "✅ لینک حمایت مالی حذف شد.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💙 بازگشت به مدیریت حمایت مالی", callback_data='admin:donation_manage')]])
@@ -3221,7 +3245,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 parse_mode='HTML'
             )
             return True
+        old_link = await db.get_setting('donation_link', None)
         await db.set_setting('donation_link', text)
+        # FIX لاگ: تنظیم/تغییر لینک هم مثل تاگل باید ثبت شود (پارتی با وب‌پنل)
+        admin_user = await db.get_user(admin_uid)
+        actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+        actor_role = await db.get_actor_role_label(admin_uid)
+        await send_audit_log(
+            context.bot, 'admin', actor_name, admin_uid,
+            "تنظیم لینک حمایت مالی", module='Settings', severity='HIGH',
+            actor_role=actor_role,
+            before={'لینک': old_link or 'تنظیم نشده'}, after={'لینک': text},
+            tags=['حمایت_مالی']
+        )
         await update.message.reply_text(
             f"✅ لینک حمایت مالی ذخیره شد:\n<code>{text}</code>",
             parse_mode='HTML',
