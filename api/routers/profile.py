@@ -191,3 +191,20 @@ async def get_badges(user=Depends(get_current_user)):
             {"id": "downloader", "title": "خواننده", "icon": "📚", "earned": "downloader" in earned},
         ]
     }
+
+# ══════════════════════════════════════════════
+# 💙 حمایت مالی — خواندن زنده همان تنظیماتی که
+# ربات برای دکمه «💙 حمایت مالی» استفاده می‌کند
+# ══════════════════════════════════════════════
+
+@router.get("/donation")
+async def donation_config(user=Depends(get_current_user)):
+    """تنظیمات حمایت مالی برای مینی‌اپ.
+
+    دقیقاً همان کلیدهایی که message_router.py ربات مصرف می‌کند
+    (donation_enabled + donation_link) — پس فعال‌سازی/تغییر لینک
+    از سمت بات بلافاصله در مینی‌اپ هم اعمال می‌شود (سینک کامل).
+    """
+    enabled = bool(await db.get_setting("donation_enabled", False))
+    link = (await db.get_setting("donation_link", None)) or ""
+    return {"enabled": enabled and bool(link), "link": link}
