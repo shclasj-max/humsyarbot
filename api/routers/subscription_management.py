@@ -1,5 +1,7 @@
 """Subscription administration endpoints."""
 
+import re
+
 from datetime import datetime
 
 from fastapi import (
@@ -77,6 +79,143 @@ class RevokeBody(BaseModel):
         min_length=2,
         max_length=500,
     )
+
+
+# ══════════════════════════════════════════════
+# 🔎 جست‌وجوی یکپارچه — همان قرارداد سراسری
+# db.build_user_search_query (نام، @یوزرنیم،
+# شماره دانشجویی، آیدی عددی) که ربات و پنل
+# کاربران هم از آن استفاده می‌کنند.
+# ══════════════════════════════════════════════
+
+async def _matched_user_ids(
+    raw: str,
+) -> list:
+    """آیدی عددی کاربرانِ منطبق با عبارت جست‌وجو."""
+
+    user_query = (
+        db.build_user_search_query(
+            raw
+        )
+    )
+
+    if not user_query:
+        return []
+
+    matched = (
+        await db.users.find(
+            user_query,
+            {'user_id': 1},
+        ).to_list(500)
+    )
+
+    return [
+        user['user_id']
+
+        for user in matched
+
+        if user.get('user_id')
+        is not None
+    ]
+
+
+def _numeric_id_or_none(
+    raw: str,
+):
+    """عبارت کاملاً عددی → int در غیر این صورت
+    None — برای تطبیق مستقیم روی خودِ کالکشن
+    (رسید/اشتراکِ کاربرِ حذف‌شده هم باید با
+    آیدی عددی پیدا شود)."""
+
+    if raw.lstrip('+-').isdigit():
+        try:
+            return int(raw)
+
+        except (
+            ValueError,
+            OverflowError,
+        ):
+            return None
+
+    return None
+
+
+async def _payment_search_filter(
+    search,
+):
+    """فیلتر $or رسیدها: کاربران منطبق + نام
+    پلن + کد تخفیف + آیدی عددی مستقیم."""
+
+    raw = (search or '').strip()
+
+    if not raw:
+        return None
+
+    pattern = {
+        '$regex':
+            re.escape(raw),
+        '$options': 'i',
+    }
+
+    or_parts = [
+        {'plan_name': pattern},
+        {'discount_code': pattern},
+    ]
+
+    ids = await _matched_user_ids(raw)
+
+    if ids:
+        or_parts.append(
+            {'user_id': {'$in': ids}}
+        )
+
+    numeric = _numeric_id_or_none(raw)
+
+    if numeric is not None:
+        or_parts.append(
+            {'user_id': numeric}
+        )
+
+    return {'$or': or_parts}
+
+
+async def _subscriber_search_filter(
+    search,
+):
+    """فیلتر $or مشترکین: کاربران منطبق (کلید
+    اشتراک = user_id در فیلد _id) + نام پلن +
+    آیدی عددی مستقیم."""
+
+    raw = (search or '').strip()
+
+    if not raw:
+        return None
+
+    pattern = {
+        '$regex':
+            re.escape(raw),
+        '$options': 'i',
+    }
+
+    or_parts = [
+        {'plan_name': pattern},
+    ]
+
+    ids = await _matched_user_ids(raw)
+
+    if ids:
+        or_parts.append(
+            {'_id': {'$in': ids}}
+        )
+
+    numeric = _numeric_id_or_none(raw)
+
+    if numeric is not None:
+        or_parts.append(
+            {'_id': numeric}
+        )
+
+    return {'$or': or_parts}
 
 
 class DiscountBody(BaseModel):
@@ -287,23 +426,35 @@ async def payments(
         le=100,
     ),
 
+    search: str | None = Query(
+        default=None
+    ),
+
     admin=Depends(
         get_admin_user
     ),
 ):
+    extra = (
+        await _payment_search_filter(
+            search
+        )
+    )
+
     items = (
         await db
         .sub_payment_list_all(
             status=status,
             skip=skip,
             limit=limit,
+            extra=extra,
         )
     )
 
     total = (
         await db
         .sub_payment_count_all(
-            status=status
+            status=status,
+            extra=extra,
         )
     )
 
@@ -329,6 +480,7 @@ async def payments(
                     "user_id": 1,
                     "name": 1,
                     "student_id": 1,
+                    "username": 1,
                 },
             )
             .to_list(
@@ -381,6 +533,13 @@ async def payments(
                     "student_id",
                     "",
                 ),
+
+            "username": (
+                database_user.get(
+                    "username"
+                )
+                or ""
+            ),
 
             "plan_id":
                 item.get(
@@ -680,22 +839,34 @@ async def subscribers(
         le=100,
     ),
 
+    search: str | None = Query(
+        default=None
+    ),
+
     admin=Depends(
         get_admin_user
     ),
 ):
+    extra = (
+        await _subscriber_search_filter(
+            search
+        )
+    )
+
     items = (
         await db.sub_list_by_status(
             status,
             skip,
             limit,
+            extra=extra,
         )
     )
 
     total = (
         await db
         .sub_count_by_status(
-            status
+            status,
+            extra=extra,
         )
     )
 
@@ -718,6 +889,7 @@ async def subscribers(
                     "user_id": 1,
                     "name": 1,
                     "student_id": 1,
+                    "username": 1,
                 },
             )
             .to_list(
@@ -766,6 +938,13 @@ async def subscribers(
                     "",
                 ),
 
+            "username": (
+                database_user.get(
+                    "username"
+                )
+                or ""
+            ),
+
             "plan_name":
                 item.get(
                     "plan_name",
@@ -793,6 +972,73 @@ async def subscribers(
 
         "subscribers":
             result,
+    }
+
+
+@router.get(
+    "/users/search"
+)
+async def search_users_for_grant(
+    q: str = Query(
+        default="",
+        max_length=80,
+    ),
+
+    admin=Depends(
+        get_admin_user
+    ),
+):
+    """🔎 جست‌وجوی فشرده‌ی دانشجو برای
+    «اعطای دستی» — همان موتور مشترک
+    db.search_users (آیدی عددی دقیق،
+    @یوزرنیم با/بدون @، نام و شماره
+    دانشجویی) با خروجی سبک برای
+    دراپ‌داون انتخاب."""
+
+    raw = (q or "").strip()
+
+    if len(raw) < 2:
+        return {"users": []}
+
+    results = (
+        await db.search_users(
+            raw,
+            limit=8,
+        )
+    )
+
+    return {
+        "users": [
+            {
+                "id":
+                    user.get(
+                        "user_id"
+                    ),
+
+                "name":
+                    user.get(
+                        "name",
+                        "",
+                    ),
+
+                "student_id":
+                    user.get(
+                        "student_id",
+                        "",
+                    ),
+
+                "username":
+                    user.get(
+                        "username"
+                    )
+                    or "",
+            }
+
+            for user in results
+
+            if user.get("user_id")
+            is not None
+        ]
     }
 
 
