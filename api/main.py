@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from api.routers import (
     academic_admin,
@@ -64,6 +65,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# 🗜 موج ۴.۶۰ — فشرده‌سازی پاسخ‌های JSON بزرگ؛
+# payloadهای چند‌ده‌KB (لیست کاربران/رسیدها/آمار)
+# روی شبکه‌ی موبایل محسوس کوچک‌تر و سریع‌تر می‌شوند.
+# فقط بالای ۱KB — پاسخ‌های کوچک سربار نمی‌گیرند.
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1000,
 )
 
 
