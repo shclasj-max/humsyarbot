@@ -100,6 +100,13 @@ class DB:
                 self.tickets.create_index([('user_id', 1), ('status', 1)], background=True),
                 self.qbank_files.create_index([('lesson', 1), ('topic', 1)], background=True),
                 self.intakes.create_index('code', unique=True, background=True),
+                # 🚀 موج ۴.۶۰ — پوشش کوئری‌های داغ پنل اشتراک:
+                # فیلتر status + مرتب‌سازی submitted_at/end_date و
+                # تاریخچه‌ی پرداخت هر کاربر. بدون این‌ها = Full
+                # Collection Scan + SORT در حافظه در هر درخواست پنل.
+                self.sub_payments.create_index([('status', 1), ('submitted_at', -1)], background=True),
+                self.sub_payments.create_index([('user_id', 1), ('submitted_at', -1)], background=True),
+                self.subscriptions.create_index([('status', 1), ('end_date', 1)], background=True),
             )
             logger.info("✅ ایندکس‌های MongoDB ایجاد شدند")
         except Exception as e:
