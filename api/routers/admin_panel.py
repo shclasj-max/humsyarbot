@@ -108,10 +108,10 @@ async def bot_status(admin=Depends(get_admin_user)):
 @router.get("/users")
 async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(None),
                       group: Optional[str]=Query(None), intake: Optional[str]=Query(None)):
-    q={}
-    if search:
-        import re; pat=re.compile(re.escape(search),re.IGNORECASE)
-        q["$or"]=[{"name":pat},{"student_id":pat},{"username":pat}]
+    # 🔎 قرارداد مشترک جست‌وجو (db.build_user_search_query) — حالا آیدی
+    # عددی تلگرام هم دقیق پیدا می‌شود؛ قبلاً فقط name/student_id/username
+    # بود و با ربات ناسازگار بود.
+    q = db.build_user_search_query(search) if search else {}
     if group: q["group"]=group
     if intake: q["intake"]=intake
     users = await db.users.find(q).sort("registered_at",-1).to_list(500)
