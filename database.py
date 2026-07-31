@@ -214,20 +214,23 @@ class DB:
             return True
         return False
 
-    async def search_users(self, query_text: str):
+    @staticmethod
+    def build_user_search_query(query_text: str) -> dict:
         """
-        FIX مهم: قبلاً فقط name/student_id/username رو با regex می‌گشت —
-        یعنی اگه کسی آیدی عددی تلگرام (user_id) وارد می‌کرد، هیچ‌وقت
-        پیدا نمی‌شد (چون user_id عدده، نه رشته، و اصلاً توی کوئری
-        نبود). حالا هر سه الگو پشتیبانی می‌شه:
-          ۱) آیدی عددی تلگرام (مثلاً 123456789)
+        🔎 قرارداد سراسری جست‌وجوی کاربر — «منبع واحد حقیقت».
+        هر سه الگو با هم پشتیبانی می‌شوند:
+          ۱) آیدی عددی تلگرام (مثلاً 123456789) — تطبیق دقیق، نه substring
           ۲) یوزرنیم، با یا بدون @ (مثلاً @ali_r یا ali_r)
-          ۳) اسمی که توی ربات ثبت‌نام کرده
+          ۳) نام ثبت‌شده در ربات + شماره دانشجویی
+        ربات (admin/ai_admin/subscription_admin/…)، پنل وب (مدیریت
+        کاربران)، و پنل اشتراک (اعطای دستی/مشترکین/رسیدها) همه از
+        همین سازنده استفاده می‌کنند تا رفتار جست‌وجو در کل سیستم
+        یکپارچه بماند. خروجی خالی یعنی «بدون فیلتر».
         """
         import re
         raw = (query_text or '').strip()
         if not raw:
-            return []
+            return {}
 
         or_clauses = []
 
@@ -248,7 +251,15 @@ class DB:
         or_clauses.append({'name': regex})
         or_clauses.append({'student_id': regex})
 
-        return await self.users.find({'$or': or_clauses}).to_list(20)
+        return {'$or': or_clauses}
+
+    async def search_users(self, query_text: str, limit: int = 20):
+        """جست‌وجوی کاربر روی قرارداد مشترک build_user_search_query —
+        FIX مهم تاریخی: قبلاً user_id عددی اصلاً توی کوئری نبود."""
+        query = self.build_user_search_query(query_text)
+        if not query:
+            return []
+        return await self.users.find(query).to_list(limit)
 
     async def get_leaderboard(self, limit: int = 10):
         return await self.users.find(
@@ -2833,22 +2844,34 @@ class DB:
         """FIX جدید: تاریخچه‌ی کامل پرداخت‌های یک کاربر (هر وضعیتی) — برای «تاریخچه‌ی من»"""
         return await self.sub_payments.find({'user_id': user_id}).sort('submitted_at', -1).to_list(30)
 
-    async def sub_payment_list_all(self, status: str = None, skip: int = 0, limit: int = 8) -> list:
-        """FIX جدید: مرور کامل همه‌ی رسیدها (هر وضعیتی) با صفحه‌بندی — برای پنل ادمین"""
+    async def sub_payment_list_all(self, status: str = None, skip: int = 0, limit: int = 8, extra: dict = None) -> list:
+        """FIX جدید: مرور کامل همه‌ی رسیدها (هر وضعیتی) با صفحه‌بندی — برای پنل ادمین
+        extra: فیلتر اختیاری اضافه (مثل $or جست‌وجو) — کاملاً backward-compatible."""
         q = {'status': status} if status else {}
+        if extra:
+            q.update(extra)
         return await self.sub_payments.find(q).sort('submitted_at', -1).skip(skip).limit(limit).to_list(limit)
 
-    async def sub_payment_count_all(self, status: str = None) -> int:
+    async def sub_payment_count_all(self, status: str = None, extra: dict = None) -> int:
         q = {'status': status} if status else {}
+        if extra:
+            q.update(extra)
         return await self.sub_payments.count_documents(q)
 
-    async def sub_list_by_status(self, status: str = 'active', skip: int = 0, limit: int = 10) -> list:
-        """FIX جدید: لیست مشترکین بر اساس وضعیت — برای صفحه‌ی «لیست مشترکین» پنل ادمین"""
-        return await self.subscriptions.find({'status': status}) \
+    async def sub_list_by_status(self, status: str = 'active', skip: int = 0, limit: int = 10, extra: dict = None) -> list:
+        """FIX جدید: لیست مشترکین بر اساس وضعیت — برای صفحه‌ی «لیست مشترکین» پنل ادمین
+        extra: فیلتر اختیاری اضافه (مثل $or جست‌وجو) — کاملاً backward-compatible."""
+        q = {'status': status}
+        if extra:
+            q.update(extra)
+        return await self.subscriptions.find(q) \
             .sort('end_date', 1).skip(skip).limit(limit).to_list(limit)
 
-    async def sub_count_by_status(self, status: str = 'active') -> int:
-        return await self.subscriptions.count_documents({'status': status})
+    async def sub_count_by_status(self, status: str = 'active', extra: dict = None) -> int:
+        q = {'status': status}
+        if extra:
+            q.update(extra)
+        return await self.subscriptions.count_documents(q)
 
     # ══════════════════════════════════════════════════
     #  📊 سیستم نمرات — FIX جدید
