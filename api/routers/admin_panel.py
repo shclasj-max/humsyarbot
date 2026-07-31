@@ -94,7 +94,10 @@ async def bot_status(admin=Depends(get_admin_user)):
     try:
         import psutil, os as _os
         proc=psutil.Process(_os.getpid()); mem=proc.memory_info().rss/1024/1024
-        vm=psutil.virtual_memory(); cpu=psutil.cpu_percent(interval=0.2)
+        # 🚀 موج ۴.۶۰ — interval=0.2 قبلاً حلقه‌ی رویداد را ۲۰۰ms
+        # بلاک می‌کرد (همه‌ی درخواست‌های هم‌زمان صبر می‌کردند).
+        # interval=None غیربلاک‌کننده است: درصد از آخرین اندازه‌گیری.
+        vm=psutil.virtual_memory(); cpu=psutil.cpu_percent(interval=None)
         up=time.time()-proc.create_time(); h,r=divmod(int(up),3600); m,s=divmod(r,60)
         sys_info={"bot_ram_mb":round(mem,1),"total_ram_mb":round(vm.total/1024/1024),
             "used_ram_pct":vm.percent,"cpu_pct":cpu,"uptime":f"{h}h {m}m" if h else f"{m}m {s}s"}
@@ -114,7 +117,16 @@ async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(
     q = db.build_user_search_query(search) if search else {}
     if group: q["group"]=group
     if intake: q["intake"]=intake
-    users = await db.users.find(q).sort("registered_at",-1).to_list(500)
+    # 🚀 موج ۴.۶۰ — projection: قبلاً سند کامل هر کاربر (شامل
+    # notification_settings تو‌در‌تو، weak_topics، آمار و…) روی
+    # سیم می‌رفت؛ فقط فیلدهای مصرفی پاسخ fetch می‌شود.
+    _projection = {
+        "user_id": 1, "name": 1, "student_id": 1,
+        "group": 1, "intake": 1, "role": 1,
+        "approved": 1, "suspended": 1,
+        "registered_at": 1, "total_answers": 1,
+    }
+    users = await db.users.find(q, _projection).sort("registered_at",-1).to_list(500)
     return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
         "approved":u.get("approved",False),"suspended":u.get("suspended",False),
