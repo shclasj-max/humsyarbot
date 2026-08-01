@@ -173,6 +173,15 @@ async def _confirm_and_save(query, context):
     entries = [{'user_id': m['user_id'], 'score': m['score']} for m in matched]
     saved = await db.grade_bulk_upsert(entries, lesson, exam_title, exam_date, query.from_user.id)
 
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (نمره → کارنامه) برای همه‌ی دانشجویان
+    await db.inbox_add_many([
+        {'user_id': rec['student_id'], 'type': 'grade',
+         'title': f"📊 نمره‌ات {'به‌روزرسانی شد' if rec.get('_is_update') else 'ثبت شد'}",
+         'body': (f"📚 {lesson}\n📝 {exam_title}\n🎯 نمره: {rec['score']}/20"),
+         'link': '/grades'}
+        for rec in saved if rec.get('student_id')
+    ])
+
     sent = 0
     for rec in saved:
         verb = "به‌روزرسانی شد" if rec.get('_is_update') else "ثبت شد"
