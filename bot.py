@@ -120,6 +120,18 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                 users = await db.notif_users('exam', group=exam.get('group'))
                 sent  = 0
                 total_targets += len(users)
+                # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ: سابقه‌ی رویداد برای همه‌ی
+                # مخاطبان ثبت می‌شود (حتی اگر تلگرام بلاک باشد، کاربر در
+                # مینی‌اپ یادآوری را می‌بیند) — Deep Link به تب «برنامه»
+                await db.inbox_add_many([
+                    {'user_id': u['user_id'], 'type': 'exam_reminder',
+                     'title': f"🔔 یادآوری امتحان — {label}",
+                     'body': (f"📚 {exam.get('lesson', '')}\n"
+                              f"📅 {fmt_jalali(exam.get('date', ''))}  ساعت {exam.get('time', '')}\n"
+                              f"📍 {exam.get('location', '')}"),
+                     'link': '/schedule'}
+                    for u in users if u.get('user_id')
+                ])
                 for u in users:
                     ok = await safe_send(context.bot, u['user_id'], msg, parse_mode='HTML')
                     if ok:
@@ -172,6 +184,15 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
         )
         users = await db.notif_users('daily_question')
         await db.notif_run_set_message(run_id, text)
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (Deep Link به بانک سؤال)
+        await db.inbox_add_many([
+            {'user_id': u['user_id'], 'type': 'daily_question',
+             'title': '🧪 سؤال روزانه رسید',
+             'body': (f"📚 {q.get('lesson', '')} — {q.get('topic', '')}\n"
+                      f"❓ {q.get('question', '')[:140]}"),
+             'link': '/learn/questions'}
+            for u in users if u.get('user_id')
+        ])
         for u in users:
             ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
             if ok:
@@ -286,6 +307,15 @@ async def _run_new_resources_notif(bot, force: bool = False) -> dict:
 
         users = await db.notif_users('new_resources')
         await db.notif_run_set_message(run_id, text)
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ: منابع/رفرنس‌های تازه
+        await db.inbox_add_many([
+            {'user_id': u['user_id'], 'type': 'new_resources',
+             'title': f"🆕 {len(new_items)} منبع جدید اضافه شد",
+             'body': ('منابع علوم پایه/رفرنس‌های تازه منتشر شد؛ '
+                      'از بخش یادگیری بازش کنید.'),
+             'link': '/learn/resources'}
+            for u in users if u.get('user_id')
+        ])
         sent, failed, failed_ids = 0, 0, []
         for u in users:
             ok = await safe_send(bot, u['user_id'], text, parse_mode='HTML')
@@ -427,6 +457,11 @@ async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         expired = await db.sub_expire_due()
         for s in expired:
+            # 🔔 موج ۴.۹۰ — اینباکس (انقضا): تنها کانال قطعی دیده‌شدن
+            await db.inbox_add(s['_id'], 'sub_expired',
+                "⌛ اشتراکت تموم شد",
+                "برای تمدید، از بخش اشتراک اقدام کن.",
+                link='/me/subscription')
             await safe_send(
                 context.bot, s['_id'],
                 "⌛ <b>اشتراکت تموم شد</b>\n\n"
@@ -441,6 +476,11 @@ async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
             for s in expiring:
                 days_left = max(0, (datetime.fromisoformat(s['end_date']) - datetime.now()).days)
                 icon = "🔴" if days_before == 1 else "⏳"
+                # 🔔 موج ۴.۹۰ — اینباکس (یادآوری پایان اشتراک)
+                await db.inbox_add(s['_id'], 'sub_expiring',
+                    f"{icon} اشتراکت رو به پایانه",
+                    f"{days_left} روز دیگه مونده — برای جلوگیری از وقفه، تمدید کن.",
+                    link='/me/subscription')
                 await safe_send(
                     context.bot, s['_id'],
                     f"{icon} <b>اشتراکت داره تموم می‌شه!</b>\n\n"
