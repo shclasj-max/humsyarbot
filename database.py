@@ -54,6 +54,10 @@ class DB:
         self.settings     = _db['bot_settings']     # تنظیمات کلی + گروه‌های لاگ + maintenance
         self.notif_runs   = _db['notif_runs']       # FIX جدید: لاگ وضعیت ارسال نوتیف‌ها
         self.content_reports = _db['content_reports']  # FIX جدید: گزارش سوال/جزوه
+        # 🔔 مرکز اعلان مینی‌اپ (موج ۴.۹۰) — هر رویداد مهم کاربری که در
+        # ربات پیام می‌شود، اینجا هم با ساختار یکدست (نوع/عنوان/متن/لینک)
+        # ثبت می‌شود تا صندوق اعلان مینی‌اپ بازتاب کاملِ ربات باشد.
+        self.user_notifs  = _db['user_notifications']
         # FIX جدید: بلک‌لیست بلاک کامل — بر اساس آیدی عددی تلگرام (ثابت و
         # غیرقابل تغییر)، برخلاف یوزرنیم که کاربر می‌تواند عوضش کند.
         # کاربر بلاک‌شده هم از دیتابیس حذف می‌شود و هم دیگر نمی‌تواند
@@ -107,6 +111,10 @@ class DB:
                 self.sub_payments.create_index([('status', 1), ('submitted_at', -1)], background=True),
                 self.sub_payments.create_index([('user_id', 1), ('submitted_at', -1)], background=True),
                 self.subscriptions.create_index([('status', 1), ('end_date', 1)], background=True),
+                # 🔔 موج ۴.۹۰ — کوئری داغ صندوق اعلان: فهرست کاربر به
+                # ترتیب زمان + شمارش خوانده‌نشده‌ها
+                self.user_notifs.create_index([('user_id', 1), ('created_at', -1)], background=True),
+                self.user_notifs.create_index([('user_id', 1), ('read', 1)], background=True),
             )
             logger.info("✅ ایندکس‌های MongoDB ایجاد شدند")
         except Exception as e:
@@ -2279,6 +2287,108 @@ class DB:
     #  برای رفع نیاز: «بدون تکرار، بدون نقص، قابل retry،
     #  وضعیت ارسال در دیتابیس ذخیره شود»
     # ══════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════
+    #  🔔 صندوق اعلان کاربر (مرکز اعلان مینی‌اپ) — موج ۴.۹۰
+    #  قرارداد مرکزی: همه‌ی نویسنده‌ها (جاب‌های ربات، پنل‌های وب/بات)
+    #  رویداد را با همین ساختار ثبت می‌کنند؛ مینی‌اپ فقط می‌خواند.
+    #  body متنِ ساده (بدون HTML) است تا در هر سطحی امن نمایش داده شود.
+    # ══════════════════════════════════════════════════
+
+    _INBOX_KEEP = 100  # سقف نگه‌داری اعلان برای هر کاربر
+
+    async def inbox_add(self, user_id: int, ntype: str, title: str,
+                        body: str, link: str = None) -> None:
+        """ثبت یک اعلان برای یک کاربر + هرسِ نگه‌داری (قدیمی‌تر از KEEP)"""
+        try:
+            await self.user_notifs.insert_one({
+                'user_id':    int(user_id),
+                'type':       ntype,
+                'title':      str(title)[:160],
+                'body':       str(body)[:900],
+                'link':       link or None,
+                'read':       False,
+                'created_at': datetime.now().isoformat(),
+            })
+            # هرس محافظ: اگر از سقف رد شد، قدیمی‌ترین‌ها حذف می‌شوند تا
+            # صندوق سنگین نشود — یک کوئری ایندکس‌خور در هر درج
+            count = await self.user_notifs.count_documents({'user_id': int(user_id)})
+            if count > self._INBOX_KEEP:
+                old = self.user_notifs.find(
+                    {'user_id': int(user_id)}
+                ).sort('created_at', -1).skip(self._INBOX_KEEP).limit(200)
+                old_ids = [d['_id'] async for d in old]
+                if old_ids:
+                    await self.user_notifs.delete_many({'_id': {'$in': old_ids}})
+        except Exception as e:
+            # اعلان نباید مسیر اصلی رویداد (ارسال/ثبت) را بشکند
+            logger.warning(f"inbox_add failed for {user_id}: {e}")
+
+    async def inbox_add_many(self, docs: list) -> None:
+        """درج گروهی برای اعلان‌های همگانی (هر دیکت: user_id/type/title/body/link)"""
+        if not docs:
+            return
+        try:
+            now_iso = datetime.now().isoformat()
+            rows = [{
+                'user_id':    int(d['user_id']),
+                'type':       d['type'],
+                'title':      str(d['title'])[:160],
+                'body':       str(d.get('body', ''))[:900],
+                'link':       d.get('link') or None,
+                'read':       False,
+                'created_at': now_iso,
+            } for d in docs]
+            # تکه‌تکه تا سقف BSON معقول رعایت شود
+            for i in range(0, len(rows), 500):
+                await self.user_notifs.insert_many(rows[i:i + 500], ordered=False)
+        except Exception as e:
+            logger.warning(f"inbox_add_many failed ({len(docs)} docs): {e}")
+
+    async def inbox_list(self, user_id: int, limit: int = 60) -> dict:
+        """فهرست اعلان‌های کاربر + شمارش خوانده‌نشده (یک پاسخ برای صفحه و بج)"""
+        uid = int(user_id)
+        cursor = (self.user_notifs.find({'user_id': uid})
+                  .sort('created_at', -1).limit(limit))
+        items = []
+        async for d in cursor:
+            items.append({
+                'id':         str(d['_id']),
+                'type':       d.get('type', 'general'),
+                'title':      d.get('title', ''),
+                'body':       d.get('body', ''),
+                'link':       d.get('link'),
+                'read':       bool(d.get('read', False)),
+                'created_at': d.get('created_at', ''),
+            })
+        unread = await self.user_notifs.count_documents({'user_id': uid, 'read': False})
+        return {'items': items, 'unread': unread}
+
+    async def inbox_mark_read(self, user_id: int, ids: list = None) -> int:
+        """علامت خوانده‌شدن — ids=None یعنی همه؛ خروجی: شمارش خوانده‌نشده‌ی باقی‌مانده"""
+        uid = int(user_id)
+        flt = {'user_id': uid, 'read': False}
+        if ids:
+            obj_ids = []
+            for x in ids:
+                try:
+                    obj_ids.append(ObjectId(str(x)))
+                except Exception:
+                    pass
+            if not obj_ids:
+                return await self.user_notifs.count_documents({'user_id': uid, 'read': False})
+            flt['_id'] = {'$in': obj_ids}
+        await self.user_notifs.update_many(flt, {'$set': {'read': True}})
+        return await self.user_notifs.count_documents({'user_id': uid, 'read': False})
+
+    async def inbox_delete(self, user_id: int, nid: str) -> bool:
+        """حذف یک اعلانِ خودِ کاربر (مالکیت با user_id تضمین می‌شود)"""
+        try:
+            r = await self.user_notifs.delete_one({
+                '_id': ObjectId(str(nid)), 'user_id': int(user_id)})
+            return r.deleted_count > 0
+        except Exception:
+            return False
 
     async def notif_run_start(self, job_name: str) -> str:
         """ثبت شروع یک اجرای job — برمی‌گرداند run_id برای ادامه ثبت"""
