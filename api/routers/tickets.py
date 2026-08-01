@@ -78,6 +78,11 @@ async def create_ticket(body: NewTicket, user=Depends(get_current_user)):
             "text":f"🔔 <b>تیکت #{tid}</b>\n👤 {db_user.get('name','')}\n📋 {body.subject}\n\n{body.message.strip()[:200]}",
             "sent":False,"created_at":datetime.now().isoformat()})
     except Exception: pass
+    # 🔔 موج ۴.۹۰ — ثبت تیکت در مرکز اعلان: کاربر بعداً راحت سراغش می‌رود
+    await db.inbox_add(uid, 'ticket_created',
+        f"🎫 تیکت #{tid} ثبت شد",
+        f"📋 {body.subject}\nبه‌محض پاسخ پشتیبانی، همین‌جا خبرت می‌کنیم.",
+        link=f'/me/tickets?t={tid}')
     return {"ok":True,"ticket_id":tid}
 
 class ReplyBody(BaseModel):
