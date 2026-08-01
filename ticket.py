@@ -249,6 +249,11 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tags=['بستن_تیکت']
         )
         if ticket:
+            # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (Deep Link به همان تیکت)
+            await db.inbox_add(ticket['user_id'], 'ticket_closed',
+                f"✅ تیکت #{tid} بسته شد",
+                f"📋 {ticket.get('subject','')}",
+                link=f'/me/tickets?t={tid}')
             try:
                 await context.bot.send_message(
                     ticket['user_id'],
@@ -288,6 +293,11 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tags=['بازگشایی_تیکت']
         )
         if ticket:
+            # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ
+            await db.inbox_add(ticket['user_id'], 'ticket_reopened',
+                f"🔓 تیکت #{tid} مجدداً باز شد",
+                f"📋 {ticket.get('subject','')}",
+                link=f'/me/tickets?t={tid}')
             try:
                 await context.bot.send_message(
                     ticket['user_id'],
@@ -431,6 +441,12 @@ async def _send_ticket_reply(bot, tid: int, text: str) -> None:
 
     if ticket:
         try:
+            # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (خلاصه‌ی پاسخ بدون HTML)
+            import re as _re
+            await db.inbox_add(ticket['user_id'], 'ticket_reply',
+                f"📨 پاسخ به تیکت #{tid}",
+                f"📋 {ticket.get('subject','')}\n💬 {_re.sub('<[^>]+>', '', text)[:180]}",
+                link=f'/me/tickets?t={tid}')
             await bot.send_message(
                 ticket['user_id'],
                 f"📨 <b>پاسخ به تیکت #{tid}</b>\n"
@@ -531,6 +547,12 @@ async def _do_create_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     context.user_data.pop('ticket_mode', None)
     context.user_data.pop('ticket_draft', None)
     context.user_data.pop('ticket_subject', None)
+
+    # 🔔 موج ۴.۹۰ — ثبت تیکت در مرکز اعلان مینی‌اپ (پارتی با مسیر وب)
+    await db.inbox_add(uid, 'ticket_created',
+        f"🎫 تیکت #{tid} ثبت شد",
+        f"📋 {subject}\nبه‌محض پاسخ پشتیبانی، همین‌جا خبرت می‌کنیم.",
+        link=f'/me/tickets?t={tid}')
 
     # اطلاع کامل به ادمین با ورودی
     try:
