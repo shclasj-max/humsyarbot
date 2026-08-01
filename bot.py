@@ -929,6 +929,10 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid == ADMIN_ID and context.user_data.get('mode') == 'search_user':
         return await handle_admin_text(update, context)
 
+    # ۳b. ✉️ موج ۴.۸۰: پیام مستقیم ادمین به کاربر (از کارت مدیریت)
+    if uid == ADMIN_ID and context.user_data.get('mode') == 'admin_dm':
+        return await handle_admin_text(update, context)
+
     # ۳. FIX: edit_user ادمین
     if uid == ADMIN_ID and context.user_data.get('mode') == 'edit_user':
         return await handle_admin_text(update, context)
