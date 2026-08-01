@@ -389,6 +389,11 @@ async def _quick_activate(query, context, target_uid: int, days: int):
     await db.sub_activate(target_uid, days, plan_name=f'فعال‌سازی دستی (+{days} روز)',
                            source='admin_manual', granted_by=query.from_user.id, extend=True)
     days_left = await db.sub_days_left(target_uid)
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (فعال‌سازی اشتراک)
+    await db.inbox_add(target_uid, 'sub_activated',
+        "💎 اشتراکت فعال شد!",
+        f"اشتراکت توسط ادمین فعال شد؛ {days_left} روز اعتبار داری.",
+        link='/me/subscription')
     await safe_send(
         context.bot, target_uid,
         f"✅ <b>اشتراکت توسط ادمین فعال شد!</b>\n\n⏳ {days_left} روز اعتبار داری.\n"
@@ -440,6 +445,11 @@ async def handle_manual_days_text(update, context):
     await db.sub_activate(target_uid, days, plan_name='فعال‌سازی دستی',
                            source='admin_manual', granted_by=update.effective_user.id, extend=True)
     days_left = await db.sub_days_left(target_uid)
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (فعال‌سازی اشتراک)
+    await db.inbox_add(target_uid, 'sub_activated',
+        "💎 اشتراکت فعال شد!",
+        f"اشتراکت توسط ادمین فعال شد؛ {days_left} روز اعتبار داری.",
+        link='/me/subscription')
     await safe_send(
         context.bot, target_uid,
         f"✅ <b>اشتراکت توسط ادمین فعال شد!</b>\n\n⏳ {days_left} روز اعتبار داری.\n"
