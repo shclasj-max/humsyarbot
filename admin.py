@@ -852,6 +852,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.update_user(target_uid, {'approved': True})
         user = await db.get_user(target_uid)
         target_kb = await get_keyboard_for_user(user, target_uid)
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تأیید حساب → داشبورد)
+        await db.inbox_add(target_uid, 'account',
+            "✅ حسابت تأیید شد!",
+            "اکنون به تمام بخش‌های هامزیار دسترسی داری — خوش اومدی! 🎓",
+            link='/')
         await safe_send(context.bot, target_uid, "✅ <b>دسترسی شما تأیید شد!</b>", parse_mode='HTML', reply_markup=target_kb)
         await query.answer("✅ تأیید شد!", show_alert=True)
         if is_unban:
@@ -1544,6 +1549,7 @@ async def _broadcast_do_send(query, context, scheduled: bool = False):
         # تا در صورت بروز هر خطای پیش‌بینی‌نشده‌ای، پرچم bc_sending
         # همیشه آزاد شود و ادمین برای همیشه پشت یک ارسالِ «گیر کرده»
         # قفل نماند.
+        await _broadcast_inbox_mirror(users_list, msg_data)
         sent, failed_total, blocked = await _do_broadcast_send(
             context.bot, users_list, msg_data, progress_cb=_progress)
     finally:
@@ -1581,6 +1587,7 @@ async def _scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     target   = data.get('target', 'all')
     admin_id = data.get('admin_id', ADMIN_ID)
     users_list = await _get_target_users(target)
+    await _broadcast_inbox_mirror(users_list, msg_data)
     sent, failed_total, blocked = await _do_broadcast_send(context.bot, users_list, msg_data)
     other_failed = failed_total - blocked
     # پاک‌سازی رکورد ماندگارشده — دیگر لازم نیست چون همین الان ارسال شد
@@ -1598,6 +1605,25 @@ async def _scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML')
     except Exception:
         pass
+
+
+async def _broadcast_inbox_mirror(users_list: list, msg_data: dict) -> None:
+    """
+    🔔 موج ۴.۹۰ — انعکاس اطلاعیه‌ی همگانی در مرکز اعلان مینی‌اپ.
+    مثل همه‌ی نویسنده‌های اینباکس: سابقه‌ی رویداد برای همه‌ی مخاطبان ثبت
+    می‌شود، نه فقط کسانی که پیام تلگرامشان رسید — کاربری که ربات را بلاک
+    کرده باز هم می‌تواند اطلاعیه را در مینی‌اپ ببیند (همگام‌سازی واقعی).
+    فقط در دو نقطه‌ی ارسالِ واقعی صدا زده می‌شود؛ ارسالِ «تست» پنل،
+    اینباکس کاربر را شلوغ نمی‌کند.
+    """
+    import re as _re
+    raw = (msg_data.get('text') or msg_data.get('caption') or '').strip()
+    body = _re.sub(r'<[^>]+>', '', raw).strip() or 'پیام همگانی مدیریت'
+    await db.inbox_add_many([
+        {'user_id': u['user_id'], 'type': 'announcement',
+         'title': '📢 اطلاعیه‌ی مدیریت', 'body': body, 'link': None}
+        for u in users_list if u.get('user_id')
+    ])
 
 
 async def _do_broadcast_send(bot, users_list: list, msg_data: dict, progress_cb=None) -> tuple:
@@ -3451,13 +3477,18 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             InlineKeyboardButton("👤 بازگشت به کارت کاربر",
                                  callback_data=f'admin:user_detail:{target}')
         ]])
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (پیام مستقیم مدیریت)
+        await db.inbox_add(target, 'admin_dm',
+            "📩 پیام از مدیریت هامزیار",
+            text[:400], link=None)
         try:
             await context.bot.send_message(target, body, parse_mode='HTML')
         except Exception as e:
             logger.warning(f"DM to user {target} failed: {e}")
             await update.message.reply_text(
-                f"⚠️ <b>پیام به {target_name or 'کاربر'} نرسید.</b>\n"
-                "احتمالاً کاربر ربات را بلاک کرده یا هنوز /start نزده است.",
+                f"⚠️ <b>پیام به {target_name or 'کاربر'} در تلگرام نرسید.</b>\n"
+                "احتمالاً کاربر ربات را بلاک کرده یا هنوز /start نزده است.\n"
+                "<i>با این حال، پیام در «مرکز اعلان مینی‌اپ» کاربر ثبت شد و آنجا می‌تواند بخواندش.</i>",
                 parse_mode='HTML',
                 reply_markup=back_kb
             )
