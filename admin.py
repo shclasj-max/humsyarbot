@@ -744,6 +744,29 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_users_list(query, context, 0)
     elif action == 'user_detail':
         await _show_user_detail(query, context, int(parts[2]))
+
+    # ✉️ موج ۴.۸۰ — شروع جریان «پیام مستقیم» از کارت کاربر
+    elif action == 'dm_user':
+        target = int(parts[2])
+        target_user = await db.get_user(target)
+        if not target_user:
+            await query.answer("کاربر پیدا نشد!", show_alert=True)
+            return
+        context.user_data['mode']           = 'admin_dm'
+        context.user_data['dm_target']      = target
+        context.user_data['dm_target_name'] = target_user.get('name', '')
+        await query.edit_message_text(
+            "✉️ <b>پیام مستقیم به کاربر</b>\n━━━━━━━━━━━━━━━━\n\n"
+            f"گیرنده: <b>{target_user.get('name','')}</b>"
+            + (f" (@{target_user.get('username')})" if target_user.get('username') else "") + "\n\n"
+            "متن پیام را بنویسید. پیام با سربرگ «مدیریت هامزیار» "
+            "از طرف ربات برای کاربر ارسال می‌شود — فقط متن ساده بنویسید.\n\n"
+            "<i>حداکثر ۳۵۰۰ کاراکتر — برای لغو، دکمه‌ی زیر را بزنید.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ لغو", callback_data=f'admin:user_detail:{target}')
+            ]])
+        )
     elif action in ('edit_name', 'edit_group', 'edit_sid'):
         target_uid = int(parts[2])
         field_map  = {'edit_name': ('name','نام'), 'edit_group': ('group','گروه'), 'edit_sid': ('student_id','شماره دانشجویی')}
@@ -2293,6 +2316,11 @@ async def _show_user_detail(query, context, target_uid: int):
         [InlineKeyboardButton("📅 ویرایش ورودی", callback_data=f'admin:edit_intake:{target_uid}')],
         [InlineKeyboardButton("💳 مدیریت اشتراک این کاربر", callback_data=f'suba:user:{target_uid}')],
     ]
+    # ✉️ موج ۴.۸۰ — پیام مستقیم به کاربر از کارت مدیریت.
+    # فقط مدیر ارشد: مرحله‌ی تایپ پیام مثل همه‌ی modeهای متنیِ
+    # پنل به ADMIN_ID محدود است (bot.py unified_text_handler).
+    if query.from_user.id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("✉️ ارسال پیام به این کاربر", callback_data=f'admin:dm_user:{target_uid}')])
     if user.get('role','student') == 'student':
         keyboard.append([InlineKeyboardButton("🎓 دادن دسترسی محتوا", callback_data=f'admin:ca_set:{target_uid}')])
     elif user.get('role') == 'content_admin':
@@ -3372,6 +3400,83 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             context.user_data['mode'] = ''
             await update.message.reply_text(f"✅ فایل بانک سوال اضافه شد!\n📚 {lesson} — {topic}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به بانک سوال", callback_data='admin:qbank_manage')]]))
+        return True
+
+    # ── ✉️ موج ۴.۸۰: دریافت متن «پیام مستقیم به کاربر»
+    # نام و آیدی گیرنده قبل از پاک‌کردن state نگه داشته می‌شوند تا
+    # حتی با خطای ورودی هم کارت کاربر قابلِ بازگشت باشد.
+    if mode == 'admin_dm':
+        target      = context.user_data.get('dm_target', 0)
+        target_name = context.user_data.get('dm_target_name', '')
+        admin_name  = update.effective_user.full_name or 'ادمین'
+
+        if not target:
+            context.user_data['mode'] = ''
+            await update.message.reply_text(
+                "❌ گیرنده مشخص نیست — دوباره از کارت کاربر شروع کنید."
+            )
+            return True
+
+        def _restore_dm():
+            context.user_data['mode']           = 'admin_dm'
+            context.user_data['dm_target']      = target
+            context.user_data['dm_target_name'] = target_name
+
+        if len(text) < 2:
+            _restore_dm()
+            await update.message.reply_text(
+                "⚠️ پیام خیلی کوتاه است (حداقل ۲ کاراکتر). دوباره بنویسید:"
+            )
+            return True
+        if len(text) > 3500:
+            _restore_dm()
+            await update.message.reply_text(
+                "⚠️ پیام خیلی بلند است (حداکثر ۳۵۰۰ کاراکتر). کوتاه‌تر بنویسید:"
+            )
+            return True
+
+        context.user_data.pop('mode', None)
+        context.user_data.pop('dm_target', None)
+        context.user_data.pop('dm_target_name', None)
+
+        # بدنه‌ی پیام ادمین escape می‌شود: نه HTML تزریقی کار می‌کند،
+        # نه کاراکترهایی مثل «<» ارسال را می‌شکنند.
+        from html import escape as _esc
+        body = (
+            "📩 <b>پیام از مدیریت هامزیار</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"{_esc(text)}"
+        )
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("👤 بازگشت به کارت کاربر",
+                                 callback_data=f'admin:user_detail:{target}')
+        ]])
+        try:
+            await context.bot.send_message(target, body, parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"DM to user {target} failed: {e}")
+            await update.message.reply_text(
+                f"⚠️ <b>پیام به {target_name or 'کاربر'} نرسید.</b>\n"
+                "احتمالاً کاربر ربات را بلاک کرده یا هنوز /start نزده است.",
+                parse_mode='HTML',
+                reply_markup=back_kb
+            )
+            return True
+
+        from utils import send_audit_log
+        await send_audit_log(
+            context.bot, 'admin', admin_name, update.effective_user.id,
+            "ارسال پیام مستقیم به کاربر", module='Users', severity='INFO',
+            actor_role='ادمین ارشد', target_type='user',
+            target_label=target_name, details=text[:100],
+            tags=['پیام_مستقیم']
+        )
+        await update.message.reply_text(
+            f"✅ <b>پیام برای {target_name or 'کاربر'} ارسال شد.</b>\n\n"
+            f"📩 <i>{_esc(text[:180])}</i>",
+            parse_mode='HTML',
+            reply_markup=back_kb
+        )
         return True
 
     return False
