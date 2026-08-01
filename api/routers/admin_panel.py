@@ -154,6 +154,9 @@ async def approve(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"approved":True})
     _notify(uid, "✅ <b>حساب شما تأیید شد!</b>\n\nاکنون می‌توانید از هامزیار استفاده کنید.\n/start بزنید.", "user_approved")
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تأیید حساب)
+    await db.inbox_add(uid, 'account', "✅ حسابت تأیید شد!",
+        "اکنون به تمام بخش‌های هامزیار دسترسی داری — خوش اومدی! 🎓", link='/')
     await _audit(admin, "تأیید حساب کاربر", "Users", severity="INFO",
         target_id=uid, target_type="user", target_label=user.get("name",""),
         tags=["تأیید_کاربر","پنل_وب"])
@@ -217,6 +220,10 @@ async def dm_user_ep(uid: int, body: DmBody, admin=Depends(get_admin_user)):
     _res = _notify(uid, out, "admin_dm")
     if asyncio.iscoroutine(_res):
         await _res
+    # 🔔 موج ۴.۹۰ — پیام مستقیم در مرکز اعلان مینی‌اپ هم می‌نشیند؛
+    # حتی اگر ربات بلاک باشد، کاربر آنجا می‌خواندش
+    await db.inbox_add(uid, 'admin_dm', "📩 پیام از مدیریت هامزیار",
+        text[:400], link=None)
     await _audit(admin, "ارسال پیام مستقیم به کاربر", "Users", severity="INFO",
         target_id=uid, target_type="user", target_label=user.get("name",""),
         details=text[:100], tags=["پیام_مستقیم","پنل_وب"])
@@ -466,6 +473,15 @@ async def broadcast(body: BroadcastSend, admin=Depends(get_admin_user)):
     if body.send_at: doc_base["send_at"] = body.send_at
     docs = [{**doc_base, "chat_id": u["user_id"]} for u in users]
     if docs: await notif.insert_many(docs)
+    # 🔔 موج ۴.۹۰ — انعکاس اطلاعیه در مرکز اعلان مینی‌اپ (فوری و زمان‌دار)
+    import re as _re
+    await db.inbox_add_many([
+        {'user_id': u["user_id"], 'type': 'announcement',
+         'title': "📢 اطلاعیه‌ی مدیریت",
+         'body': _re.sub(r'<[^>]+>', '', text).strip() or 'پیام همگانی مدیریت',
+         'link': None}
+        for u in users if u.get("user_id")
+    ])
     await _audit(admin, "ارسال همگانی" + (" (زمان‌دار)" if body.send_at else ""),
         "Notifications", severity="HIGH",
         target_type="broadcast", target_label=f"{len(docs)} گیرنده",
