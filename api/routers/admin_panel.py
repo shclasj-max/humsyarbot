@@ -186,6 +186,42 @@ async def suspend(uid: int, admin=Depends(get_admin_user)):
         tags=["تعلیق_کاربر","پنل_وب"])
     return {"ok":True,"suspended":suspended}
 
+
+class DmBody(BaseModel):
+    """متن پیام مستقیم ادمین به کاربر"""
+    text: str
+
+
+@router.post("/users/{uid}/message")
+async def dm_user_ep(uid: int, body: DmBody, admin=Depends(get_admin_user)):
+    # ✉️ موج ۴.۸۰ — پیام مستقیم از کارت کاربر مینی‌اپ.
+    # ارسال واقعی از طریق صف bot_notifications (همان کانالی که خودِ ربات
+    # برای اطلاع‌رسانی‌ها استفاده می‌کند) انجام می‌شود؛ جاب outbox هر ۲۰
+    # ثانیه تخلیه می‌کند — پاسخ صادقانه «در صف قرار گرفت» است.
+    user = await db.get_user(uid)
+    if not user: raise HTTPException(404, "کاربر پیدا نشد")
+    text = body.text.strip()
+    if len(text) < 2:    raise HTTPException(400, "متن پیام خیلی کوتاه است")
+    if len(text) > 3500: raise HTTPException(400, "متن پیام خیلی بلند است (حداکثر ۳۵۰۰ کاراکتر)")
+    # بدنه escape می‌شود: نه تزریق HTML، نه شکستن ارسال با «<»
+    from html import escape as _esc
+    out = (
+        "📩 <b>پیام از مدیریت هامزیار</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"{_esc(text)}"
+    )
+    # _notify سنکرون صدا زده می‌شود و insert را برمی‌گرداند؛ اگر خروجی
+    # coroutine باشد (motor) باید await شود تا درج واقعاً اجرا شود —
+    # در حالت درایور همگام هم بی‌اثر است. بدون این، پیام گاهی فقط
+    # «برنامه‌ریزی» می‌شد و هرگز به outbox نمی‌نشست.
+    _res = _notify(uid, out, "admin_dm")
+    if asyncio.iscoroutine(_res):
+        await _res
+    await _audit(admin, "ارسال پیام مستقیم به کاربر", "Users", severity="INFO",
+        target_id=uid, target_type="user", target_label=user.get("name",""),
+        details=text[:100], tags=["پیام_مستقیم","پنل_وب"])
+    return {"ok": True, "queued": True}
+
 @router.post("/users/{uid}/delete")
 async def delete_user_ep(uid: int, admin=Depends(get_admin_user)):
     if uid == ADMIN_ID: raise HTTPException(403,"نمی‌توانید ادمین ارشد را حذف کنید")
