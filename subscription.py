@@ -210,6 +210,11 @@ async def _activate_free_via_discount(query, context, plan: dict, discount_code:
         f"⏳ {days_left} روز اعتبار داری\n\n"
         f"از بخش «👤 پروفایل» هر وقت خواستی می‌تونی باقیمونده رو چک کنی."
     )
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (فعال‌سازی با کد تخفیف)
+    await db.inbox_add(uid, 'sub_activated',
+        "🎉 اشتراکت با کد تخفیف فعال شد!",
+        f"📦 پلن: {plan['name']} — {days_left} روز اعتبار داری.",
+        link='/me/subscription')
     await query.edit_message_text(text, parse_mode='HTML')
 
 
@@ -367,6 +372,11 @@ async def _admin_approve(query, context, pid: str):
         await db.discount_consume(payment['discount_code'])
 
     days_left = await db.sub_days_left(payment['user_id'])
+    # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تأیید رسید → فعال‌سازی)
+    await db.inbox_add(payment['user_id'], 'sub_activated',
+        "✅ اشتراکت فعال شد!",
+        f"رسیدت تأیید شد؛ 📦 {payment['plan_name']} — {days_left} روز اعتبار داری.",
+        link='/me/subscription')
     await safe_send(
         context.bot, payment['user_id'],
         f"✅ <b>اشتراکت فعال شد!</b>\n\n"
