@@ -404,6 +404,17 @@ async def schedule_create(
 
         notified = len(documents)
 
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (Deep Link به تب «برنامه»)
+        _inbox_body = f"📚 {lesson}\n📅 {date}"
+        if time: _inbox_body += f"  ⏰ {time}"
+        if teacher: _inbox_body += f"\n👨‍🏫 {teacher}"
+        await db.inbox_add_many([
+            {'user_id': user['user_id'], 'type': body.type,
+             'title': f"{icon} {type_label} جدید",
+             'body': _inbox_body, 'link': '/schedule'}
+            for user in users if user.get('user_id')
+        ])
+
     except Exception:
         notified = 0
 
@@ -672,6 +683,16 @@ async def flexible_schedule_change(
 
         notified = len(documents)
 
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تغییر زمان کلاس)
+        await db.inbox_add_many([
+            {'user_id': user['user_id'], 'type': 'schedule_change',
+             'title': "🔄 تغییر زمان کلاس",
+             'body': (f"📚 {schedule.get('lesson', '')}\n"
+                      f"📅 {date}  ⏰ {time}"),
+             'link': '/schedule'}
+            for user in users if user.get('user_id')
+        ])
+
     except Exception:
         notified = 0
 
@@ -861,6 +882,16 @@ async def grades_bulk_create(
             )
 
         notified = len(documents)
+
+        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (نمره → تب کارنامه)
+        await db.inbox_add_many([
+            {'user_id': item['student_id'], 'type': 'grade',
+             'title': "📊 نمره‌ی جدید ثبت شد",
+             'body': (f"📚 {lesson} — {exam_title}\n"
+                      f"🎯 نمره: {item['score']}/20"),
+             'link': '/grades'}
+            for item in saved if item.get('student_id')
+        ])
 
     except Exception:
         notified = 0
