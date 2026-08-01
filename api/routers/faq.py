@@ -4,11 +4,16 @@ from api.auth import get_current_user
 from database import db
 
 router = APIRouter()
+
+# موج ۴.۸۰ — fallback دیگر کپی‌ای مستقل و کهنه نیست؛ دقیقاً همان
+# منبعِ ربات (faq.py) است تا رفتارِ «دیتابیس خالی» در هر دو سطح یکی
+# باشد و آینده‌ای یک‌منبعی داشته باشیم.
+from faq import DEFAULT_FAQS as _BOT_FAQS
+
 DEFAULT_FAQS = [
-    {"category":"🔬 علوم پایه","question":"علوم پایه چیه؟","answer":"بخش علوم پایه شامل محتوای آموزشی دروس ترم ۱ تا ۵ است."},
-    {"category":"🧪 بانک سوال","question":"بانک سوال چه بخش‌هایی داره؟","answer":"تمرین آزاد، نقاط ضعف، سطح سخت، آزمون سفارشی و طراحی سوال."},
-    {"category":"💳 اشتراک","question":"اشتراک چطور کار می‌کنه؟","answer":"پلن انتخاب کنید و رسید پرداخت را از طریق ربات بفرستید."},
-    {"category":"⚙️ مشکلات فنی","question":"ربات جواب نمی‌ده؟","answer":"/start بزنید. اگر ادامه داشت تیکت بزنید."},
+    {"category": cat, "question": q, "answer": a}
+    for cat, items in _BOT_FAQS.items()
+    for q, a in items
 ]
 
 @router.get("")
