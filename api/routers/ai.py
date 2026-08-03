@@ -1213,7 +1213,7 @@ async def ask(
         conv_id = (body.conversation_id or "").strip()
         if conv_id and conv_id != "legacy":
             conv_doc = await _load_conv(conv_id, user_id)
-            return await _ask_provider(
+            result = await _ask_provider(
                 user_id=user_id,
                 prompt=message,
                 history_items=_conv_context_items(
@@ -1224,19 +1224,27 @@ async def ask(
                 limit=limit,
                 conv=(conv_id, conv_doc),
             )
+        else:
+            result = await _ask_provider(
+                user_id=user_id,
+                prompt=message,
+                history_items=(
+                    await _get_history(
+                        user_id
+                    )
+                ),
+                memory_label=message,
+                used=used,
+                limit=limit,
+            )
 
-        return await _ask_provider(
-            user_id=user_id,
-            prompt=message,
-            history_items=(
-                await _get_history(
-                    user_id
-                )
-            ),
-            memory_label=message,
-            used=used,
-            limit=limit,
-        )
+        # 👑 P1 — گفت‌وگوی روزانه‌ی هوشیار (idempotent per روز در DB)
+        try:
+            await db.prestige_event(user_id, "ai_daily")
+        except Exception:
+            pass
+
+        return result
 
     except HTTPException:
         raise
@@ -1453,6 +1461,12 @@ async def ask_media(
         result["active_reference"] = (
             active_reference
         )
+
+        # 👑 P1 — گفت‌وگوی رسانه‌ای هم رویداد روزانه دارد
+        try:
+            await db.prestige_event(user_id, "ai_daily")
+        except Exception:
+            pass
 
         return result
 
