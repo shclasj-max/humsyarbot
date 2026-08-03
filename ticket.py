@@ -11,7 +11,15 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes
 from database import db
-from utils import fmt_jalali, fmt_jalali_dt, send_audit_log
+from utils import fmt_jalali, fmt_jalali_dt, send_audit_log, webapp_kb
+
+def _tk_kb(rows, link: str):
+    """🧠 موج N2 — کیبورد تیکت + ردیف web_app‌‌ی همان رشته‌ی تیکت
+    (Deep Link) تا کاربر با یک لمس روی همان رشته/آخرین پاسخ باز شود."""
+    _k = webapp_kb(link)
+    if _k: rows = _k.inline_keyboard + rows
+    return InlineKeyboardMarkup(rows)
+
 
 logger   = logging.getLogger(__name__)
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
@@ -262,9 +270,9 @@ async def ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "مشکل شما حل‌شده تلقی شد.\n"
                     "اگر سوال جدیدی دارید، تیکت جدید ثبت کنید.",
                     parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup([[
+                    reply_markup=_tk_kb([[
                         InlineKeyboardButton("🎫 تیکت جدید", callback_data='ticket:new')
-                    ]])
+                    ]], f'/me/tickets?t={tid}&hl=last')
                 )
             except Exception:
                 pass
@@ -455,10 +463,10 @@ async def _send_ticket_reply(bot, tid: int, text: str) -> None:
                 f"💬 {text}\n\n"
                 "<i>برای ادامه گفتگو می‌توانید پاسخ دهید.</i>",
                 parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([[
+                reply_markup=_tk_kb([[
                     InlineKeyboardButton("💬 ادامه گفتگو", callback_data=f'ticket:reply_user:{tid}'),
                     InlineKeyboardButton("📋 مشاهده تیکت", callback_data=f'ticket:view:{tid}'),
-                ]])
+                ]], f'/me/tickets?t={tid}&hl=last')
             )
         except Exception:
             pass
