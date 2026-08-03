@@ -69,6 +69,11 @@ def _profile_keyboard() -> InlineKeyboardMarkup:
         ],
         # FIX جدید: دسترسی به جزئیات کامل اشتراک از پروفایل
         [InlineKeyboardButton("🧾 جزئیات اشتراک", callback_data='sub:my_status')],
+        # 👑 Prestige — دسترسی سریع به نشان‌ها و سفر رقابتی
+        [
+            InlineKeyboardButton("🏅 نشان‌های من", callback_data='profile:badges'),
+            InlineKeyboardButton("📜 سفر من",      callback_data='profile:journey'),
+        ],
         [InlineKeyboardButton("🔄 بروزرسانی",     callback_data='profile:refresh')],
         [InlineKeyboardButton("🔙 داشبورد",        callback_data='dashboard:refresh')],
     ])
@@ -105,6 +110,62 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML',
             reply_markup=_profile_keyboard()
         )
+
+    # ── 👑 Prestige: ۶ نشان اخیر (Spec v3 — منوی پروفایل) ──
+    elif action == 'badges':
+        user = await db.get_user(uid) or {}
+        ach = user.get('achievements') or {}
+        recent = sorted(
+            ((k, str((v or {}).get('at', ''))) for k, v in ach.items()),
+            key=lambda kv: kv[1], reverse=True)[:6]
+        lines = []
+        for k, _at in recent:
+            try:
+                m = db._badge_meta(k, user)
+            except Exception:
+                m = None
+            if not m:
+                continue
+            t = f"{m['icon']} <b>{m['title']}</b>"
+            if m.get('tiers_count'):
+                t += f" — پله {m.get('tier', 0)}/{m['tiers_count']}"
+            lines.append(t)
+        text = (
+            "🏅 <b>نشان‌های من</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            + ("\n".join(lines)
+               if lines else "هنوز نشانی نداری — اولین پاسخ‌ت را بده! 🌱")
+            + f"\n\nمجموع نشان‌ها: <b>{len(ach)}</b>"
+            + "\nکلکسیون کامل در مینی‌اپ: بخش «نشان‌های من»"
+        )
+        await query.edit_message_text(
+            text, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 پروفایل", callback_data='profile:main')]]))
+
+    # ── 👑 Prestige: ۵ رویداد اخیر سفر رقابتی ──
+    elif action == 'journey':
+        try:
+            rows = await db.prestige_history_list(uid, 5)
+        except Exception:
+            rows = []
+        lines = []
+        for r in rows or []:
+            bit = f"▫️ {r.get('title', '')}"
+            if r.get('at_jalali'):
+                bit += f"\n   <i>{r['at_jalali']}</i>"
+            lines.append(bit)
+        text = (
+            "📜 <b>سفر من</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            + ("\n\n".join(lines)
+               if lines else "هنوز رویدادی ثبت نشده — شروع کن! ⚡")
+            + "\n\nتایم‌لاین کامل در مینی‌اپ: بخش «نشان‌های من»"
+        )
+        await query.edit_message_text(
+            text, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 پروفایل", callback_data='profile:main')]]))
 
     # ── FIX: ویرایش نام با mode — نه ConversationHandler ──
     elif action == 'edit_name':
