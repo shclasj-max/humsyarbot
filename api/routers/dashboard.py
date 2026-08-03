@@ -1,9 +1,10 @@
 """Dashboard endpoints for the Telegram Mini App."""
 import asyncio
 from datetime import date
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from api.auth import ADMIN_ID, get_current_user
 from api.user_metrics import (
@@ -44,10 +45,12 @@ async def get_dashboard(user=Depends(get_current_user)):
     db_user = user["_db"] if isinstance(user.get("_db"), Mapping) else {}
     group = _text(db_user.get("group"))
 
-    raw_stats, raw_exams, raw_tickets = await asyncio.gather(
+    raw_stats, raw_exams, raw_tickets, prestige = await asyncio.gather(
         db.user_stats(uid),
         db.upcoming_exams(7, group=group),
         db.ticket_get_user(uid),
+        # 👑 موج P0 — بریف Prestige (افزایشی؛ هم‌شکل با /api/profile/prestige)
+        db.prestige_state(uid),
     )
 
     stats = normalize_stats(raw_stats)
@@ -74,6 +77,7 @@ async def get_dashboard(user=Depends(get_current_user)):
             for ticket in tickets
             if isinstance(ticket, Mapping) and ticket.get("status") == "open"
         ),
+        "prestige": prestige,
     }
 
 
@@ -84,26 +88,82 @@ async def weekly(user=Depends(get_current_user)):
 
 
 @router.get("/leaderboard")
-async def leaderboard(user=Depends(get_current_user)):
-    leaders = await db.get_leaderboard(10)
-    uid = user["id"]
-    result = []
+async def leaderboard(
+    range_: Optional[str] = None,
+    scope: Optional[str] = None,
+    tab: Optional[str] = None,
+    limit: int = 50,
+    user=Depends(get_current_user),
+):
+    # 👑 P2 — حالت توسعه‌یافته (با حتی یک پارامتر): ماتریس بازه×دامنه×تب.
+    # بدون پارامتر: شکل legacy دست‌نخورده (قرارداد Dashboard FE قدیمی).
+    if range_ is None and scope is None and tab is None:
+        leaders = await db.get_leaderboard(10)
+        uid = user["id"]
+        result = []
 
-    for item in leaders if isinstance(leaders, list) else []:
-        if not isinstance(item, Mapping):
-            continue
-        total = non_negative_int(item.get("total_answers"))
-        correct = non_negative_int(item.get("correct_answers"))
-        percent = round(correct / total * 100) if total else 0
-        result.append(
-            {
-                "rank": len(result) + 1,
-                "name": _text(item.get("name"), "کاربر") or "کاربر",
-                "correct": correct,
-                "total": total,
-                "percent": min(100, percent),
-                "is_me": same_user_id(item.get("user_id"), uid),
-            }
-        )
+        for item in leaders if isinstance(leaders, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            total = non_negative_int(item.get("total_answers"))
+            correct = non_negative_int(item.get("correct_answers"))
+            percent = round(correct / total * 100) if total else 0
+            result.append(
+                {
+                    "rank": len(result) + 1,
+                    "name": _text(item.get("name"), "کاربر") or "کاربر",
+                    "correct": correct,
+                    "total": total,
+                    "percent": min(100, percent),
+                    "is_me": same_user_id(item.get("user_id"), uid),
+                }
+            )
 
-    return {"leaderboard": result}
+        return {"leaderboard": result}
+
+    rng = (range_ or "week").strip()
+    if rng not in ("week", "month", "all", "season"):
+        rng = "week"
+    scp = (scope or "all").strip()
+    if scp not in ("all", "intake", "group"):
+        scp = "all"
+    tb = (tab or "xp").strip()
+    if tb not in ("xp", "acc", "exam", "contrib"):
+        tb = "xp"
+    try:
+        limit = max(1, min(int(limit or 50), 100))
+    except Exception:
+        limit = 50
+    return await db.prestige_leaderboard(user["id"], rng, scp, tb, limit)
+
+
+@router.get("/feed")
+async def get_feed(
+    limit: int = 5,
+    user=Depends(get_current_user),
+):
+    """👑 P2 — فید رویدادهای عمومی (۴۸ ساعت، بدون کامنت — Spec §۶.۳)"""
+    try:
+        limit = max(1, min(int(limit), 10))
+    except Exception:
+        limit = 5
+    return await db.prestige_feed(user["id"], limit)
+
+
+class FeedReactInput(BaseModel):
+    event_id: str
+    kind: Optional[str] = None     # clap|fire|crown؛ None/همان‌واکنش ⇒ حذف
+
+
+@router.post("/feed/react")
+async def feed_react_ep(
+    body: FeedReactInput,
+    user=Depends(get_current_user),
+):
+    """👑 P2 — واکنش ناشناس به رویداد فید (تک‌واکنش قابل‌تعویض/حذف)"""
+    kind = (body.kind or "").strip() or None
+    if kind not in (None, "clap", "fire", "crown"):
+        raise HTTPException(status_code=422, detail="واکنش نامعتبر")
+    if not (body.event_id or "").strip():
+        raise HTTPException(status_code=422, detail="رویداد نامعتبر")
+    return await db.feed_react(user["id"], body.event_id.strip(), kind)
