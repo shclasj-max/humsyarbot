@@ -1,58 +1,80 @@
-"""🔔 Notifications"""
-from fastapi import APIRouter, Depends, HTTPException
+"""🔔 Notifications — ترجیحات کاربر + مرکز اعلان (Inbox)"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 from api.auth import get_current_user
 from database import db
 
 router = APIRouter()
-NOTIF_ITEMS = [
-    ("new_resources","📚 منابع جدید","وقتی محتوای جدید آپلود شود"),
-    ("schedule","📅 برنامه","افزودن کلاس یا تغییر زمان"),
-    ("exam","📝 یادآوری امتحان","۷، ۳ و ۱ روز قبل"),
-    ("makeup","🔄 کلاس جبرانی","وقتی جبرانی ثبت شود"),
-    ("daily_question","🧪 سوال روزانه","هر روز صبح"),
-    ("edu_message","🎓 پیام آموزشی","نکات آموزشی"),
-    ("general","📢 اطلاعیه","اخبار کلی"),
-    ("grade_release","📊 اعلام نمرات","وقتی نمره ثبت شود"),
-    ("sub_expiry","💳 انقضای اشتراک","۷ و ۳ روز قبل"),
-]
+
+# ══════════════════════════════════════════════════
+#  🎚 ترجیحات اعلان — 🧠 موج N3: کاتالوگ یکپارچه
+#  منبع لیست دسته‌ها دیگر این فایل نیست؛ db.notif_catalog()
+#  تک‌منبعِ API/BAT است. کلیدهای قدیمی از طریق PREF_ALIAS
+#  به Canonical ترجمه می‌شوند (سازگاری سندهای کهنه).
+# ══════════════════════════════════════════════════
 
 @router.get("/settings")
 async def get_settings(user=Depends(get_current_user)):
-    s = user["_db"].get("notification_settings",{})
-    return {"settings":[{"key":k,"label":l,"desc":d,"enabled":s.get(k,True)} for k,l,d in NOTIF_ITEMS]}
+    s = (user["_db"].get("notification_settings") or {})
+    cat = await db.notif_catalog()
+    return {"settings": [
+        {"key": c["key"], "label": c["label"], "desc": c["desc"],
+         "enabled": db.notif_pref_on(s, c["key"])}
+        for c in cat
+    ]}
+
 
 class Toggle(BaseModel):
-    settings: Dict[str,bool]
+    settings: Dict[str, bool]
 
 @router.patch("/settings")
 async def update(body: Toggle, user=Depends(get_current_user)):
-    valid = {k for k,_,_ in NOTIF_ITEMS}
-    updates = {f"notification_settings.{k}":v for k,v in body.settings.items() if k in valid}
-    if updates: await db.update_user(user["id"], updates)
-    return {"ok":True}
+    # 🧠 N3 — accept old keys too؛ canonical می‌شوند (بدون مهاجرت دستی)
+    valid = {k for k, _, _, _ in db.NOTIF_CATALOG}
+    updates = {}
+    for k, v in body.settings.items():
+        canon = db.PREF_ALIAS.get(k, k)
+        if canon and canon in valid:
+            updates[f"notification_settings.{canon}"] = bool(v)
+    if updates:
+        await db.update_user(user["id"], updates)
+    return {"ok": True}
+
 
 class ToggleAll(BaseModel):
     enabled: bool
 
 @router.patch("/settings/all")
 async def toggle_all(body: ToggleAll, user=Depends(get_current_user)):
-    updates = {f"notification_settings.{k}":body.enabled for k,_,_ in NOTIF_ITEMS}
+    updates = {f"notification_settings.{k}": body.enabled
+               for k, _, _, _ in db.NOTIF_CATALOG}
     await db.update_user(user["id"], updates)
-    return {"ok":True,"enabled":body.enabled}
+    return {"ok": True, "enabled": body.enabled}
 
 
 # ══════════════════════════════════════════════════
-#  🔔 مرکز اعلان (inbox) — موج ۴.۹۰
-#  منبع داده: همان رویدادهایی که در ربات برای کاربر پیام می‌شوند
-#  (jobs + پنل‌ها) و از طریق db.inbox_add* ثبت شده‌اند.
+#  🔔 مرکز اعلان (inbox) — موج ۴.۹۰ + 🧠 N3 (فیلتر/pin/badge)
+#  قرارداد پاسخ {items, unread} دست‌نخورده می‌ماند؛
+#  پارامترها اختیاری‌اند (کلاینت فعلی بدون آن‌ها کار می‌کند).
 # ══════════════════════════════════════════════════
 
 @router.get("/inbox")
-async def get_inbox(user=Depends(get_current_user)):
+async def get_inbox(user=Depends(get_current_user),
+                    category: Optional[str] = Query(None),
+                    q: Optional[str] = Query(None),
+                    unread: int = Query(0)):
     """فهرست اعلان‌ها + شمارش خوانده‌نشده (بج و صفحه یک پاسخ مشترک دارند)"""
-    return await db.inbox_list(user["id"], limit=60)
+    return await db.inbox_list(user["id"], limit=60,
+                               category=category, q=q,
+                               unread_only=bool(unread))
+
+
+@router.get("/inbox/unread-count")
+async def get_unread_count(user=Depends(get_current_user)):
+    """🔢 بج سبک خوانده‌نشده — برای پول‌های دوره‌ای ارزان (بدون آیتم)"""
+    return {"unread": await db.inbox_unread_count(user["id"])}
+
 
 class InboxRead(BaseModel):
     # None → خواندن همه («خواندن همه» از کلاینت ids=null می‌فرستد؛
@@ -64,8 +86,22 @@ async def mark_read(body: InboxRead, user=Depends(get_current_user)):
     unread = await db.inbox_mark_read(user["id"], body.ids)
     return {"ok": True, "unread": unread}
 
+
+class InboxPin(BaseModel):
+    pinned: bool
+
+@router.post("/inbox/{nid}/pin")
+async def pin_one(nid: str, body: InboxPin, user=Depends(get_current_user)):
+    """📌 سنجاق/برداشتن سنجاق — pin‌شده‌ها بالاتر و مصونِ هرس"""
+    ok = await db.inbox_pin(user["id"], nid, body.pinned)
+    if not ok:
+        raise HTTPException(404, "اعلان پیدا نشد")
+    return {"ok": True, "pinned": body.pinned}
+
+
 @router.delete("/inbox/{nid}")
 async def delete_inbox(nid: str, user=Depends(get_current_user)):
     ok = await db.inbox_delete(user["id"], nid)
-    if not ok: raise HTTPException(404, "اعلان پیدا نشد")
-    return {"ok": True}
+    if not ok:
+        raise HTTPException(404, "اعلان پیدا نشد")
+    return {"ok": True, "unread": await db.inbox_unread_count(user["id"])}
