@@ -174,11 +174,13 @@ async def _confirm_and_save(query, context):
     saved = await db.grade_bulk_upsert(entries, lesson, exam_title, exam_date, query.from_user.id)
 
     # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (نمره → کارنامه) برای همه‌ی دانشجویان
+    # 🧠 N2 — Deep Link: همان درس در کارنامه فلش می‌خورد
+    from urllib.parse import quote as _gq
     await db.inbox_add_many([
         {'user_id': rec['student_id'], 'type': 'grade',
          'title': f"📊 نمره‌ات {'به‌روزرسانی شد' if rec.get('_is_update') else 'ثبت شد'}",
          'body': (f"📚 {lesson}\n📝 {exam_title}\n🎯 نمره: {rec['score']}/20"),
-         'link': '/grades'}
+         'link': '/grades?hl=' + _gq(str(lesson or ''))}
         for rec in saved if rec.get('student_id')
     ])
 
