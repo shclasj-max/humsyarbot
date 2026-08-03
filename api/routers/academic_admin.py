@@ -408,10 +408,12 @@ async def schedule_create(
         _inbox_body = f"📚 {lesson}\n📅 {date}"
         if time: _inbox_body += f"  ⏰ {time}"
         if teacher: _inbox_body += f"\n👨‍🏫 {teacher}"
+        from urllib.parse import quote as _qq
         await db.inbox_add_many([
             {'user_id': user['user_id'], 'type': body.type,
              'title': f"{icon} {type_label} جدید",
-             'body': _inbox_body, 'link': '/schedule'}
+             'body': _inbox_body,
+             'link': '/schedule?hl=' + _qq(str(lesson or ''))}
             for user in users if user.get('user_id')
         ])
 
@@ -684,12 +686,13 @@ async def flexible_schedule_change(
         notified = len(documents)
 
         # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تغییر زمان کلاس)
+        from urllib.parse import quote as _qq2
         await db.inbox_add_many([
             {'user_id': user['user_id'], 'type': 'schedule_change',
              'title': "🔄 تغییر زمان کلاس",
              'body': (f"📚 {schedule.get('lesson', '')}\n"
                       f"📅 {date}  ⏰ {time}"),
-             'link': '/schedule'}
+             'link': '/schedule?hl=' + _qq2(str(schedule.get('lesson', '') or ''))}
             for user in users if user.get('user_id')
         ])
 
@@ -884,12 +887,13 @@ async def grades_bulk_create(
         notified = len(documents)
 
         # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (نمره → تب کارنامه)
+        from urllib.parse import quote as _qq3
         await db.inbox_add_many([
             {'user_id': item['student_id'], 'type': 'grade',
              'title': "📊 نمره‌ی جدید ثبت شد",
              'body': (f"📚 {lesson} — {exam_title}\n"
                       f"🎯 نمره: {item['score']}/20"),
-             'link': '/grades'}
+             'link': '/grades?hl=' + _qq3(str(lesson or ''))}
             for item in saved if item.get('student_id')
         ])
 
