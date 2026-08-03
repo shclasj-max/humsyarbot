@@ -73,6 +73,19 @@ async def _audit(admin, action: str, module: str, *, severity: str = "INFO",
 
 
 @router.get("/stats")
+def _rp_mini(u: dict) -> dict:
+    """👑 P3 — مینی-چیپ پرستیژ از فیلدهای ذخیره‌شده (بدون کوئری اضافه)"""
+    ranks = {r[0]: r for r in db.PRESTIGE_RANKS}
+    r = ranks.get(u.get("prestige_rank") or "rookie", ranks["rookie"])
+    try:
+        dv = int(u.get("prestige_div", 3) or 3)
+    except Exception:
+        dv = 3
+    return {"icon": r[2], "title": r[1], "color": r[4],
+            "div": dv, "roman": db.ROMAN.get(dv, "III"),
+            "stars": db.DIV_STARS.get(dv, "⭐")}
+
+
 async def stats(admin=Depends(get_admin_user)):
     return {
         "users":{"total":await db.users.count_documents({"approved":True}),"pending":await db.users.count_documents({"approved":False})},
@@ -125,12 +138,16 @@ async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(
         "group": 1, "intake": 1, "role": 1,
         "approved": 1, "suspended": 1,
         "registered_at": 1, "total_answers": 1,
+        # 👑 P3 — مینی-چیپ پرستیژ برای NameChip در UserManagement
+        "prestige_rank": 1, "prestige_div": 1,
     }
     users = await db.users.find(q, _projection).sort("registered_at",-1).to_list(500)
-    return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
+    return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),
+        "student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
         "approved":u.get("approved",False),"suspended":u.get("suspended",False),
-        "registered_at":u.get("registered_at","")[:10],"total_answers":u.get("total_answers",0)} for u in users]}
+        "registered_at":u.get("registered_at","")[:10],"total_answers":u.get("total_answers",0),
+        "prestige": _rp_mini(u)} for u in users]}
 
 @router.get("/users/pending")
 async def pending_users(admin=Depends(get_admin_user)):
@@ -973,3 +990,131 @@ async def analytics_admin(
         "top_actions": top_actions,
         "hourly": hourly,
     }
+
+
+# ══════════════════════════════════════════════════
+#  👑 P3 — Prestige: تنظیمات زنده‌ی تعادل + پایش چالش
+# ══════════════════════════════════════════════════
+
+# کلیدهای مجاز اورراید (آستانه‌ی رنک‌ها عمداً اینجا نیست — Design Lock)
+# key: (برچسب فارسی, حداقل, حداکثر)
+PRESTIGE_CFG_KEYS = {
+    "xp_easy":               ("XP پاسخ آسان", 0, 200),
+    "xp_medium":             ("XP پاسخ متوسط", 0, 300),
+    "xp_hard":               ("XP پاسخ سخت", 0, 500),
+    "xp_unknown":            ("XP پاسخ بدون سختی", 0, 300),
+    "xp_wrong_first":        ("XP تلاش اولین‌بار", 0, 50),
+    "xp_streak_day":         ("XP فعالیت روزانه (استریک)", 0, 200),
+    "xp_exam_complete":      ("XP تکمیل آزمون", 0, 500),
+    "xp_exam_acc80":         ("بونوس دقت ≥۸۰٪ آزمون", 0, 300),
+    "xp_exam_perfect":       ("بونوس برگ کامل آزمون", 0, 300),
+    "xp_file_download":      ("XP اولین دانلود هر فایل", 0, 100),
+    "xp_ai_daily":           ("XP گفت‌وگوی روزانه‌ی هوشیار", 0, 100),
+    "xp_question_approved":  ("XP تأیید سؤال طراحی‌شده", 0, 300),
+    "xp_report_useful":      ("XP گزارش مفید", 0, 300),
+    "xp_challenge_win":      ("جایزه‌ی برد چالش ارتقا", 0, 1000),
+    "xp_apex_win":           ("جایزه‌ی برد چالش Apex (یک‌بار)", 0, 2000),
+    "xp_weekly_champion":    ("جایزه‌ی قهرمان هفته", 0, 1000),
+    "daily_cap":             ("سقف روزانه‌ی XP پاسخ‌محور", 10, 1000),
+    "diminish_after":        ("آستانه‌ی diminishing (صحیح/روز)", 5, 400),
+    "shield_answers":        ("سپر ارتقا (تعداد پاسخ)", 0, 200),
+    "shield_days":           ("سپر ارتقا (روز)", 0, 90),
+    "decay_idle_days":       ("پنجره‌ی رکود Decay (روز)", 3, 90),
+    "challenge_cooldown_h":  ("کول‌داون شکست چالش (ساعت)", 1, 168),
+    "challenge_cooldown_apex_h": ("کول‌داون شکست Apex (ساعت)", 1, 720),
+}
+
+
+def _prestige_cfg_defaults() -> dict:
+    return {
+        "xp_easy": db.XP_BY_DIFF["easy"], "xp_medium": db.XP_BY_DIFF["medium"],
+        "xp_hard": db.XP_BY_DIFF["hard"], "xp_unknown": db.XP_BY_DIFF["unknown"],
+        "xp_wrong_first": db.XP_WRONG_FIRST, "xp_streak_day": db.XP_DAILY_STREAK,
+        "xp_exam_complete": db.XP_EXAM_COMPLETE,
+        "xp_exam_acc80": db.XP_EXAM_ACC_BONUS,
+        "xp_exam_perfect": db.XP_EXAM_PERFECT,
+        "xp_file_download": db.XP_FILE_DOWNLOAD, "xp_ai_daily": db.XP_AI_DAILY,
+        "xp_question_approved": db.XP_Q_APPROVED,
+        "xp_report_useful": db.XP_REPORT_USEFUL,
+        "xp_challenge_win": db.XP_CHALLENGE_WIN, "xp_apex_win": db.XP_APEX_WIN,
+        "xp_weekly_champion": db.XP_WEEKLY_CHAMPION,
+        "daily_cap": db.DAILY_ANSWER_CAP, "diminish_after": db.DIMINISH_AFTER,
+        "shield_answers": db.SHIELD_ANSWERS, "shield_days": db.SHIELD_DAYS,
+        "decay_idle_days": db.DECAY_IDLE_DAYS,
+        "challenge_cooldown_h": db.CH_COOLDOWN_H,
+        "challenge_cooldown_apex_h": db.CH_APEX_COOLDOWN_H,
+    }
+
+
+@router.get("/prestige-config")
+async def prestige_config_get(admin=Depends(get_admin_user)):
+    """خواندن تنظیمات زنده‌ی پرستیژ: پیش‌فرض + اورراید + مؤثر + آمار چالش"""
+    try:
+        doc = await db.settings.find_one({"_id": "prestige_config"}) or {}
+    except Exception:
+        doc = {}
+    values = doc.get("values") or {}
+    if not isinstance(values, dict):
+        values = {}
+    defaults = _prestige_cfg_defaults()
+    effective = dict(defaults)
+    for k, v in values.items():
+        if k in PRESTIGE_CFG_KEYS and isinstance(v, (int, float)):
+            effective[k] = int(v)
+    stats = {}
+    try:
+        stats = await db.prestige_challenge_stats()
+    except Exception:
+        stats = {}
+    return {
+        "defaults": defaults, "overrides": values, "effective": effective,
+        "meta": {k: {"label": v[0], "min": v[1], "max": v[2]}
+                 for k, v in PRESTIGE_CFG_KEYS.items()},
+        "updated_at": doc.get("updated_at", ""),
+        "challenge_stats": stats,
+    }
+
+
+class PrestigeConfigPut(BaseModel):
+    values: dict = {}
+
+
+@router.put("/prestige-config")
+async def prestige_config_put(body: PrestigeConfigPut, admin=Depends(get_admin_user)):
+    """ذخیره‌ی اوررایدها — بدون ری‌دیپلوی (کش ۶۰ثانیه‌ای فوراً باطل می‌شود).
+    مقادیر نامعتبر/کلید ناشناخته ⇒ rejected، بدون ذخیره‌ی آن کلید."""
+    if not isinstance(body.values, dict):
+        raise HTTPException(422, "ساختار values نامعتبر است")
+    clean, rejected = {}, []
+    for k, v in (body.values or {}).items():
+        if k not in PRESTIGE_CFG_KEYS:
+            rejected.append(k)
+            continue
+        try:
+            num = float(v)
+        except Exception:
+            rejected.append(k)
+            continue
+        lo, hi = PRESTIGE_CFG_KEYS[k][1], PRESTIGE_CFG_KEYS[k][2]
+        if not (lo <= num <= hi):
+            rejected.append(k)
+            continue
+        clean[k] = int(num)
+    try:
+        old_doc = await db.settings.find_one({"_id": "prestige_config"}) or {}
+    except Exception:
+        old_doc = {}
+    old = old_doc.get("values") or {}
+    await db.settings.update_one(
+        {"_id": "prestige_config"},
+        {"$set": {"values": clean,
+                  "updated_at": datetime.now().isoformat()}},
+        upsert=True)
+    try:
+        setattr(db, "_pcfgc", None)      # باطل‌سازی فوری کش ۶۰ثانیه‌ای موتور
+    except Exception:
+        pass
+    await _audit(admin, "به‌روزرسانی تنظیمات زنده‌ی پرستیژ", "Prestige",
+                 severity="HIGH", before=old, after=clean,
+                 tags=["پرستیژ", "تعادل", "پنل_وب"])
+    return {"ok": True, "applied": clean, "rejected": rejected}
