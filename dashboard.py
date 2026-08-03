@@ -60,10 +60,14 @@ async def build_dashboard_text(uid: int) -> tuple:
     act_stars = '🔥' * min(act // 3, 5) if act > 0 else '💤'
 
     notif_s       = user.get('notification_settings', {})
-    from notifications import NOTIF_ITEMS
-    notif_total   = len(NOTIF_ITEMS)
+    # 🧩 N3-fix — NOTIF_ITEMS قدیمی از notifications.py حذف شده
+    # بود و این import کرش می‌داد. منبع واحد = کاتالوگ db؛ شمارش
+    # با کلیدهای Canonical (PREF_ALIAS داخل notif_pref_on کلید
+    # قدیمیِ ذخیره‌شده‌ی کاربر را خودکار ترجمه می‌کند).
+    notif_total   = len(db.NOTIF_CATALOG)
     defaults      = await db.get_notif_defaults()
-    active_notifs = sum(1 for k, _, _ in NOTIF_ITEMS if notif_s.get(k, defaults.get(k, True)))
+    active_notifs = sum(1 for k, _label, _desc, _d in db.NOTIF_CATALOG
+                        if db.notif_pref_on(notif_s, k, defaults))
     group_icon    = "1️⃣" if str(user.get('group', '')) == '1' else "2️⃣"
     role          = user.get('role', 'student')
     role_badge    = (
