@@ -55,7 +55,7 @@ from admin import (
     handle_admin_text, BROADCAST
 )
 from backup import backup_callback, backup_file_handler, backup_confirm_restore
-from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS, fmt_jalali
+from utils import cancel_handler, ADMIN_ID, is_maintenance_on, maintenance_message, send_audit_log, safe_send, CONTENT_ICONS, fmt_jalali, webapp_kb
 from subscription import subscription_callback, screenshot_handler as sub_screenshot_handler
 from subscription_admin import subscription_admin_callback
 from grades import grades_callback
@@ -120,20 +120,28 @@ async def exam_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                 users = await db.notif_users('exam', group=exam.get('group'))
                 sent  = 0
                 total_targets += len(users)
+                import urllib.parse as _upq
+                # 🧠 موج N2 — Deep Link: باز شدن روز/درسِ امتحان در مینی‌اپ
+                _ekb = webapp_kb('/schedule?hl=' + _upq.quote(str(exam.get('lesson') or '')))
                 # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ: سابقه‌ی رویداد برای همه‌ی
                 # مخاطبان ثبت می‌شود (حتی اگر تلگرام بلاک باشد، کاربر در
                 # مینی‌اپ یادآوری را می‌بیند) — Deep Link به تب «برنامه»
+                import urllib.parse as _upq2
+                _ex_hl = ('/schedule?hl=' +
+                          _upq2.quote(str(exam.get('lesson') or '')))
                 await db.inbox_add_many([
                     {'user_id': u['user_id'], 'type': 'exam_reminder',
                      'title': f"🔔 یادآوری امتحان — {label}",
                      'body': (f"📚 {exam.get('lesson', '')}\n"
                               f"📅 {fmt_jalali(exam.get('date', ''))}  ساعت {exam.get('time', '')}\n"
                               f"📍 {exam.get('location', '')}"),
-                     'link': '/schedule'}
+                     # 🧠 N2 — Deep Link: همان روز/درس+Anchor فلش در مینی‌اپ
+                     'link': _ex_hl}
                     for u in users if u.get('user_id')
                 ])
                 for u in users:
-                    ok = await safe_send(context.bot, u['user_id'], msg, parse_mode='HTML')
+                    ok = await safe_send(context.bot, u['user_id'], msg,
+                                         parse_mode='HTML', reply_markup=_ekb)
                     if ok:
                         sent += 1
                     else:
@@ -184,6 +192,7 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
         )
         users = await db.notif_users('daily_question')
         await db.notif_run_set_message(run_id, text)
+        _qkb = webapp_kb('/learn/questions')
         # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (Deep Link به بانک سؤال)
         await db.inbox_add_many([
             {'user_id': u['user_id'], 'type': 'daily_question',
@@ -194,7 +203,8 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
             for u in users if u.get('user_id')
         ])
         for u in users:
-            ok = await safe_send(context.bot, u['user_id'], text, parse_mode='HTML')
+            ok = await safe_send(context.bot, u['user_id'], text,
+                                 parse_mode='HTML', reply_markup=_qkb)
             if ok:
                 sent += 1
             else:
@@ -307,15 +317,32 @@ async def _run_new_resources_notif(bot, force: bool = False) -> dict:
 
         users = await db.notif_users('new_resources')
         await db.notif_run_set_message(run_id, text)
-        # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ: منابع/رفرنس‌های تازه
-        await db.inbox_add_many([
-            {'user_id': u['user_id'], 'type': 'new_resources',
-             'title': f"🆕 {len(new_items)} منبع جدید اضافه شد",
-             'body': ('منابع علوم پایه/رفرنس‌های تازه منتشر شد؛ '
-                      'از بخش یادگیری بازش کنید.'),
-             'link': '/learn/resources'}
-            for u in users if u.get('user_id')
-        ])
+        # 🧠 موج N2 — دایجست تفکیک‌شدهٔ منابع/رفرنس + Smart Grouping:
+        # موج خوانده‌نشدهٔ قبلی ـبه‌جای انباشت سطرهاـ تازه می‌شود (count).
+        bs_items  = [i for i in new_items if i.get('_source', 'bs_content') == 'bs_content']
+        ref_items = [i for i in new_items if i.get('_source') == 'ref_files']
+        if bs_items:
+            await db.inbox_add_many([
+                {'user_id': u['user_id'], 'type': 'new_resources',
+                 'title': f"🆕 {len(bs_items)} منبع جدید اضافه شد",
+                 'body': ('محتوای تازهٔ درسی (علوم پایه/جزوه) منتشر شد؛ '
+                          'از بخش یادگیری بازش کنید.'),
+                 'link': '/learn/resources?hl=new',
+                 'group_key': 'digest_resources',
+                 'group_title': '🆕 منابع جدید (×{count} موج)'}
+                for u in users if u.get('user_id')
+            ])
+        if ref_items:
+            await db.inbox_add_many([
+                {'user_id': u['user_id'], 'type': 'new_references',
+                 'title': f"🆕 {len(ref_items)} رفرنس جدید اضافه شد",
+                 'body': ('کتاب/خواندنی‌های تازهٔ رفرنس رسید؛ '
+                          'از بخش رفرنس‌ها بازش کنید.'),
+                 'link': '/learn/references?hl=new',
+                 'group_key': 'digest_refs',
+                 'group_title': '🆕 رفرنس‌های جدید (×{count} موج)'}
+                for u in users if u.get('user_id')
+            ])
         sent, failed, failed_ids = 0, 0, []
         for u in users:
             ok = await safe_send(bot, u['user_id'], text, parse_mode='HTML')
@@ -373,6 +400,10 @@ async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
         docs = await cursor.to_list(200)
         for d in docs:
             text = d.get("text", "")
+
+            # 🧠 موج N2 — Deep Link: هر صف که link دارد،
+            # دکمه‌ی «📱 باز کردن در هامزیار» (web_app) می‌گیرد
+            _dl_kb = webapp_kb(d.get("link")) if d.get("link") else None
 
             # ── سیگنال درخواست خروجی اکسل از پنل وب ──
             # قبلاً همه پیام‌های __* به‌صورت skipped رد می‌شدند و
@@ -435,7 +466,9 @@ async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
             if text.startswith("__"):
                 await coll.update_one({"_id": d["_id"]}, {"$set": {"sent": True, "skipped": True}})
                 continue
-            ok = await safe_send(context.bot, d["chat_id"], text, parse_mode="HTML")
+            # 🧠 N2 — دکمه‌ی Deep Link (اگر صف لینک داشت) روی متنِ پایانی سوار است
+            ok = await safe_send(context.bot, d["chat_id"], text,
+                                 parse_mode="HTML", reply_markup=_dl_kb)
             await coll.update_one({"_id": d["_id"]}, {"$set": {
                 "sent": ok, "sent_at": datetime.now().isoformat(), "failed": not ok,
             }})
@@ -453,7 +486,11 @@ async def subscription_expiry_job(context: ContextTypes.DEFAULT_TYPE):
          دقیقاً مثل الگوی یادآوری امتحان)، همراه با دکمه‌ی «تمدید سریع»
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    renew_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تمدید کن", callback_data='sub:back')]])
+    # 🧠 موج N2 — ردیف دوم: بازکردن مستقیم صفحه‌ی تمدید در مینی‌اپ
+    _sub_rows = [[InlineKeyboardButton("🔄 تمدید کن", callback_data='sub:back')]]
+    _sk = webapp_kb('/me/subscription')
+    if _sk: _sub_rows += _sk.inline_keyboard
+    renew_kb = InlineKeyboardMarkup(_sub_rows)
     try:
         expired = await db.sub_expire_due()
         for s in expired:
@@ -607,7 +644,7 @@ async def prestige_weekly_close_job(context: ContextTypes.DEFAULT_TYPE):
                     text=("👑 <b>صدر جدول هفتگی مال تو شد!</b>\n\n"
                           f"این هفته با <b>{champ.get('weekly_xp', 0)}</b> XP قهرمان شدی. "
                           "جایزه‌ی +۱۰۰ XP و نشان «صدرنشین هفته» به حسابت نشست 🏅"),
-                    parse_mode='HTML')
+                    parse_mode='HTML', reply_markup=webapp_kb('/leaderboard'))
             except Exception:
                 pass
         try:
@@ -644,12 +681,17 @@ async def prestige_challenge_scan_job(context: ContextTypes.DEFAULT_TYPE):
                 ch = (st or {}).get('challenge') or {}
                 if ch.get('mode') != 'ready':
                     continue
-                await db.inbox_add(
+                # 🧠 N2 — سینک‌فیکس: رویداد آمادگی چالش فقط Inbox بود؛
+                # الان تک‌منبع (Inbox + DM با دکمه‌ی Deep Link) می‌رود
+                await db.notify_user(
                     uid, 'challenge',
-                    f"⚔️ چالش ارتقا آمده: {ch.get('icon', '')} {ch.get('title', '')}",
-                    'استخر ۲۰ سؤال با قبولی ۸۰٪ — مهلت ۲۴ ساعت پس از شروع. '
-                    'هر وقت آماده بودی از مرکز آزمون برو سراغش! 💪',
-                    '/learn/exams?promo=1')
+                    title=f"⚔️ چالش ارتقا آمده: {ch.get('icon', '')} {ch.get('title', '')}",
+                    body=('استخر ۲۰ سؤال با قبولی ۸۰٪ — مهلت ۲۴ ساعت پس از شروع. '
+                          'هر وقت آماده بودی از مرکز آزمون برو سراغش! 💪'),
+                    link='/learn/exams?promo=1',
+                    dm=(f"⚔️ <b>چالش ارتقا رسید: {ch.get('icon', '')} {ch.get('title', '')}</b>\n\n"
+                        'استخر ۲۰ سؤال، قبولی با ۸۰٪ و مهلت ۲۴ ساعت پس از شروع. '
+                        'هر وقت آماده بودی شروعش کن! 💪'))
                 await db.users.update_one({'user_id': uid},
                     {'$set': {'challenge_notified_week': iso_week}})
                 sent += 1
