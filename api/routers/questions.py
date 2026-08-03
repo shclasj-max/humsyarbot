@@ -48,6 +48,57 @@ exam_sessions = (
     ["exam_sessions"]
 )
 
+
+def _pub_prestige(ev):
+    """شکل‌دهی عمومی خروجی موتور Prestige برای کلاینت (افزایشی روی پاسخ‌های موجود).
+    مهم: منطق در database.py است؛ این فقط «presentation» است (قرارداد §د)."""
+    if not ev or ev.get('ignored'):
+        return None
+    d = ev.get('display') or {}
+    e = ev.get('events') or {}
+    celeb = None
+    if e.get('rank_up'):
+        ru = e['rank_up']
+        celeb = {'kind': 'rank', 'title': ru.get('to'), 'from_title': ru.get('from'),
+                 'icon': ru.get('icon'), 'roman': d.get('roman'),
+                 'color': d.get('color'), 'gradient': d.get('gradient')}
+    elif e.get('div_up'):
+        du = e['div_up']
+        celeb = {'kind': 'div', 'title': du.get('rank'), 'roman': du.get('roman'),
+                 'icon': du.get('icon'),
+                 'color': d.get('color'), 'gradient': d.get('gradient')}
+    return {
+        'xp_gained': ev.get('xp_gained', 0),
+        'breakdown': ev.get('breakdown', []),
+        'streak': ev.get('streak'),
+        'display': d,
+        'challenge_ready': bool(e.get('challenge_ready')),
+        'celebration': celeb,
+    }
+
+
+async def _answer_first_time(user_id: int, question_id: str) -> bool:
+    """پیش‌چک یک‌بارهرسؤال — باید **قبل** از db.save_answer صدا زده شود."""
+    try:
+        return (await db.answers.find_one(
+            {'user_id': user_id, 'question_id': question_id}, {'_id': 1})) is None
+    except Exception:
+        return True
+
+
+async def _answer_prestige(user_id: int, question: dict,
+                           is_correct: bool, first_time: bool) -> dict:
+    """رویداد موتور پس از ثبت پاسخ — هرگز قرارداد اصلی را نمی‌شکند (در خطا None)."""
+    try:
+        ev = await db.prestige_event(
+            user_id, 'answer',
+            {'is_correct': is_correct,
+             'difficulty': question.get('difficulty', ''),
+             'first_time': first_time})
+        return _pub_prestige(ev)
+    except Exception:
+        return None
+
 ALLOWED_DIFFICULTIES = {
     "آسان 🟢",
     "متوسط 🟡",
@@ -631,12 +682,19 @@ async def answer(
         == correct_answer
     )
 
+    # 👑 Prestige: پیش‌چک قبل از ثبت، رویداد بعد از ثبت (افزایشی)
+    first_time = await _answer_first_time(
+        user["id"], body.question_id)
+
     await db.save_answer(
         user["id"],
         body.question_id,
         body.selected,
         is_correct,
     )
+
+    prestige = await _answer_prestige(
+        user["id"], question, is_correct, first_time)
 
     formatted = (
         safe_question(question)
@@ -668,6 +726,8 @@ async def answer(
             "explanation":
                 explanation,
         },
+
+        "prestige": prestige,
     }
 
 
@@ -951,6 +1011,9 @@ class ExamStartInput(BaseModel):
         le=90,
     )
 
+    # ⚔️ True ⇒ شروع چالش ارتقا (استخر/زمان/قواعد سرورمحور — فیلدهای بالا بی‌اثر)
+    promotion: bool = False
+
 
 @router.get(
     "/custom-exam/history"
@@ -1007,6 +1070,77 @@ async def start_exam(
         get_current_user
     ),
 ):
+    # ⚔️ جریان چالش ارتقا (Spec §۳.۱) — استخر و قواعد کاملاً سرورمحور است؛
+    # lesson/topic/count/minutes از کلاینت در این حالت نادیده گرفته می‌شود.
+    if getattr(body, "promotion", False):
+        chk = await db.challenge_start_check(user["id"])
+        if not chk.get("ok"):
+            detail = {"code": chk.get("code") or "locked",
+                      "view": chk.get("view") or {}}
+            if chk.get("hours_left"):
+                detail["hours_left"] = chk["hours_left"]
+            if chk.get("pool_meta"):
+                detail["pool_meta"] = chk["pool_meta"]
+            raise HTTPException(status_code=409, detail=detail)
+        if chk.get("resume"):
+            prev = await exam_sessions.find_one(
+                {"user_id": user["id"], "session_id": chk["session_id"]})
+            return {
+                "session_id": chk["session_id"],
+                "total": len((prev or {}).get("question_ids") or []),
+                "minutes": 0,
+                "ends_at": None,
+                "promotion": True,
+                "resume": True,
+                "index": int((prev or {}).get("index", 0) or 0),
+                "target_rank": (prev or {}).get("target_rank"),
+                "apex": bool((prev or {}).get("apex")),
+                "expires_ts": (prev or {}).get("expires_ts"),
+            }
+        view = chk.get("view") or {}
+        selected_ids = list(chk.get("pool") or [])
+        apex = bool(chk.get("apex"))
+        now_ts = int(time.time())
+        document = {
+            "session_id": uuid.uuid4().hex[:16],
+            "user_id": user["id"],
+            "lesson": "⚔️ چالش ارتقا",
+            "topic": view.get("title") or "",
+            "question_ids": selected_ids,
+            "index": 0,
+            "minutes": 0,
+            "deadline_ts": None,
+            "correct": 0,
+            "answered": 0,
+            "answers": [],
+            "status": "active",
+            "started_at": datetime.now().isoformat(),
+            "finished_at": "",
+            "promotion": True,
+            "target_rank": view.get("target_rank") or "",
+            "apex": apex,
+            "expires_ts": now_ts + db.CH_TTL_HOURS * 3600,
+        }
+        await exam_sessions.insert_one(document)
+        await db.users.update_one({"user_id": user["id"]},
+            {"$set": {"challenge.target_rank": view.get("target_rank") or "",
+                      "challenge.apex": apex}})
+        return {
+            "session_id": document["session_id"],
+            "total": len(selected_ids),
+            "minutes": 0,
+            "ends_at": None,
+            "promotion": True,
+            "resume": False,
+            "index": 0,
+            "target_rank": view.get("target_rank"),
+            "target_title": view.get("title"),
+            "target_icon": view.get("icon"),
+            "apex": apex,
+            "pass_pct": db.CH_APEX_PASS_PCT if apex else db.CH_PASS_PCT,
+            "expires_ts": document["expires_ts"],
+        }
+
     lesson = (
         body.lesson.strip()
     )
@@ -1314,6 +1448,31 @@ async def exam_answer(
         )
     )
 
+    # ⚔️ TTL چالش ارتقا (۲۴ساعته) — انقضا = Fail خودکار سرورمحور
+    if (
+        session.get("promotion")
+        and session.get("status") == "active"
+        and session.get("expires_ts")
+        and int(time.time()) >= int(session["expires_ts"])
+    ):
+        try:
+            await db.challenge_expire_session(session)
+        except Exception:
+            pass
+        _ans = int(session.get("answered", 0) or 0)
+        _cor = int(session.get("correct", 0) or 0)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "promotion_failed_ttl",
+                "win": False,
+                "pct": round(_cor / _ans * 100, 1) if _ans else 0,
+                "cooldown_h": (db.CH_APEX_COOLDOWN_H
+                               if session.get("apex")
+                               else db.CH_COOLDOWN_H),
+            },
+        )
+
     if (
         session.get("status")
         != "active"
@@ -1457,12 +1616,60 @@ async def exam_answer(
             ),
         )
 
+    # 👑 Prestige: FT چک → ثبت → رویداد پاسخ → (در پایانی: رویداد تکمیل آزمون)
+    first_time = await _answer_first_time(user["id"], question_id)
+
     await db.save_answer(
         user["id"],
         question_id,
         body.selected,
         is_correct,
     )
+
+    prestige = await _answer_prestige(
+        user["id"], question, is_correct, first_time)
+
+    prestige_exam = None
+    promotion_result = None
+    if final_answer and session.get("promotion"):
+        # ⚔️ پایان چالش: نتیجه‌ی سرورمحور — بدون رویداد exam_complete
+        # (چالش جزو آمار/XP آزمون‌ها شمرده نمی‌شود؛ پاسخ‌ها XP خود را گرفته‌اند)
+        try:
+            new_correct = non_negative_int(session.get("correct")) + (1 if is_correct else 0)
+            answered_now = index + 1
+            pct = round(new_correct / answered_now * 100, 1) if answered_now else 0
+            apex = bool(session.get("apex"))
+            need = db.CH_APEX_COUNT if apex else db.CH_COUNT
+            pass_pct = db.CH_APEX_PASS_PCT if apex else db.CH_PASS_PCT
+            won = answered_now >= need and pct >= pass_pct
+            res = await db.challenge_resolve(user["id"], session, won, pct)
+            promotion_result = {
+                "win": bool(res.get("win")),
+                "pct": pct,
+                "pass_pct": pass_pct,
+                "need": need,
+                "apex": apex,
+                "reward": ((db.CH_APEX_WIN if apex else db.CH_CHALLENGE_WIN)
+                           if res.get("win") else 0),
+                "celebration": res.get("celebration"),
+                "cooldown_h": res.get("cooldown_h"),
+                "cooldown_until": res.get("cooldown_until"),
+                "target_rank": (session.get("target_rank")
+                                or (session.get("view") or {}).get("target_rank")),
+            }
+        except Exception:
+            promotion_result = None
+    elif final_answer:
+        try:
+            new_correct = non_negative_int(session.get("correct")) + (1 if is_correct else 0)
+            answered_now = index + 1
+            pct = round(new_correct / answered_now * 100, 1) if answered_now else 0
+            ev = await db.prestige_event(
+                user["id"], 'exam_complete',
+                {'pct': pct, 'total': len(question_ids)})
+            prestige_exam = _pub_prestige(ev)
+        except Exception:
+            prestige_exam = None
 
     return {
         "is_correct":
@@ -1486,6 +1693,10 @@ async def exam_answer(
 
         "finished":
             final_answer,
+
+        "prestige": prestige,
+        "prestige_exam": prestige_exam,
+        "promotion_result": promotion_result,
     }
 
 
@@ -1499,6 +1710,10 @@ async def abandon_exam(
         get_current_user
     ),
 ):
+    # ⚔️ رها کردن چالش ارتقا = Fail + کول‌داون (ضدتقلب — Spec §۳.۱)
+    sess_doc = await exam_sessions.find_one(
+        {"session_id": session_id, "user_id": user["id"],
+         "status": "active"})
     result = (
         await exam_sessions
         .update_one(
@@ -1535,8 +1750,26 @@ async def abandon_exam(
             ),
         )
 
+    promotion_result = None
+    if (sess_doc or {}).get("promotion"):
+        try:
+            _ans = int(sess_doc.get("answered", 0) or 0)
+            _cor = int(sess_doc.get("correct", 0) or 0)
+            res = await db.challenge_resolve(
+                user["id"], sess_doc, False,
+                round(_cor / _ans * 100, 1) if _ans else 0)
+            promotion_result = {
+                "win": False,
+                "pct": res.get("pct"),
+                "cooldown_h": res.get("cooldown_h"),
+                "cooldown_until": res.get("cooldown_until"),
+            }
+        except Exception:
+            promotion_result = None
+
     return {
         "ok": True,
+        "promotion_result": promotion_result,
     }
 
 
