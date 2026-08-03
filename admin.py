@@ -264,6 +264,8 @@ async def _show_cat_settings(query, uid: int = None):
     keyboard = [
         [InlineKeyboardButton("📡 وضعیت ربات",   callback_data='admin:bot_status')],
         [InlineKeyboardButton("💾 پشتیبان‌گیری", callback_data='backup:menu')],
+        # 👑 موج P0 — اجرای دستی محاسبه‌ی اولیه‌ی Prestige (یک‌باره، idempotent)
+        [InlineKeyboardButton("🏅 محاسبه‌ی اولیه‌ی Prestige", callback_data='admin:prestige_backfill')],
     ]
     if uid is None or uid == ADMIN_ID:
         keyboard.append([
@@ -450,6 +452,48 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tags=['تنظیمات_ثبت_نام']
         )
         await _show_settings(query)
+
+    elif action == 'prestige_backfill':
+        # 👑 موج P0 — اجرای دستی Backfill (فقط مدیر ارشد؛ idempotent)
+        if uid != ADMIN_ID:
+            await query.answer('⛔ فقط مدیر ارشد', show_alert=True); return
+        await query.answer('🏅 در حال محاسبه‌ی Prestige…')
+        await query.edit_message_text(
+            "🏅 <b>محاسبه‌ی اولیه‌ی Prestige</b>\n━━━━━━━━━━━━━━━━\n\n"
+            "⏳ در حال پیمایش کاربران و replay تاریخچه…\n"
+            "این کار idempotent است و زمان‌بر نیست (batch).",
+            parse_mode='HTML')
+        rep = await db.prestige_backfill()
+        if rep.get('fatal'):
+            await query.edit_message_text(
+                f"❌ خطای DB در Backfill:\n<code>{rep['fatal']}</code>",
+                parse_mode='HTML'); return
+        lines = [
+            "🏅 <b>نتیجه‌ی Backfill Prestige</b>\n━━━━━━━━━━━━━━━━\n",
+            f"👥 پیمایش: <b>{rep['scanned']}</b> کاربر",
+            f"✅ مهاجرت: <b>{rep['migrated']}</b>",
+            f"🏛 بنیان‌گذار: <b>{rep['founders']}</b>",
+            f"🏆 نشان‌های جهانی اعطاشده: <b>{len(rep['firsts'])}</b>",
+            f"⚠️ خطا: <b>{rep['errors']}</b>",
+        ]
+        for f in rep['firsts'][:10]:
+            lines.append(f"  • {f['key']} ← <code>{f['uid']}</code>")
+        await query.edit_message_text('\n'.join(lines), parse_mode='HTML')
+        try:
+            admin_user = await db.get_user(uid)
+            actor_name = admin_user.get('name', 'مدیر ارشد') if admin_user else 'مدیر ارشد'
+            actor_role = await db.get_actor_role_label(uid)
+            await send_audit_log(
+                context.bot, 'admin', actor_name, uid,
+                "اجرای Backfill Prestige",
+                module='Settings', severity='CRITICAL',
+                actor_role=actor_role,
+                details=(f"مهاجرت={rep['migrated']} • بنیان‌گذار={rep['founders']} • "
+                         f"نشان جهانی={len(rep['firsts'])} • خطا={rep['errors']}"),
+                tags=['prestige', 'backfill'])
+        except Exception:
+            pass
+        return
 
     elif action == 'toggle_maintenance':
         current = await db.get_setting('maintenance_mode', False)
@@ -2528,7 +2572,9 @@ async def _show_notif_defaults(query):
     برخلاف قبل، این مقدار همین لحظه روی همه کاربران — قدیمی، جدید،
     فعال و غیرفعال — اعمال می‌شود (نه فقط کاربران تازه ثبت‌نام‌شده).
     """
-    from notifications import NOTIF_ITEMS
+    # 🧩 N3-fix — NOTIF_ITEMS قدیمی حذف شده بود؛ منبع واحد =
+    # کاتالوگ db. کلیدها Canonical‌اند و handler توگل با همان
+    # canonical می‌نویسد — زنجیره‌ی set/get سرتاسر یکدست.
     defaults = await db.get_notif_defaults()
     text = (
         "⚙️ <b>وضعیت پیش‌فرض اعلان‌ها</b>\n━━━━━━━━━━━━━━━━\n\n"
@@ -2536,7 +2582,7 @@ async def _show_notif_defaults(query):
         "(قدیمی و جدید) اعمال می‌شود."
     )
     keyboard = []
-    for key, label, _ in NOTIF_ITEMS:
+    for key, label, _desc, _d in db.NOTIF_CATALOG:
         is_on = defaults.get(key, True)
         icon  = "🔔" if is_on else "🔕"
         keyboard.append([InlineKeyboardButton(
