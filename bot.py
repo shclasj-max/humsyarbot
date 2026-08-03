@@ -587,6 +587,81 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════
+#  👑 جاب‌های Prestige (بستن هفته + یادآوری چالش آماده)
+# ══════════════════════════════════════════════════
+
+async def prestige_weekly_close_job(context: ContextTypes.DEFAULT_TYPE):
+    """👑 بستن هفته‌ی پرستیژ — دوشنبه ۰۰:۰۵ تهران (یکشنبه ۲۰:۳۵ UTC).
+    خود متد DB با پرچم weekly_closed:<week> کاملاً idempotent است."""
+    logger.info("👑 اجرای job بستن هفته‌ی پرستیژ...")
+    try:
+        rep = await db.prestige_weekly_close()
+        if rep.get('skipped'):
+            return
+        champ = rep.get('champion') or {}
+        # DM نرم به قهرمان هفته (شکست ارسال، جاب را نمی‌شکند)
+        if champ.get('uid'):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(champ['uid']),
+                    text=("👑 <b>صدر جدول هفتگی مال تو شد!</b>\n\n"
+                          f"این هفته با <b>{champ.get('weekly_xp', 0)}</b> XP قهرمان شدی. "
+                          "جایزه‌ی +۱۰۰ XP و نشان «صدرنشین هفته» به حسابت نشست 🏅"),
+                    parse_mode='HTML')
+            except Exception:
+                pass
+        try:
+            await send_audit_log(
+                context.bot, 'PRESTIGE', 'job:weekly_close', 0,
+                'بستن هفته', 'prestige',
+                details=(f"هفته {rep.get('week')} · ردیف‌ها {rep.get('rows', 0)} · "
+                         f"قهرمان: {champ.get('name', '—')} ({champ.get('weekly_xp', 0)} XP)"),
+                severity='INFO')
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"prestige_weekly_close_job error: {e}")
+
+
+async def prestige_challenge_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """⚔️ بررسی هفتگی چالش آماده — یکشنبه ۱۹:۴۰ تهران (۱۶:۱۰ UTC).
+    به هر کاربر واجد شرط (ready) حداکثر یک‌بار در هفته یک اینباکس می‌رود."""
+    logger.info("⚔️ اجرای job اسکن چالش آماده...")
+    try:
+        today = db._tehran_today()
+        iso_week = (f"{today[:4]}-W"
+                    f"{datetime.fromisoformat(today).isocalendar().week:02d}")
+        cursor = db.users.find({'approved': True,
+                                'effective_xp': {'$gte': 2400}})
+        docs = await cursor.to_list(5000)
+        sent = 0
+        for u in docs:
+            try:
+                uid = int(u.get('user_id') or 0)
+                if not uid or (u.get('challenge_notified_week') or '') == iso_week:
+                    continue
+                st = await db.prestige_state(uid, lite=True)
+                ch = (st or {}).get('challenge') or {}
+                if ch.get('mode') != 'ready':
+                    continue
+                await db.inbox_add(
+                    uid, 'challenge',
+                    f"⚔️ چالش ارتقا آمده: {ch.get('icon', '')} {ch.get('title', '')}",
+                    'استخر ۲۰ سؤال با قبولی ۸۰٪ — مهلت ۲۴ ساعت پس از شروع. '
+                    'هر وقت آماده بودی از مرکز آزمون برو سراغش! 💪',
+                    '/learn/exams?promo=1')
+                await db.users.update_one({'user_id': uid},
+                    {'$set': {'challenge_notified_week': iso_week}})
+                sent += 1
+            except Exception:
+                continue
+        if sent:
+            logger.info(f"⚔️ challenge scan: {sent} کاربر مطلع شدند")
+    except Exception as e:
+        logger.error(f"prestige_challenge_scan_job error: {e}")
+
+
+# ══════════════════════════════════════════════════
 #  Error Handler مرکزی
 # ══════════════════════════════════════════════════
 
@@ -1356,6 +1431,22 @@ async def post_init(application: Application):
             subscription_expiry_job,
             time=dtime(hour=5, minute=45, tzinfo=timezone.utc),
             name='subscription_expiry'
+        )
+
+        # 👑 بستن هفته‌ی پرستیژ — دوشنبه ۰۰:۰۵ تهران (یکشنبه ۲۰:۳۵ UTC)
+        application.job_queue.run_daily(
+            prestige_weekly_close_job,
+            time=dtime(hour=20, minute=35, tzinfo=timezone.utc),
+            days=(0,),
+            name='prestige_weekly_close'
+        )
+
+        # ⚔️ اسکن هفتگی چالش آماده — یکشنبه ۱۹:۴۰ تهران (۱۶:۱۰ UTC)
+        application.job_queue.run_daily(
+            prestige_challenge_scan_job,
+            time=dtime(hour=16, minute=10, tzinfo=timezone.utc),
+            days=(0,),
+            name='prestige_challenge_scan'
         )
 
         # FIX: قبلاً اینجا یه job برای جاروی حافظه‌ی موقتِ RAM هوشیار بود؛
