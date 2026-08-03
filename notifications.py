@@ -8,23 +8,13 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-# FIX جدید: گسترش به تمام دسته‌های نوتیف طبق سند ارتقاء
-NOTIF_ITEMS = [
-    ('new_resources',  '📚 منابع جدید',         'وقتی محتوای جدید آپلود شود (خلاصه دوره‌ای)'),
-    ('schedule',       '📅 برنامه و تغییر کلاس', 'افزودن کلاس جدید یا تغییر زمان کلاس منعطف'),
-    ('exam',           '📝 یادآوری امتحان',       '۷، ۳ و ۱ روز قبل از امتحان'),
-    ('makeup',         '🔄 کلاس جبرانی',         'وقتی کلاس جبرانی جدید ثبت شود'),
-    ('daily_question', '🧪 سوال روزانه',          'هر روز صبح یک سوال تستی'),
-    ('edu_message',    '🎓 پیام‌های آموزشی',      'نکات و محتوای آموزشی از تیم هامزیار'),
-    ('general',        '📢 اطلاعیه‌های عمومی',    'اخبار و اطلاعیه‌های کلی ربات'),
-]
-# FIX طبق سند: مقادیر پیش‌فرض دیگر هاردکد نیستند — از db.get_notif_defaults()
-# خوانده می‌شوند که از پنل ادمین قابل تغییر است. این دیکشنری فقط
-# fallback اضطراری است برای زمانی که دیتابیس در دسترس نباشد.
-_DEFAULTS = {
-    'new_resources': True, 'schedule': True, 'exam': True, 'makeup': True,
-    'daily_question': False, 'edu_message': True, 'general': True,
-}
+# 🧠 موج N3 — منبع واحد دسته‌ها: کاتالوگ سراسری database
+# (نه لیست محلی). کلیدهای قدیمی ذخیره‌شده در سندهای کاربران با
+# PREF_ALIAS در لایه‌ی db به Canonical ترجمه می‌شوند — این منو
+# فقط همان کاتالوگ را رندر می‌کند (label/desc ثابت/بدون منطق موازی).
+def _default_of(saved: dict, key: str) -> bool:
+    return bool(saved.get(key,
+                next((d for k, _, _, d in db.NOTIF_CATALOG if k == key), True)))
 
 
 async def notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,23 +29,27 @@ async def notifications_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif action == 'toggle' and len(parts) > 2:
         ntype   = parts[2]
+        # 🧠 N3 — canonical (نه کلید قدیمی نه موازی)
+        canon   = db.PREF_ALIAS.get(ntype, ntype) or ntype
         user    = await db.get_user(uid)
         s       = user.get('notification_settings', {}) if user else {}
         defaults = await db.get_notif_defaults()
-        current = s.get(ntype, defaults.get(ntype, True))
-        await db.update_user(uid, {f'notification_settings.{ntype}': not current})
+        current = _default_of(defaults, canon) if canon not in s else s[canon]
+        await db.update_user(uid, {f'notification_settings.{canon}': not current})
         status  = "✅ فعال" if not current else "❌ غیرفعال"
         await query.answer(f"{status} شد")
         await _show_settings(query, uid)
 
     elif action == 'all_on':
-        settings = {f'notification_settings.{k}': True for k, _, _ in NOTIF_ITEMS}
+        settings = {f'notification_settings.{k}': True
+                    for k, _, _, _ in db.NOTIF_CATALOG}
         await db.update_user(uid, settings)
         await query.answer("✅ همه اعلان‌ها فعال شد")
         await _show_settings(query, uid)
 
     elif action == 'all_off':
-        settings = {f'notification_settings.{k}': False for k, _, _ in NOTIF_ITEMS}
+        settings = {f'notification_settings.{k}': False
+                    for k, _, _, _ in db.NOTIF_CATALOG}
         await db.update_user(uid, settings)
         await query.answer("❌ همه اعلان‌ها غیرفعال شد")
         await _show_settings(query, uid)
@@ -65,13 +59,15 @@ async def _show_settings(query_or_msg, uid: int, edit: bool = True):
     user = await db.get_user(uid)
     s    = user.get('notification_settings', {}) if user else {}
     defaults = await db.get_notif_defaults()
-    active = sum(1 for k, _, _ in NOTIF_ITEMS if s.get(k, defaults.get(k, True)))
+    cat  = db.NOTIF_CATALOG
+    active = sum(1 for k, _, _, _d in cat
+                 if db.notif_pref_on(s, k, defaults))
 
     keyboard = []
-    lines    = [f"🔔 <b>تنظیمات اعلان‌ها</b>", f"فعال: {active} از {len(NOTIF_ITEMS)}", "━━━━━━━━━━━━━━━━\n"]
+    lines    = [f"🔔 <b>تنظیمات اعلان‌ها</b>", f"فعال: {active} از {len(cat)}", "━━━━━━━━━━━━━━━━\n"]
 
-    for key, label, desc in NOTIF_ITEMS:
-        is_on  = s.get(key, defaults.get(key, True))
+    for key, label, desc, _d in cat:
+        is_on  = db.notif_pref_on(s, key, defaults)
         icon   = "🔔" if is_on else "🔕"
         status = "روشن" if is_on else "خاموش"
         keyboard.append([InlineKeyboardButton(
