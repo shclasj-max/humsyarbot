@@ -58,6 +58,9 @@ class DB:
         # ربات پیام می‌شود، اینجا هم با ساختار یکدست (نوع/عنوان/متن/لینک)
         # ثبت می‌شود تا صندوق اعلان مینی‌اپ بازتاب کاملِ ربات باشد.
         self.user_notifs  = _db['user_notifications']
+        # 🧠 موج N1 — صف ارسال DM (Source of Truth مصرف‌کننده‌ی «من»
+        # نیست؛ فقط کانال خروجی ربات است — source of truth همیشه Inbox)
+        self.bot_notifs   = _db['bot_notifications']
         # 👑 موج P0 Prestige — سفر رنک/نشان/فید (Spec §۸.۲)
         self.prestige_history = _db['prestige_history']
         # 👑 موج P2 — واکنش‌های فید (ضدتکرار داخلی؛ خروجی فقط شمارنده)
@@ -244,7 +247,13 @@ class DB:
         همان گروه فیلتر می‌شود؛ در غیر این صورت رفتار قبلی (همه) حفظ
         می‌شود — کاملاً backward-compatible.
         """
-        query = {'approved': True, f'notification_settings.{ntype}': True}
+        # 🧠 N1.2 — گارد canonical: اگر کاربر کلید جدید یا قدیمی را خاموش
+        # کرده باشد خارج می‌شود؛ سندهای کهنه (فقط کلید قدیمی) دقیقاً همان
+        # رفتار دیروز را حفظ می‌کنند، کاربر تازه هم که خاموش کند اثر دارد.
+        canon = self.PREF_ALIAS.get(ntype, ntype) or ntype
+        query = {'approved': True,
+                 f'notification_settings.{canon}': {'$ne': False},
+                 f'notification_settings.{ntype}': {'$ne': False}}
         if group and str(group).strip() not in ('', 'هر دو', 'هردو', 'all'):
             query['group'] = str(group)
         return await self.users.find(query).to_list(length=None)
@@ -370,9 +379,10 @@ class DB:
 
     async def notif_users_by_intake(self, intake_code: str, ntype: str) -> list:
         users = await self.get_users_by_intake(intake_code)
+        # 🧠 N1.2 — canonical با fallback به مقدار قدیمی ذخیره‌شده
         return [
             u for u in users
-            if u.get('notification_settings', {}).get(ntype, True)
+            if self.notif_pref_on(u.get('notification_settings', {}), ntype)
         ]
 
     # ══════════════════════════════════════════════════
@@ -1139,12 +1149,30 @@ class DB:
         except Exception:
             was_approved = True
         # 👑 P1 — پاداش طراح سؤال (فقط کاربر واقعی و فقط در گذار اول به تأیید)
+        # 🧠 N1.2 — سینک‌فیکس: رویداد موجود، اما خبر کاربری نداشت (نه DM
+        # نه Inbox). خبر + پاداش از همین تک‌گذار خارج می‌شود (تک‌منبع).
         try:
             creator = (qdoc or {}).get('creator_id')
             ctype = (qdoc or {}).get('creator_type') or ''
             if not was_approved and creator and ctype not in ('bot', 'ai'):
                 await self.prestige_event(int(creator), 'question_approved',
                                           {'qid': str(qid)})
+        except Exception:
+            pass
+        # 🧠 N1.2 — خبر در try جدا: شکست XP نباید اعلان را ببلعد
+        try:
+            creator = (qdoc or {}).get('creator_id')
+            ctype = (qdoc or {}).get('creator_type') or ''
+            if not was_approved and creator and ctype not in ('bot', 'ai'):
+                qlink = f'/learn/my-questions?hl={qid}'
+                await self.notify_user(int(creator), 'question_approved',
+                    title='✍️ سؤالت تأیید شد!',
+                    body='سؤال پیشنهادیت به بانک سؤال اضافه شد '
+                         '— از مشارکتت ممنونیم 💚',
+                    link=qlink,
+                    dm=('✍️ <b>سؤالت تأیید شد!</b>\n\n'
+                        'سؤال پیشنهادیت به بانک سؤال اضافه شد '
+                        '— از مشارکتت ممنونیم 💚'))
         except Exception:
             pass
 
@@ -4619,34 +4647,252 @@ class DB:
     #  body متنِ ساده (بدون HTML) است تا در هر سطحی امن نمایش داده شود.
     # ══════════════════════════════════════════════════
 
+
+    # ══════════════════════════════════════════════════
+    #  🧠 موج N1 — Notification Spine (منبع واحد رویدادها)
+    #  هر ntype اینجا meta کامل دارد: دسته، آیکون، تُن،
+    #  اولویت و کلید ترجیح کاربر. بات / API / FE فقط
+    #  از همین ثبت‌نامه می‌خوانند — منطق موازی ممنوع.
+    # ══════════════════════════════════════════════════
+
+    # کاتالوگ دسته‌های ترجیح کاربر — (key, label, desc, default)
+    # این لیست هم در صفحه‌ی مینی‌اپ هم در منوی بات نمایش می‌یابد.
+    NOTIF_CATALOG = [
+        ('resources',    '📚 منابع و جزوه‌ها',      'فایل‌های درسی علوم پایه و جزوه‌ها',           True),
+        ('references',   '📖 رفرنس‌ها',             'آپدیت کتاب‌ها و خواندنی‌های رفرنس',            True),
+        ('basic_sci',    '🩺 علوم پایه',            'جلسات و محتوای درس‌های علوم پایه',             True),
+        ('qbank',        '❓ بانک سؤال',             'سؤال روزانه و وضعیت سؤال‌های پیشنهادی‌ات',    True),
+        ('schedule',     '📅 برنامه‌ی هفتگی',       'کلاس جدید، جبرانی و تغییر زمان',               True),
+        ('exams',        '📝 امتحان‌ها',            'یادآوری‌های رسمی امتحان',                      True),
+        ('grades',       '📊 نمرات',                 'ثبت نمره‌ی جدید در کارنامه',                  True),
+        ('tickets',      '🎫 پشتیبانی و تیکت',       'پاسخ‌ها و وضعیت گفت‌وگوی پشتیبانی',          True),
+        ('subscription', '💳 اشتراک',                'فعال‌سازی، یادآوری پایان و وضعیت رسید',       True),
+        ('discounts',    '🎁 تخفیف‌ها',              'پیشنهادها و کدهای تخفیف',                     True),
+        ('ai',           '🤖 هوشیار',                'رویدادهای دستیار هوشمند',                     True),
+        ('announcement', '📢 اطلاعیه‌ها',            'خبرها، پیام‌های آموزشی و اطلاعیه‌ها',         True),
+        ('polls',        '🗳 نظرسنجی',               'نظرسنجی‌های رسمی',                            True),
+        ('gamification', '🎮 بازی‌واری و رنک',       'ارتقای رنک/دیویژن، نشان‌ها و رقابت',          True),
+        ('profile',      '👤 حساب',                  'تأیید حساب و رویدادهای پروفایل',              True),
+        ('system',       '⚙️ سیستم',                 'سایر رویدادهای حساس حساب',                    True),
+    ]
+
+    # ntype → (category, icon, tone, priority, pref_key|None)
+    # pref_key=None ⇒ مهار ترجیحی ندارد (همیشه DM هم می‌رود)
+    NOTIF_TYPES = {
+        # ── مدرسی/آموزشی ──
+        'exam_reminder':    ('exams',        '📝', 'red',    'normal',   'exams'),
+        'exam':             ('exams',        '📝', 'red',    'normal',   'exams'),
+        'daily_question':   ('qbank',        '🧪', 'purple', 'low',      'qbank'),
+        'new_resources':    ('resources',    '📚', 'green',  'normal',   'resources'),
+        'new_references':   ('references',   '📖', 'purple', 'normal',   'references'),
+        'new_basic_sci':    ('basic_sci',    '🩺', 'acc',    'normal',   'basic_sci'),
+        'class':            ('schedule',     '🏫', 'blue',   'normal',   'schedule'),
+        'makeup':           ('schedule',     '🔄', 'yellow', 'normal',   'schedule'),
+        'schedule_change':  ('schedule',     '🔄', 'yellow', 'high',     'schedule'),
+        'grade':            ('grades',       '📊', 'acc',    'critical', 'grades'),
+        # ── پشتیبانی/اشتراک ──
+        'ticket_created':   ('tickets',      '🎫', 'green',  'normal',   'tickets'),
+        'ticket_reply':     ('tickets',      '📨', 'green',  'critical', 'tickets'),
+        'ticket_closed':    ('tickets',      '✅', 'green',  'normal',   'tickets'),
+        'ticket_reopened':  ('tickets',      '🔓', 'yellow', 'normal',   'tickets'),
+        'sub_activated':    ('subscription', '💎', 'acc',    'critical', 'subscription'),
+        'sub_expiring':     ('subscription', '⏳', 'yellow', 'high',     'subscription'),
+        'sub_expired':      ('subscription', '⌛', 'red',    'critical', 'subscription'),
+        'payment_rejected': ('subscription', '❌', 'red',    'high',     'subscription'),
+        # ── حساب/اعلامیه ──
+        'account':          ('profile',      '🎓', 'green',  'high',     'profile'),
+        'admin_dm':         ('announcement', '📩', 'blue',   'high',     'announcement'),
+        'announcement':     ('announcement', '📢', 'blue',   'normal',   'announcement'),
+        'edu_message':      ('announcement', '🎓', 'acc',    'low',      'announcement'),
+        'general':          ('announcement', '🔔', 'blue',   'normal',   'announcement'),
+        'question_approved':('qbank',        '✍️', 'green',  'high',     'qbank'),
+        'question_rejected':('qbank',        '❕', 'yellow', 'normal',   'qbank'),
+        'report_resolved':  ('announcement', '🩺', 'green',  'normal',   'announcement'),
+        # ── خانواده‌ی پرستیژ (دسته‌ی واحد: gamification) ──
+        'rank_up':          ('gamification', '🎉', 'acc',    'high',     'gamification'),
+        'div_up':           ('gamification', '⭐', 'acc',    'normal',   'gamification'),
+        'streak':           ('gamification', '🔥', 'red',    'low',      'gamification'),
+        'demote':           ('gamification', '📉', 'yellow', 'normal',   'gamification'),
+        'return':           ('gamification', '🫶', 'green',  'low',      'gamification'),
+        'founder':          ('gamification', '🏛️', 'acc',    'high',     'gamification'),
+        'achievement':      ('gamification', '🏅', 'purple', 'normal',   'gamification'),
+        'global_first':     ('gamification', '🏆', 'yellow', 'high',     'gamification'),
+        'weekly_champion':  ('gamification', '👑', 'yellow', 'high',     'gamification'),
+        'challenge':        ('gamification', '⚔️', 'red',    'normal',   'gamification'),
+        'challenge_win':    ('gamification', '⚔️', 'green',  'high',     'gamification'),
+        'challenge_fail':   ('gamification', '💪', 'yellow', 'normal',   'gamification'),
+    }
+
+    _NOTIF_META_FALLBACK = ('system', '🔔', 'blue', 'normal', 'general')
+
+    _INBOX_GROUP_WINDOW_H = 72   # پنجره‌ی Smart Grouping
+
+    def notif_type_meta(self, ntype: str) -> dict:
+        """♻️ meta کامل یک ntype — خروجی ثابت-شکل حتی برای نوع ناشناخته"""
+        cat, icon, tone, prio, pref = self.NOTIF_TYPES.get(
+            ntype, self._NOTIF_META_FALLBACK)
+        return {'category': cat, 'icon': icon, 'tone': tone,
+                'priority': prio, 'pref': pref}
+
+    async def notif_catalog(self) -> list:
+        """📋 فهرست دسته‌ها برای صفحه‌ی ترجیحات (همراه پیش‌فرض جاری پنل)"""
+        defaults = await self.get_notif_defaults()
+        return [{'key': k, 'label': l, 'desc': d,
+                 'default': bool(defaults.get(k, d))}
+                for k, l, d, _default in self.NOTIF_CATALOG]
+
+    def notif_pref_on(self, settings: dict, key, defaults: dict = None) -> bool:
+        """🎚 آیا این دسته برای کاربر روشن است؟ (کلید قدیمی خودکار canonical می‌شود)
+
+        key=None یعنی نوتیف مهار ندارد ⇒ همیشه True (Critical مسیر)."""
+        if key is None:
+            return True
+        canon = self.PREF_ALIAS.get(key, key)
+        if canon is None:
+            return True
+        settings = settings or {}
+        if canon in settings:
+            return bool(settings[canon])
+        if key in settings:          # مقدار قدیمی دقیق ذخیره‌شده
+            return bool(settings[key])
+        base = defaults or {}
+        if canon in base:
+            return bool(base[canon])
+        return bool(base.get(key, True))
+
     _INBOX_KEEP = 100  # سقف نگه‌داری اعلان برای هر کاربر
 
     async def inbox_add(self, user_id: int, ntype: str, title: str,
-                        body: str, link: str = None) -> None:
-        """ثبت یک اعلان برای یک کاربر + هرسِ نگه‌داری (قدیمی‌تر از KEEP)"""
+                        body: str, link: str = None, *, payload: dict = None,
+                        group_key: str = None, group_title: str = None) -> None:
+        """ثبت یک اعلان برای یک کاربر + هرسِ نگه‌داری (قدیمی‌تر از KEEP)
+
+        🧠 موج N1 — اسکیمای غنی (category/icon/tone/priority/pinned/count)
+        از ثبت‌نامه خوانده می‌شود، اما فیلدهای پایه سازگار-عقبرو می‌مانند.
+        group_key ⇒ Smart Grouping: اگر سند باز هم‌کلید در پنجره‌ی اخیر
+        باشد، به‌جای درج جدید همان تقویت می‌شود (count+۱، متن تازه،
+        خوانده‌نشده مجدد) — الگوی «۳ منبع جدید به جای ۳ اعلان»."""
         try:
+            uid = int(user_id)
+            meta = self.notif_type_meta(ntype)
+            now_iso = datetime.now().isoformat()
+
+            # ♻ Smart Grouping — ادغام در سند باز هم‌کلید
+            if group_key:
+                cutoff = (datetime.now() - timedelta(
+                    hours=self._INBOX_GROUP_WINDOW_H)).isoformat()
+                prev = await self.user_notifs.find_one({
+                    'user_id': uid, 'group_key': group_key,
+                    'created_at': {'$gte': cutoff}})
+                if prev:
+                    cnt = int(prev.get('count') or 1) + 1
+                    if group_title:
+                        new_title = group_title.format(count=cnt)[:160]
+                    elif '{count}' in title:
+                        new_title = title.format(count=cnt)[:160]
+                    else:
+                        new_title = str(title)[:160]
+                    await self.user_notifs.update_one({'_id': prev['_id']}, {
+                        '$set': {
+                            'type': ntype, 'title': new_title,
+                            'body': str(body)[:900],
+                            'link': link or prev.get('link'),
+                            'category': meta['category'],
+                            'icon': meta['icon'], 'tone': meta['tone'],
+                            'priority': meta['priority'],
+                            'read': False, 'created_at': now_iso,
+                        },
+                        '$inc': {'count': 1},
+                    })
+                    await self._inbox_prune(uid)
+                    return
+
             await self.user_notifs.insert_one({
-                'user_id':    int(user_id),
+                'user_id':    uid,
                 'type':       ntype,
                 'title':      str(title)[:160],
                 'body':       str(body)[:900],
                 'link':       link or None,
+                # 🧠 فیلدهای غنی — FE برای فیلتر/اولویت/pin از آن‌ها می‌خواند
+                'category':   meta['category'],
+                'icon':       meta['icon'],
+                'tone':       meta['tone'],
+                'priority':   meta['priority'],
+                'pinned':     False,
+                'count':      1,
+                'payload':    payload or None,
+                'group_key':  group_key or None,
                 'read':       False,
-                'created_at': datetime.now().isoformat(),
+                'created_at': now_iso,
             })
-            # هرس محافظ: اگر از سقف رد شد، قدیمی‌ترین‌ها حذف می‌شوند تا
-            # صندوق سنگین نشود — یک کوئری ایندکس‌خور در هر درج
-            count = await self.user_notifs.count_documents({'user_id': int(user_id)})
+            await self._inbox_prune(uid)
+        except Exception as e:
+            # اعلان نباید مسیر اصلی رویداد (ارسال/ثبت) را بشکند
+            logger.warning(f"inbox_add failed for {user_id}: {e}")
+
+    async def _inbox_prune(self, uid: int) -> None:
+        """🧹 هرس محافظ — قدیمی‌تر از سقف KEEP حذف می‌شود (سندی که
+        pinned است، هرگز هرس نمی‌شود تا کاربر بتواند مهم‌ها را سنجاق کند)"""
+        try:
+            count = await self.user_notifs.count_documents({'user_id': int(uid)})
             if count > self._INBOX_KEEP:
                 old = self.user_notifs.find(
-                    {'user_id': int(user_id)}
+                    {'user_id': int(uid), 'pinned': {'$ne': True}}
                 ).sort('created_at', -1).skip(self._INBOX_KEEP).limit(200)
                 old_ids = [d['_id'] async for d in old]
                 if old_ids:
                     await self.user_notifs.delete_many({'_id': {'$in': old_ids}})
-        except Exception as e:
-            # اعلان نباید مسیر اصلی رویداد (ارسال/ثبت) را بشکند
-            logger.warning(f"inbox_add failed for {user_id}: {e}")
+        except Exception:
+            pass
+
+
+    async def notify_user(self, uid, ntype: str, *, title: str, body: str,
+                          link: str = None, dm: str = None,
+                          payload: dict = None, group_key: str = None,
+                          group_title: str = None) -> dict:
+        """🧠 موج N1 — Entry واحد رویدادهای کاربرمحور.
+
+        یک فراخوانی ⇒ دو مسیر همگام (Source of Truth = Inbox):
+          ۱) ثبت کامل در Inbox (همیشه — آرشیو به‌ترتیب-categorised،
+             با meta ثابت و قابلیت pin/group/count).
+          ۲) اگر dm داده شود: قرار در صف DM ربات (با WebApp Deep Link
+             خودکار از سوی job مصرف‌کننده)... مگر ترجیح کاربر دسته را
+             خاموش کرده باشد (Criticalها هرگز مهار نمی‌شوند).
+
+        برمی‌گرداند {'inbox': True, 'dm': bool} تا تست/جیاب رفتار را پایش کند."""
+        uid = int(uid)
+        meta = self.notif_type_meta(ntype)
+        await self.inbox_add(uid, ntype, title, body, link,
+                             payload=payload, group_key=group_key,
+                             group_title=group_title)
+
+        dm_queued = False
+        if dm is not None:
+            allowed = True
+            pref = meta['pref']
+            if pref and meta['priority'] != 'critical':
+                try:
+                    user = await self.get_user(uid)
+                    settings = (user or {}).get('notification_settings', {})
+                    defaults = await self.get_notif_defaults()
+                    allowed = self.notif_pref_on(settings, pref, defaults)
+                except Exception:
+                    allowed = True
+            if allowed:
+                try:
+                    await self.bot_notifs.insert_one({
+                        'type':       f'event:{ntype}',
+                        'chat_id':    uid,
+                        'text':       dm,
+                        'link':       link or None,  # 🧩 ⇒ دکمه‌ی WebApp
+                        'sent':       False,
+                        'created_at': datetime.now().isoformat(),
+                    })
+                    dm_queued = True
+                except Exception as e:
+                    # صف DM اشکال بخورد، آرشیو Inbox کماکان کامل است
+                    logger.warning(f"notify_user dm queue failed for {uid}: {e}")
+        return {'inbox': True, 'dm': dm_queued}
 
     async def inbox_add_many(self, docs: list) -> None:
         """درج گروهی برای اعلان‌های همگانی (هر دیکت: user_id/type/title/body/link)"""
@@ -4654,29 +4900,49 @@ class DB:
             return
         try:
             now_iso = datetime.now().isoformat()
-            rows = [{
-                'user_id':    int(d['user_id']),
-                'type':       d['type'],
-                'title':      str(d['title'])[:160],
-                'body':       str(d.get('body', ''))[:900],
-                'link':       d.get('link') or None,
-                'read':       False,
-                'created_at': now_iso,
-            } for d in docs]
+            rows = []
+            for d in docs:
+                meta = self.notif_type_meta(d['type'])
+                rows.append({
+                    'user_id':    int(d['user_id']),
+                    'type':       d['type'],
+                    'title':      str(d['title'])[:160],
+                    'body':       str(d.get('body', ''))[:900],
+                    'link':       d.get('link') or None,
+                    'category':   meta['category'],
+                    'icon':       meta['icon'],
+                    'tone':       meta['tone'],
+                    'priority':   meta['priority'],
+                    'pinned':     False,
+                    'count':      1,
+                    'payload':    d.get('payload') or None,
+                    'group_key':  d.get('group_key') or None,
+                    'read':       False,
+                    'created_at': now_iso,
+                })
             # تکه‌تکه تا سقف BSON معقول رعایت شود
             for i in range(0, len(rows), 500):
                 await self.user_notifs.insert_many(rows[i:i + 500], ordered=False)
         except Exception as e:
             logger.warning(f"inbox_add_many failed ({len(docs)} docs): {e}")
 
-    async def inbox_list(self, user_id: int, limit: int = 60) -> dict:
-        """فهرست اعلان‌های کاربر + شمارش خوانده‌نشده (یک پاسخ برای صفحه و بج)"""
+    async def inbox_list(self, user_id: int, limit: int = 60,
+                         category: str = None, q: str = None,
+                         unread_only: bool = False) -> dict:
+        """فهرست اعلان‌های کاربر + شمارش خوانده‌نشده (یک پاسخ برای صفحه و بج)
+
+        🧠 موج N1 — خروجی غنی (category/icon/tone/priority/pinned/count)
+        با سازگاری کامل (کلیدهای قدیمی دست‌نخورده) + فیلتر اختیاری
+        category/q/unread که هم کلاینت هم سرور می‌تواند بدهد. ترتیب:
+        پین‌شده‌ها بالاتر، سپس جدیدترین."""
         uid = int(user_id)
         cursor = (self.user_notifs.find({'user_id': uid})
-                  .sort('created_at', -1).limit(limit))
+                  .sort('created_at', -1).limit(400))
+        need_q = (q or '').strip().lower()
         items = []
         async for d in cursor:
-            items.append({
+            meta = self.notif_type_meta(d.get('type', 'general'))
+            item = {
                 'id':         str(d['_id']),
                 'type':       d.get('type', 'general'),
                 'title':      d.get('title', ''),
@@ -4684,9 +4950,48 @@ class DB:
                 'link':       d.get('link'),
                 'read':       bool(d.get('read', False)),
                 'created_at': d.get('created_at', ''),
-            })
+                # 🧠 فیلدهای غنی — نقص اسناد قدیمی با registry پر می‌شود
+                'category':   d.get('category') or meta['category'],
+                'icon':       d.get('icon') or meta['icon'],
+                'tone':       d.get('tone') or meta['tone'],
+                'priority':   d.get('priority') or meta['priority'],
+                'pinned':     bool(d.get('pinned', False)),
+                'count':      int(d.get('count') or 1),
+            }
+            if category and item['category'] != category:
+                continue
+            if unread_only and item['read']:
+                continue
+            if need_q and need_q not in (
+                    (item['title'] + ' ' + item['body']).lower()):
+                continue
+            items.append(item)
+        items.sort(key=lambda i: i['created_at'], reverse=True)
+        # 📌 پین‌شده‌ها مطلقاً بالای لیست (دسته‌ی زمانی در FE گروه‌بندی می‌شود)
+        pinned   = [i for i in items if i['pinned']]
+        unpinned = [i for i in items if not i['pinned']]
+        items = (pinned + unpinned)[:limit]
         unread = await self.user_notifs.count_documents({'user_id': uid, 'read': False})
         return {'items': items, 'unread': unread}
+
+    async def inbox_unread_count(self, user_id: int) -> int:
+        """🔢 شمارش سبک خوانده‌نشده (بدون لفظ آیتم‌ها) — برای بج سبک"""
+        try:
+            return await self.user_notifs.count_documents(
+                {'user_id': int(user_id), 'read': False})
+        except Exception:
+            return 0
+
+    async def inbox_pin(self, user_id: int, nid: str, pinned: bool) -> bool:
+        """📌 سنجاق کردن یک اعلان (پین‌شده‌ها بالاتر و مصون از هرس)"""
+        try:
+            r = await self.user_notifs.update_one(
+                {'_id': ObjectId(str(nid)), 'user_id': int(user_id)},
+                {'$set': {'pinned': bool(pinned)}})
+            return bool(getattr(r, 'modified_count', 0) or
+                        getattr(r, 'matched_count', 0))
+        except Exception:
+            return False
 
     async def inbox_mark_read(self, user_id: int, ids: list = None) -> int:
         """علامت خوانده‌شدن — ids=None یعنی همه؛ خروجی: شمارش خوانده‌نشده‌ی باقی‌مانده"""
@@ -4893,12 +5198,31 @@ class DB:
             {'report_id': report_id}, {'$set': update_data}
         )
         # 👑 P1 — اولین گذار به resolved ⇒ پاداش «گزارش مفید» به گزارش‌دهنده
+        # 🧠 N1.2 — سینک‌فیکس: گزارش‌دهنده هیچ‌جا نمی‌فهمید گزارشش بررسی
+        # شده؛ حالا تک‌منبع زنده (Inbox + DM + Deep Link به «گزارش‌های من»).
         try:
             if (status == 'resolved'
                     and (prev or {}).get('status') != 'resolved'
                     and (prev or {}).get('reporter_id')):
-                await self.prestige_event(int(prev['reporter_id']),
+                rep_uid = int(prev['reporter_id'])
+                await self.prestige_event(rep_uid,
                     'report_useful', {'report_id': report_id})
+        except Exception:
+            pass
+        # 🧠 N1.2 — خبر در try جدا (ایزوله از موتور پرستیژ)
+        try:
+            if (status == 'resolved'
+                    and (prev or {}).get('status') != 'resolved'
+                    and (prev or {}).get('reporter_id')):
+                rep_uid = int(prev['reporter_id'])
+                await self.notify_user(rep_uid, 'report_resolved',
+                    title='🩺 گزارشت بررسی شد',
+                    body='گزارش محتوایی که فرستادی بررسی و تأیید شد '
+                         '— چشم‌بازای حسرت ممنونه 🙏',
+                    link='/me/reports',
+                    dm=('🩺 <b>گزارشت بررسی شد</b>\n\n'
+                        'گزارش محتوایی که فرستادی بررسی و تأیید شد. '
+                        'از وسواس مثبتی که داری مرسی 🙏'))
         except Exception:
             pass
 
@@ -4946,9 +5270,32 @@ class DB:
     # ══════════════════════════════════════════════════
 
     DEFAULT_NOTIF_FALLBACK = {
-        'new_resources': True, 'schedule': True, 'exam': True, 'makeup': True,
+        # 🧠 موج N1 — کاتالوگ یکپارچه‌ی دسته‌ها (کلیدهای Canonical)
+        'resources': True, 'references': True, 'basic_sci': True,
+        'qbank': True, 'schedule': True, 'exams': True, 'grades': True,
+        'tickets': True, 'subscription': True, 'discounts': True,
+        'ai': True, 'announcement': True, 'polls': True, 'profile': True,
+        'gamification': True, 'system': True,
+        # کلیدهای قدیمی (سازگاری — همان معنا، نگاشتی از طریق PREF_ALIAS)
+        'new_resources': True, 'schedule_old_guard': None,
+        'exam': True, 'makeup': True,
         'daily_question': False, 'edu_message': True, 'general': True,
-        'gamification': True,   # 👑 موج P0 — پیش‌فرض روشن (Spec §۱۱.۵)
+        'grade_release': True, 'sub_expiry': True,
+    }
+
+    # 🧠 موج N1 — canonical کردن کلیدهای قدیمی ترجیح به دسته‌های جدید؛
+    # هر جا pref خوانده/نوشته شود، از همین نگاشت عبور می‌کند تا کاربران
+    # قدیمی با سندهای فعلی بدون مهاجرت دستی به دسته‌های تازه برسند.
+    PREF_ALIAS = {
+        'new_resources': 'resources',
+        'exam':          'exams',
+        'makeup':        'schedule',
+        'daily_question': 'qbank',
+        'edu_message':   'announcement',
+        'general':       'announcement',
+        'grade_release': 'grades',
+        'sub_expiry':    'subscription',
+        'schedule_old_guard': None,
     }
 
     async def get_notif_defaults(self) -> dict:
