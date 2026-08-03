@@ -75,11 +75,36 @@ async def build_dashboard_text(uid: int) -> tuple:
     intake      = user.get('intake', '') or '—'
     sid_line    = f"🎓 {user.get('student_id', '')}\n" if user.get('student_id') else ""
 
+    # 👑 موج P2 — خط Prestige با رتبه‌ی عددی/Top٪ + وضعیت چالش
+    prestige_line = ''
+    try:
+        _ps = await db.prestige_state(uid)
+        if _ps:
+            rank_bit = ''
+            if _ps.get('rank_number') and _ps.get('total_active'):
+                rank_bit = (f"  ·  🏆 #{_ps['rank_number']}"
+                            f" (Top {_ps.get('top_pct')}٪)")
+            ch = _ps.get('challenge') or {}
+            ch_bit = ''
+            if ch.get('mode') == 'ready':
+                ch_bit = (f"\n⚔️ چالش ارتقا آماده است: {ch.get('icon','')} "
+                          f"{ch.get('title','')} — مرکز آزمون!")
+            elif ch.get('mode') == 'cooldown':
+                ch_bit = "\n⏳ چالش ارتقا در کول‌داون است."
+            prestige_line = (
+                f"{_ps['icon']} <b>{_ps['title']} {_ps['stars']}</b>"
+                f"  ·  🔥 {_ps['streak']['current']} روز{rank_bit}"
+                f"  ·  {_ps['next']['label']}{ch_bit}\n\n"
+            )
+    except Exception:
+        prestige_line = ''
+
     text = (
         f"🩺 <b>داشبورد — {user['name']}</b>{role_badge}\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 ورودی: <b>{intake}</b>  |  👥 گروه {group_icon}\n"
         f"{sid_line}\n"
+        f"{prestige_line}"
         f"📊 <b>آمادگی تستی</b>\n"
         f"  {bar} <b>{pct}%</b>  {rank}\n\n"
         f"📈 <b>آمار من</b>\n"
