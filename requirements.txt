@@ -15,3 +15,4 @@ fastapi==0.115.4
 uvicorn[standard]==0.32.0
 pydantic==2.9.2
 python-multipart==0.0.20
+qrcode[pil]==8.2  # 👑 P2 — QR اشتراک HeroCard (SVG سروری)
