@@ -415,6 +415,12 @@ async def admin_reject_reason_handler(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("این رسید قبلاً بررسی شده.")
         return
     await db.sub_payment_decide(pid, approved=False, admin_id=update.effective_user.id, note=note)
+    # 🧠 N1.2 — سینک‌فیکس: reject رسید فقط DM بود؛ آینه‌ی Inbox هم می‌نشیند
+    # (DM از همان safe_send بعدی می‌رود — اینجا فقط آرشیو+Deep Link)
+    await db.notify_user(payment['user_id'], 'payment_rejected',
+        title='❌ رسیدت تأیید نشد',
+        body=f'📝 دلیل: {note}\nرسید درست را از بخش اشتراک دوباره بفرست.',
+        link='/me/subscription', dm=None)
     await safe_send(
         context.bot, payment['user_id'],
         f"❌ <b>رسیدت تأیید نشد</b>\n\n📝 دلیل: {note}\n\n"
