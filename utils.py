@@ -619,3 +619,35 @@ async def maintenance_message() -> str:
         "لطفاً چند دقیقه دیگر دوباره تلاش کنید.\n"
         "از صبر شما سپاسگزاریم 🙏"
     )
+
+# ══════════════════════════════════════════════════
+#  🧠 موج N2 — دیپ‌لینک WebApp در DMها (مرکز اعلان ربات)
+#  هر رویداد که Link دارد، روی پیام دکمه‌ی web_app
+#  (مینی‌اپ به‌جای بازکردن ناوبری) می‌گیرد. سازنده از
+#  WEBAPP_URL (همان متغیری که API سرو می‌کند) می‌خواند.
+# ══════════════════════════════════════════════════
+
+import os as _os
+
+def webapp_url(link: str = '') -> str:
+    """🔗 url مطلق مینی‌اپ برای Deep Link (خود link از / شروع می‌شود).
+    اگر WEBAPP_URL تنظیم نشده (محیط لوکال)، None → بدون دکمه."""
+    base = (_os.getenv('WEBAPP_URL') or '').strip()
+    if not base or base == '*':
+        return None
+    if link and not link.startswith('/'):
+        link = '/' + link
+    if link and '://' not in base:  # دفاع در برابر host خام
+        base = 'https://' + base
+    return (base.rstrip('/') + link) if link else base.rstrip('/')
+
+
+def webapp_kb(link: str, label: str = '📱 باز کردن در هامزیار'):
+    """🧩 InlineKeyboardMarkup تک‌کلیده‌ی web_app — اگر base نداشت None"""
+    url = webapp_url(link)
+    if not url:
+        return None
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, web_app=WebAppInfo(url=url))
+    ]])
