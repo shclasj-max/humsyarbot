@@ -36,11 +36,45 @@ async def _main_stats(query, uid: int):
     bar    = progress_bar(pct)
     level  = get_level(pct)
 
+    # 👑 Prestige در آمار — رنک + نوار پیشرفت ASCII + رکوردها + وضعیت چالش
+    ps_line = ''
+    try:
+        _ps = await db.prestige_state(uid, lite=True)
+        if _ps:
+            ps_line = f"👑 رنک: <b>{_ps['icon']} {_ps['title']} {_ps['stars']}</b>\n"
+            nxt = _ps.get('next') or {}
+            ch = _ps.get('challenge') or {}
+            if ch.get('mode') == 'ready':
+                ps_line += (f"⚔️ چالش ارتقا آماده است: {ch.get('icon','')} "
+                            f"{ch.get('title','')} — از مرکز آزمون!\n")
+            elif ch.get('mode') == 'cooldown':
+                ps_line += "⏳ چالش ارتقا در کول‌داون است — کمی دیگر برگرد.\n"
+            elif ch.get('mode') == 'locked':
+                ps_line += "🔒 چالش Apex هنوز قفل است (پیش‌شرط‌های اجتماعی).\n"
+            elif nxt.get('span'):
+                from utils import progress_bar as _pbar
+                have = int(nxt.get('have') or 0)
+                span = max(1, int(nxt.get('span') or 1))
+                ps_line += (f"<code>[{_pbar(min(100, round(have / span * 100)), 12)}]"
+                            f"</code> {have}/{span}\n")
+            rec = _ps.get('records') or {}
+            rec_bits = [f"🔥 بهترین استریک <b>{_ps['streak']['best']}</b>"]
+            if rec.get('best_exam_pct'):
+                rec_bits.append(f"🎯 بهترین آزمون <b>{rec['best_exam_pct']}٪</b>")
+            if rec.get('top1_weeks_best'):
+                rec_bits.append(f"👑 صدر هفته ×<b>{rec['top1_weeks_best']}</b>")
+            if rec.get('apex_wins'):
+                rec_bits.append(f"🌌 برد Apex ×<b>{rec['apex_wins']}</b>")
+            ps_line += "🏆 رکوردها: " + " · ".join(rec_bits) + "\n"
+    except Exception:
+        ps_line = ''
+
     text = (
         f"📊 <b>آمار من</b>\n"
         f"👤 {user.get('name', '')} | گروه {user.get('group', '')}\n"
         f"━━━━━━━━━━━━━━━━\n\n"
-        f"🏅 سطح: <b>{level}</b>\n\n"
+        f"🏅 سطح: <b>{level}</b>\n"
+        f"{ps_line}\n"
         f"📊 آمادگی: <code>[{bar}]</code> <b>{pct}%</b>\n"
         f"✅ صحیح: <b>{correct}</b>  ❌ اشتباه: <b>{wrong}</b>\n"
         f"📥 دانلود: <b>{stats['downloads']}</b>\n"
