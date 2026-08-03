@@ -1,6 +1,6 @@
 """User profile endpoints for the Telegram Mini App."""
 import asyncio
-from typing import Any, Mapping
+from typing import Any, List, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -140,6 +140,80 @@ async def get_rank(user=Depends(get_current_user)):
         "total_users": total,
         "percentile": round((1 - better / total) * 100) if total else 0,
     }
+
+
+@router.get("/prestige")
+async def get_prestige(user=Depends(get_current_user)):
+    """👑 وضعیت کامل Prestige (موج P0) — افزایشی؛ منبع یکتا db.prestige_state."""
+    state = await db.prestige_state(user["id"])
+    return {"prestige": state}
+
+
+@router.get("/prestige/badges")
+async def get_prestige_badges(user=Depends(get_current_user)):
+    """👑 P1 — کلکسیون کامل نشان‌ها (۵ تکاملی + تکی‌ها + جهانی‌ها)"""
+    data = await db.prestige_badges(user["id"])
+    if data is None:
+        raise HTTPException(status_code=404, detail="کاربر پیدا نشد")
+    return {"badges": data}
+
+
+@router.get("/prestige/history")
+async def get_prestige_history(
+    limit: int = 30,
+    user=Depends(get_current_user),
+):
+    """👑 P1 — «سفر من»: تایم‌لاین رویدادهای پرستیژ با تاریخ جلالی"""
+    limit = max(1, min(int(limit), 100))
+    items = await db.prestige_history_list(user["id"], limit)
+    return {"items": items}
+
+
+class ShowcaseInput(BaseModel):
+    keys: List[str] = []
+
+
+@router.put("/prestige/showcase")
+async def put_prestige_showcase(
+    body: ShowcaseInput,
+    user=Depends(get_current_user),
+):
+    """👑 P1 — پین حداکثر ۳ نشان بازشده (اعتبارسنجی سروری)"""
+    keys = [str(k)[:60] for k in (body.keys or [])][:10]
+    return await db.prestige_showcase_set(user["id"], keys)
+
+
+class PrivacyInput(BaseModel):
+    public: bool
+
+
+@router.patch("/prestige/privacy")
+async def patch_prestige_privacy(
+    body: PrivacyInput,
+    user=Depends(get_current_user),
+):
+    """👑 P2 — کلید پوشش عمومی (پیش‌فرض روشن؛ نام در لیدربرد/فید ماسک می‌شود)"""
+    await db.users.update_one(
+        {"user_id": user["id"]},
+        {"$set": {"privacy_public": bool(body.public)}},
+    )
+    return {"ok": True, "privacy_public": bool(body.public)}
+
+
+@router.get("/prestige/public/{target_uid}")
+async def get_prestige_public(
+    target_uid: int,
+    user=Depends(get_current_user),
+):
+    """👑 P2 — Hero Card عمومی: رنک/Top٪/شوکیس/رکوردها — بدون آمار حساس"""
+    try:
+        tid = int(target_uid)
+    except Exception:
+        raise HTTPException(status_code=422, detail="شناسه‌ی نامعتبر")
+    data = await db.prestige_public(tid)
+    if not data.get("ok"):
+        raise HTTPException(status_code=404, detail="کاربر پیدا نشد")
+    return data
 
 
 @router.get("/intakes")
