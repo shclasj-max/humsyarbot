@@ -28,11 +28,14 @@ def _role_for(uid: int, db_user: Mapping[str, Any]) -> str:
 async def get_profile(user=Depends(get_current_user)):
     uid = user["id"]
     db_user = user["_db"] if isinstance(user.get("_db"), Mapping) else {}
-    raw_stats, weekly, raw_tickets = await asyncio.gather(
-        db.user_stats(uid),
-        db.weekly_activity(uid),
-        db.ticket_get_user(uid),
-    )
+    raw_stats, weekly, raw_tickets, roles_info, user_perms = \
+        await asyncio.gather(
+            db.user_stats(uid),
+            db.weekly_activity(uid),
+            db.ticket_get_user(uid),
+            db.get_user_roles(uid),
+            db.get_user_perms(uid),
+        )
 
     stats = normalize_stats(raw_stats)
     stats["weekly_chart"] = normalize_weekly(weekly)
@@ -46,6 +49,19 @@ async def get_profile(user=Depends(get_current_user)):
             "student_id": _text(db_user.get("student_id")),
             "role": _role_for(uid, db_user),
             "telegram_id": uid,
+            # 🛡 RBAC-W1 (افزایشی): کلیدهای نقش + union مجوزها —
+            # منبع گیت‌های مینی‌اپ در موج W3؛ فیلدهای قبلی دست‌نخورده
+            "roles": roles_info["keys"],
+            "roles_detail": [
+                {
+                    "key":   r["_id"],
+                    "label": r.get("label", r["_id"]),
+                    "icon":  r.get("icon", "🛡"),
+                    "color": r.get("color", "#70A7FF"),
+                }
+                for r in roles_info["roles"]
+            ],
+            "perms": sorted(user_perms),
         },
         "stats": stats,
         "tickets": {
