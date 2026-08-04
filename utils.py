@@ -121,6 +121,13 @@ async def get_keyboard_for_user(user: dict, uid: int) -> ReplyKeyboardMarkup:
         if sub_role == 'content_scoped':
             return content_admin_keyboard()
         return sub_admin_keyboard()
+    # 🛡 RBAC-W3 (افزایشی — مسیرهای بالا دست‌نخورده‌اند): نقش
+    # دیتابی‌سی با مجوز content.*/tickets.reply هم کیبورد متناسب می‌گیرد
+    if await db.has_perm(uid, 'content.manage') or \
+            await db.has_perm(uid, 'content.scoped'):
+        return content_admin_keyboard()
+    if await db.has_perm(uid, 'tickets.reply'):
+        return sub_admin_keyboard()
     return main_keyboard()
 
 
