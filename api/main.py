@@ -20,6 +20,7 @@ from api.routers import (
     notifications,
     profile,
     questions,
+    rbac,
     references,
     registration,
     reports,
@@ -175,6 +176,14 @@ app.include_router(
 app.include_router(
     admin_panel.router,
     prefix="/api/admin",
+)
+
+# 🛡 موج RBAC-W1 — مدیریت نقش‌ها/مجوزها (تک‌منبع حقیقت)
+# افزایشی خالص: هیچ route قدیمی جابه‌جا/تغییر نکرده است.
+app.include_router(
+    rbac.router,
+    prefix="/api/admin/rbac",
+    tags=["rbac"],
 )
 
 
