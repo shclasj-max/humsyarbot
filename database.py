@@ -73,6 +73,12 @@ class DB:
         # با همان آیدی دوباره ثبت‌نام کند.
         self.blacklist    = _db['blacklist']
         self.admin_roles  = _db['admin_roles']      # FIX جدید: سطوح دسترسی چندگانه ادمین
+        # 🛡 موج RBAC-W1 — RBAC دیتابیس‌محور (قرارداد اجرا §۴):
+        # تک‌منبع حقیقت نقش/مجوز. admin_roles/users.role به‌عنواین
+        # mirror سازگاری زنده می‌مانند (Improve, Never Replace).
+        self.roles        = _db['roles']
+        self.user_roles   = _db['user_roles']
+        self.perm_catalog = _db['perm_catalog']
         self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
         # FIX جدید: سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای
         # در انتظار بررسی، و کدهای تخفیف
@@ -274,7 +280,12 @@ class DB:
         role_doc = await self.get_admin_role(uid)
         if role_doc and role_doc.get('role') == 'content_scoped':
             return True
-        return False
+        # 🛡 RBAC-W1 (افزایشی — مسیرهای بالا دست‌نخورده‌اند): نقش‌های
+        # دیتابیس‌محور با مجوز content.* هم پنل محتوا را باز می‌کنند.
+        return (
+            await self.has_perm(uid, 'content.manage')
+            or await self.has_perm(uid, 'content.scoped')
+        )
 
     @staticmethod
     def build_user_search_query(query_text: str) -> dict:
@@ -4396,10 +4407,17 @@ class DB:
             }},
             upsert=True
         )
+        # 🛡 RBAC-W1 — آینه‌ی دوطرفه: کالکشن جدید هم هم‌زمان به‌روز
+        # می‌شود تا هر دو مخزن قدیمی/جدید همیشه Sync بمانند (§۵).
+        await self._add_role_key(uid, role, scope_intake)
         return True
 
     async def remove_admin_role(self, uid: int):
+        # 🛡 RBAC-W1 — قبل از حذف، کلید نقش را می‌دانیم تا آینه را هم پاک کنیم
+        doc = await self.get_admin_role(uid)
         await self.admin_roles.delete_one({'_id': uid})
+        if doc and doc.get('role'):
+            await self._remove_role_key(uid, doc['role'])
 
     async def get_admin_role(self, uid: int) -> dict:
         """نقش فرعی یک کاربر — None اگه نداشت"""
@@ -4416,10 +4434,15 @@ class DB:
         if uid == int(os.getenv('ADMIN_ID', '0')):
             return True
         doc = await self.get_admin_role(uid)
-        if not doc:
-            return False
-        perms = self.ROLE_PERMISSIONS.get(doc.get('role', ''), set())
-        return permission in perms
+        legacy_ok = False
+        if doc:
+            perms = self.ROLE_PERMISSIONS.get(doc.get('role', ''), set())
+            legacy_ok = permission in perms
+        # 🛡 RBAC-W1 — مسیر دیتابیس‌محور (مکمل مسیر قدیمی؛ هیچ
+        # دسترسی قبلی کم نمی‌شود، فقط نقش‌های جدید هم پاس می‌شوند)
+        if not legacy_ok:
+            legacy_ok = await self.has_perm(uid, permission)
+        return legacy_ok
 
     async def get_scoped_intake(self, uid: int) -> str:
         """
@@ -4432,6 +4455,426 @@ class DB:
         if doc and doc.get('role') == 'content_scoped':
             return doc.get('scope_intake')
         return None
+
+    # ══════════════════════════════════════════════════
+    #  🛡 RBAC دیتابیس‌محور — موج W1 (Execution Contract 🔒)
+    #  تک‌منبع حقیقت: کالکشن‌های roles / user_roles / perm_catalog
+    #  قوانین قفل (§۴ و §۶ قرارداد):
+    #   • هیچ نقش/مجوز/برچسب/رنگ/آیکون جدیدی «در کد» ساخته نمی‌شود —
+    #     دو ثابت زیر فقط بذر اولیه‌ی idempotent‌اند؛ پس از seed،
+    #     خوانده/نوشته فقط از دیتابیس (تغییر دستی ادمین حفظ می‌شود).
+    #   • Improve, Never Replace: admin_roles و users.role به‌عنوان
+    #     mirror سازگاری دوطرفه زنده می‌مانند (§۱۰ سند).
+    #   • ADMIN_ID (مالک) همیشه بای‌پس — تنها استثنای قرارداد §۸.
+    # ══════════════════════════════════════════════════
+
+    # دسته‌های مجوز (حفظ ترتیب نمایش در ماتریس مینی‌اپ)
+    PERM_CATEGORIES = [
+        ('users',         'کاربران'),
+        ('roles',         'نقش‌ها'),
+        ('content',       'محتوا'),
+        ('questions',     'سؤالات'),
+        ('schedules',     'برنامه و امتحان'),
+        ('grades',        'نمرات'),
+        ('tickets',       'تیکت'),
+        ('reports',       'گزارش‌ها'),
+        ('notifications', 'اعلان‌ها'),
+        ('ai',            'هوشیار'),
+        ('subscription',  'اشتراک'),
+        ('stats',         'آمار'),
+        ('prestige',      'پرستیژ'),
+        ('settings',      'تنظیمات'),
+        ('backup',        'بکاپ'),
+        ('system',        'سیستم'),
+    ]
+
+    # کاتالوگ مجوزها — (key, برچسب فارسی, دسته)
+    # هر سوییچ تکی است (§۶): هیچ گروه‌بندی منطقی در کد نیست.
+    PERMISSION_CATALOG = [
+        ('users.view',           'مشاهده‌ی کاربران',            'users'),
+        ('users.manage',         'مدیریت کاربران',              'users'),
+        ('users.suspend',        'تعلیق/رفع تعلیق کاربر',       'users'),
+        ('users.delete',         'حذف/بلاک کاربر',              'users'),
+        ('users.message',        'ارسال پیام به کاربر',         'users'),
+        ('roles.manage',         'مدیریت نقش‌ها و مجوزها',      'roles'),
+        ('content.manage',       'مدیریت محتوا (کلی)',          'content'),
+        ('content.scoped',       'محتوای محدود به ورودی',       'content'),
+        ('questions.review',     'بررسی سؤالات پیشنهادی',       'questions'),
+        ('questions.review_scoped','بررسی سؤالات (ورودی خود)',  'questions'),
+        ('questions.delete',     'حذف سؤال',                    'questions'),
+        ('schedules.manage',     'مدیریت برنامه و امتحان',      'schedules'),
+        ('grades.manage',        'مدیریت نمرات (کلی)',          'grades'),
+        ('grades.scoped',        'ثبت نمره (ورودی خود)',        'grades'),
+        ('tickets.reply',        'پاسخ به تیکت',                'tickets'),
+        ('tickets.manage',       'مدیریت وضعیت تیکت‌ها',        'tickets'),
+        ('reports.review',       'بررسی گزارش سؤال/جزوه',       'reports'),
+        ('notifications.manage', 'تنظیمات پیش‌فرض اعلان',       'notifications'),
+        ('broadcast.send',       'ارسال همگانی/اطلاعیه',        'notifications'),
+        ('ai.manage',            'مدیریت هوشیار',               'ai'),
+        ('subscription.manage',  'مدیریت اشتراک‌ها',            'subscription'),
+        ('stats.view',           'آمار و داشبورد مدیریتی',      'stats'),
+        ('prestige.manage',      'تنظیمات پرستیژ',              'prestige'),
+        ('settings.manage',      'تنظیمات سیستم',               'settings'),
+        ('backup.manage',        'بکاپ و بازیابی',              'backup'),
+        ('audit.view',           'مشاهده‌ی لاگ حساس',           'system'),
+        ('system.manage',        'عملیات حساس سیستم',           'system'),
+    ]
+
+    # نگاشت مجوز قدیمی (ROLE_PERMISSIONS) → کلیدهای جدید — فقط برای بذر
+    _LEGACY_PERM_MAP = {
+        'tickets':                 ['tickets.reply', 'tickets.manage'],
+        'content':                 ['content.manage'],
+        'questions_review':        ['questions.review'],
+        'content_scoped':          ['content.scoped'],
+        'questions_review_scoped': ['questions.review_scoped'],
+        'broadcast':               ['broadcast.send'],
+        'reports_review':          ['reports.review'],
+        'users':                   ['users.view', 'users.manage'],
+        'schedules':               ['schedules.manage'],
+        'notifications':           ['notifications.manage'],
+        'grades_scoped':           ['grades.scoped'],
+        'grades':                  ['grades.manage'],
+    }
+
+    async def ensure_rbac_seed(self) -> dict:
+        """بذر idempotent (§۱۰): اجرای دوباره هیچ چیز را بازنویسی نمی‌کند.
+
+        roles با $setOnInsert ساخته می‌شوند ⇒ ویرایش دستی ادمین
+        (نام/رنگ/مجوزها) در اجراهای بعدی سالم می‌ماند. نقش‌های سیستم
+        با permsِ نگاشت‌یافته از ماتریس قدیمی — قفل رفتاری کامل."""
+        now = datetime.now().isoformat()
+
+        # ۱) کاتالوگ مجوزها: فقط اگر کالکشن خالی است
+        perms_seeded = 0
+        if await self.perm_catalog.count_documents({}) == 0:
+            for key, label, cat in self.PERMISSION_CATALOG:
+                await self.perm_catalog.update_one(
+                    {'_id': key},
+                    {'$setOnInsert': {
+                        '_id': key, 'label': label, 'category': cat}},
+                    upsert=True,
+                )
+            perms_seeded = len(self.PERMISSION_CATALOG)
+
+        # ۲) نقش‌های سیستمی: upsertِ صرفاً-درج (ویرایش‌ها حفظ می‌شود)
+        roles_before = await self.roles.count_documents({})
+        for key, label in self.ROLE_LABELS.items():
+            legacy_perms = self.ROLE_PERMISSIONS.get(key, set())
+            perms = []
+            for lp in legacy_perms:
+                perms.extend(self._LEGACY_PERM_MAP.get(lp, [lp]))
+            # یکتا و مرتب — بدون تکرار
+            perms = sorted(set(perms))
+            await self.roles.update_one(
+                {'_id': key},
+                {'$setOnInsert': {
+                    '_id':        key,
+                    'label':      label,
+                    'desc':       '',
+                    'icon':       label.split(' ')[0] if label else '🛡',
+                    'color':      '#70A7FF',
+                    'priority':   50,
+                    'system':     True,   # حذف‌ناپذیر ولی قابل ویرایش
+                    'active':     True,
+                    'visible':    True,
+                    'perms':      perms,
+                    'created_at': now,
+                    'updated_at': now,
+                }},
+                upsert=True,
+            )
+        roles_after = await self.roles.count_documents({})
+        return {
+            'roles_seeded': max(0, roles_after - roles_before),
+            'perms_seeded': perms_seeded,
+        }
+
+    async def rbac_migrate_users(self) -> dict:
+        """مهاجرت idempotent (§۱۰): admin_roles + users.role → user_roles.
+
+        از addToSet-منطقی (dedup در پایتون) استفاده می‌کند ⇒ اجرای چندباره
+        هیچ داده‌ای تکرار/بازنویسی نمی‌کند؛ هیچ نقشی حذف نمی‌شود."""
+        count_ar = 0
+        async for doc in self.admin_roles.find({}):
+            role = doc.get('role')
+            if not role:
+                continue
+            await self._add_role_key(
+                doc['_id'], role, doc.get('scope_intake'))
+            count_ar += 1
+
+        count_ur = 0
+        legacy = await self.users.find(
+            {'role': {'$in': ['content_admin', 'support']}}
+        ).to_list(None)
+        for u in legacy:
+            role_key = u.get('role')
+            if role_key in ('content_admin', 'support'):
+                await self._add_role_key(u['user_id'], role_key)
+                count_ur += 1
+
+        return {'from_admin_roles': count_ar, 'from_users_role': count_ur}
+
+    # ──────────────────────────────────────────────────
+    #  CRUD نقش‌ها
+    # ──────────────────────────────────────────────────
+
+    async def list_roles(self) -> list:
+        """همه‌ی نقش‌ها — مرتب: priority ↑ سپس برچسب (منبع UI/API)."""
+        docs = await self.roles.find({}).to_list(None)
+        return sorted(
+            docs,
+            key=lambda d: (d.get('priority', 99), d.get('label', '')),
+        )
+
+    async def get_role(self, key: str):
+        return await self.roles.find_one({'_id': key})
+
+    async def role_label(self, key: str) -> str:
+        """برچسب نقش: دیتابیس اول، fallback به لیست قدیمی (سازگاری)."""
+        doc = await self.get_role(key)
+        if doc and doc.get('label'):
+            return doc['label']
+        return self.ROLE_LABELS.get(key, key)
+
+    async def _valid_perm_keys(self) -> set:
+        docs = await self.perm_catalog.find({}).to_list(None)
+        if not docs:
+            return {k for k, _, _ in self.PERMISSION_CATALOG}
+        return {d['_id'] for d in docs}
+
+    async def create_role(self, payload: dict, actor: int = 0):
+        """ساخت نقش دلخواه (§۶). خروجی: (doc, err)"""
+        key = (payload.get('key') or '').strip()
+        label = (payload.get('label') or '').strip()
+        if not label or len(label) > 60:
+            return None, 'label_invalid'
+        if not key:
+            key = f"custom_{int(datetime.now().timestamp())}"
+        if not key.isidentifier() or ' ' in key or len(key) > 40:
+            return None, 'key_invalid'
+        if await self.get_role(key):
+            return None, 'key_exists'
+        valid = await self._valid_perm_keys()
+        perms = sorted({p for p in (payload.get('perms') or [])
+                        if p in valid})
+        now = datetime.now().isoformat()
+        doc = {
+            '_id':        key,
+            'label':      label,
+            'desc':       (payload.get('desc') or '')[:200],
+            # آیکون پیش‌فرض از خودِ برچسب (توکن اول اگر اموجی باشد)
+            # — هم‌سو با منطق seed؛ در غیر این صورت 🛡
+            'icon':       (payload.get('icon')
+                           or label.split(' ')[0][:4] or '🛡')[:4],
+            'color':      payload.get('color') or '#70A7FF',
+            'priority':   int(payload.get('priority') or 90),
+            'system':     False,
+            'active':     True,
+            'visible':    True,
+            'perms':      perms,
+            'created_at': now,
+            'updated_at': now,
+        }
+        await self.roles.insert_one(doc)
+        return doc, None
+
+    _ROLE_EDITABLE = ('label', 'desc', 'icon', 'color',
+                      'priority', 'active', 'visible', 'perms')
+
+    async def update_role(self, key: str, changes: dict, actor: int = 0):
+        """ویرایش نقش — فقط فیلدهای لیست‌سفید _ROLE_EDITABLE.
+        label خالی ممنوع؛ perms فقط کلیدهای معتبر کاتالوگ."""
+        old = await self.get_role(key)
+        if not old:
+            return None, 'not_found'
+        valid = await self._valid_perm_keys()
+        updates = {}
+        for field in self._ROLE_EDITABLE:
+            if field not in changes or changes[field] is None:
+                continue
+            val = changes[field]
+            if field == 'label':
+                val = str(val).strip()
+                if not val or len(val) > 60:
+                    return None, 'label_invalid'
+            elif field == 'perms':
+                val = sorted({p for p in val if p in valid})
+            elif field == 'priority':
+                val = max(1, min(999, int(val)))
+            updates[field] = val
+        if not updates:
+            return old, None
+        updates['updated_at'] = datetime.now().isoformat()
+        updates['updated_by'] = actor
+        await self.roles.update_one({'_id': key}, {'$set': updates})
+        return await self.get_role(key), None
+
+    async def delete_role(self, key: str):
+        """حذف نقش — گاردها (§۶): system و نقشِ دارای کاربر حذف‌ناپذیر."""
+        role = await self.get_role(key)
+        if not role:
+            return False, 'not_found', 0
+        if role.get('system'):
+            return False, 'system_role', 0
+        count = 0
+        async for doc in self.user_roles.find({}):
+            if key in (doc.get('roles') or []):
+                count += 1
+        if count:
+            return False, 'in_use', count
+        await self.roles.delete_many({'_id': key})
+        return True, '', 0
+
+    async def users_count_by_role(self) -> dict:
+        counts = {}
+        async for doc in self.user_roles.find({}):
+            for key in (doc.get('roles') or []):
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    # ──────────────────────────────────────────────────
+    #  تخصیص نقش به کاربر (چندنقشی — Union مجوزها)
+    # ──────────────────────────────────────────────────
+
+    async def _add_role_key(self, uid: int, key: str,
+                            scope_intake: str = None):
+        doc = await self.user_roles.find_one({'_id': uid})
+        roles = list((doc or {}).get('roles') or [])
+        changed = key not in roles
+        if changed:
+            roles.append(key)
+        updates = {'updated_at': datetime.now().isoformat()}
+        if changed:
+            updates['roles'] = roles
+        if scope_intake is not None:
+            updates['scope_intake'] = scope_intake
+        if changed or scope_intake is not None or not doc:
+            await self.user_roles.update_one(
+                {'_id': uid}, {'$set': updates}, upsert=True)
+        # 🛡 RBAC-W3 — پروجکشن میراثی هم‌زمان (§۵)
+        await self._sync_admin_role_projection(uid)
+        return changed
+
+    async def _remove_role_key(self, uid: int, key: str):
+        doc = await self.user_roles.find_one({'_id': uid})
+        roles = [r for r in ((doc or {}).get('roles') or [])
+                 if r != key]
+        await self.user_roles.update_one(
+            {'_id': uid},
+            {'$set': {'roles': roles,
+                      'updated_at': datetime.now().isoformat()}},
+            upsert=True)
+        # 🛡 RBAC-W3 — پروجکشن میراثی هم‌زمان (§۵)
+        await self._sync_admin_role_projection(uid)
+        return True
+
+    async def get_user_roles(self, uid: int) -> dict:
+        """نقش‌های کاربر: کلیدها + سندهای resolveشده + scope.
+
+        نقش ناموجود (custom حذف‌شده) در خروجی نمی‌آید ولی کلیدش
+        در keys باقی می‌ماند تا UI بتواند هشدار دهد."""
+        doc = await self.user_roles.find_one({'_id': uid})
+        keys = list((doc or {}).get('roles') or [])
+        roles = []
+        for key in keys:
+            role = await self.get_role(key)
+            if role:
+                roles.append(role)
+        return {
+            'keys': keys,
+            'roles': roles,
+            'scope_intake': (doc or {}).get('scope_intake'),
+        }
+
+    async def get_user_perms(self, uid: int) -> set:
+        """Union مجوزهای نقش‌های «فعال» — §۷ قرارداد (Multi Role).
+
+        مالک همیشه کل کاتالوگ را دارد (تنها استثنا — §۸)."""
+        valid = await self._valid_perm_keys()
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return set(valid)
+        perms = set()
+        info = await self.get_user_roles(uid)
+        for role in info['roles']:
+            if not role.get('active', True):
+                continue
+            perms.update(role.get('perms') or [])
+        return perms & valid
+
+    async def has_perm(self, uid: int, permission: str) -> bool:
+        """چک مرکزی دسترسی — تنها نقطه‌ی تصمیم Permission-Driven.
+
+        بای‌پسها (قفل سازگاری): ۱) مالک ADMIN_ID  ۲) users.role=='admin'
+        قدیمی (سوپریوزر میراثی که در چند مسیر قدیمی پذیرفته شده است)."""
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return True
+        u = await self.get_user(uid)
+        if u and u.get('role') == 'admin':
+            return True
+        return permission in await self.get_user_perms(uid)
+
+    async def sync_legacy_role_mirror(self, uid: int) -> str:
+        """نگه‌داشت users.role (mirror سازگاری) — §۵ Sync.
+
+        قانون: قوی‌ترین نقش سازگارِ قدیمی، از روی user_roles محاسبه
+        می‌شود؛ users.role=='admin' هرگز دست‌نخورده می‌ماند؛ اگر سند
+        user_roles وجود نداشته باشد (کاربر دست‌نخورده‌ی RBAC) هیچ
+        تغییری نمی‌دهد ⇒ هیچ downgrade بی‌دلیلی ممکن نیست."""
+        doc = await self.user_roles.find_one({'_id': uid})
+        if not doc:
+            return ''
+        user = await self.get_user(uid)
+        cur = (user or {}).get('role', 'student')
+        if cur == 'admin':
+            return cur
+        info = await self.get_user_roles(uid)
+        keys = info['keys']
+        perms = await self.get_user_perms(uid)
+        target = 'student'
+        if 'content_admin' in keys or 'content.manage' in perms:
+            target = 'content_admin'
+        elif 'support' in keys or 'tickets.reply' in perms:
+            target = 'support'
+        if target != cur:
+            await self.update_user(uid, {'role': target})
+        return target
+
+    async def _sync_admin_role_projection(self, uid: int) -> None:
+        """پروجکشن admin_roles (تک‌نقشی میراثی) از روی user_roles
+        (چندنقشی) — §۵ Sync قرارداد: منوهای ربات که مدل قدیمی را
+        می‌خوانند برای کلیدهای legacy همیشه درست می‌مانند.
+        پایداری: نقش فعلی admin_roles اگر هنوز تخصیص‌یافته است ابقا
+        می‌شود؛ در غیر این صورت اولین کلید legacy از لیست کاربر."""
+        doc = await self.user_roles.find_one({'_id': uid})
+        keys = list((doc or {}).get('roles') or [])
+        legacy_keys = [k for k in keys if k in self.ROLE_LABELS]
+        cur = await self.admin_roles.find_one({'_id': uid})
+        cur_role = (cur or {}).get('role')
+        if cur_role and cur_role in legacy_keys:
+            primary = cur_role
+        elif legacy_keys:
+            primary = legacy_keys[0]
+        else:
+            primary = None
+        if primary is None:
+            if cur is not None:
+                await self.admin_roles.delete_many({'_id': uid})
+            return
+        scope = (doc or {}).get('scope_intake')
+        if cur and cur_role == primary \
+           and cur.get('scope_intake') == scope:
+            return  # بدون تغییر — صفر نویز نوشتاری
+        await self.admin_roles.update_one(
+            {'_id': uid},
+            {'$set': {
+                'role':         primary,
+                'scope_intake': scope,
+                'added_by':     'rbac',
+                'added_at':     datetime.now().isoformat(),
+            }},
+            upsert=True,
+        )
 
     # ══════════════════════════════════════════════════
     #  لاگ فعالیت حساس (audit_logs)
