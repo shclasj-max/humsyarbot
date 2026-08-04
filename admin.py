@@ -36,6 +36,15 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
     if uid is not None and uid != ADMIN_ID:
         role_doc = await db.get_admin_role(uid)
         role = role_doc.get('role') if role_doc else None
+        # 🛡 RBAC-W3 (افزایشی): بدون نقش میراثی ولی با مجوز RBAC —
+        # دیدِ منو از Permission حدس زده می‌شود (§۸ Permission-Driven)
+        if role is None:
+            if await db.has_perm(uid, 'content.manage'):
+                role = 'content_admin'
+            elif await db.has_perm(uid, 'content.scoped'):
+                role = 'content_scoped'
+            elif await db.has_perm(uid, 'tickets.reply'):
+                role = 'support'
 
     # نقش پشتیبان: منوی بسیار محدود
     if role == 'support':
@@ -1805,6 +1814,9 @@ async def admin_broadcast_handler(update: Update, context: ContextTypes.DEFAULT_
     if uid != ADMIN_ID:
         role_doc = await db.get_admin_role(uid)
         perms = db.ROLE_PERMISSIONS.get(role_doc.get('role', ''), set()) if role_doc else set()
+        # 🛡 RBAC-W3 — بای‌پس Permission-Driven برای نقش‌های جدید
+        if 'broadcast' not in perms:
+            perms = set() if not await db.has_perm(uid, 'broadcast.send') else {'broadcast'}
         if 'broadcast' not in perms:
             return
     if context.user_data.get('mode') != 'broadcast':
