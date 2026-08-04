@@ -1410,6 +1410,16 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"migrate_mark_existing_ref_files_notified error: {e}")
 
+    # 🛡 موج RBAC-W1 — بذر + مهاجرت هر دو idempotent‌اند (§۱۰ قرارداد):
+    # اجرای تکراری هیچ داده/ویرایش دستی‌ای را بازنویسی نمی‌کند و خطای
+    # این مرحله نباید مانع بالا آمدن ربات شود.
+    try:
+        seeded = await db.ensure_rbac_seed()
+        migrated = await db.rbac_migrate_users()
+        logger.info(f"🛡 RBAC seed: {seeded} — migrate: {migrated}")
+    except Exception as e:
+        logger.error(f"rbac seed/migrate error: {e}")
+
     # FIX جدید: افزودن یک‌باره‌ی سؤالات FAQ اشتراک/کپی‌رایت
     try:
         await db.seed_subscription_copyright_faqs()
