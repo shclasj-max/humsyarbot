@@ -103,6 +103,22 @@ async def get_admin_user(user=Depends(get_current_user)) -> dict:
     return user
 
 
+def require_perm(permission: str):
+    """🛡 گیت مجوز RBAC — موج W1 (قرارداد §۸: تصمیم فقط با Permission).
+
+    هر روتر جدید باید به‌جای چسبیدن به role/ADMIN_ID، از این کارخانه
+    استفاده کند: Depends(require_perm('roles.manage'))
+    بای‌پسها (قفل سازگاری، داخل db.has_perm): مالک + role=='admin' میراثی.
+    رفتار روی عدم دسترسی دقیقاً مثل گیت‌های فعلی: 403و detail فارسی."""
+    async def _guard(user=Depends(get_current_user)) -> dict:
+        if await db.has_perm(user["id"], permission):
+            return user
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    _guard.__name__ = f"require_perm_{permission.replace('.', '_')}"
+    return _guard
+
+
 async def get_content_admin_user(user=Depends(get_current_user)) -> dict:
     role = user["_db"].get("role", "student")
     if user["id"] != ADMIN_ID and role not in ("admin", "content_admin"):
