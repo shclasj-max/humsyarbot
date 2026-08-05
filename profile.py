@@ -6,6 +6,7 @@
 """
 import os
 import logging
+from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes, ConversationHandler
 from database import db
@@ -31,10 +32,19 @@ def _profile_text(user: dict, stats: dict, open_tickets: int, sub_line: str = ''
     sid       = user.get('student_id', '') or '—'
     intake    = user.get('intake', '') or 'ثبت نشده'
 
+    # 🏷 Identity v1 — لقب + حریم نمایش نام واقعی (سینک با مینی‌اپ)
+    nick      = (user.get('nickname') or '').strip()
+    show_real = user.get('show_real_name') is not False
+    nick_line = escape(nick) if nick else '«ثبت نشده»'
+    priv_line = ('نام واقعی هم دیده می‌شود 👁'
+                 if show_real else 'فقط لقب دیده می‌شود 🔒')
+
     return (
         "👤 <b>پروفایل من</b>\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"📛 <b>نام:</b>  {user.get('name', '')}\n"
+        f"🏷 <b>لقب:</b>  {nick_line}\n"
+        f"👁 <b>نمایش عمومی:</b>  {priv_line}\n"
         f"🎓 <b>شماره دانشجویی:</b>  {sid}\n"
         f"📅 <b>ورودی:</b>  {intake}\n"
         f"👥 <b>گروه:</b>  گروه {user.get('group', '')}\n"
@@ -57,11 +67,20 @@ def _profile_text(user: dict, stats: dict, open_tickets: int, sub_line: str = ''
     )
 
 
-def _profile_keyboard() -> InlineKeyboardMarkup:
+def _profile_keyboard(user: dict = None) -> InlineKeyboardMarkup:
+    # 🏷 Identity v1 — برچسب سوییچ حریم از سند کاربر (سینک با مینی‌اپ)
+    show_real = (user or {}).get('show_real_name') is not False
+    priv_btn  = InlineKeyboardButton(
+        "🔒 پنهان‌سازی نام واقعی" if show_real else "👁 نمایش نام واقعی",
+        callback_data='profile:toggle_privacy')
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✏️ ویرایش نام",          callback_data='profile:edit_name'),
             InlineKeyboardButton("🎓 ویرایش شماره دانشجویی", callback_data='profile:edit_sid'),
+        ],
+        [
+            InlineKeyboardButton("🏷 تغییر لقب", callback_data='profile:edit_nick'),
+            priv_btn,
         ],
         [
             InlineKeyboardButton("👥 تغییر گروه",  callback_data='profile:edit_group'),
@@ -108,7 +127,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             _profile_text(user, stats, open_t, sub_line),
             parse_mode='HTML',
-            reply_markup=_profile_keyboard()
+            reply_markup=_profile_keyboard(user)
         )
 
     # ── 👑 Prestige: ۶ نشان اخیر (Spec v3 — منوی پروفایل) ──
@@ -193,6 +212,80 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
+    # ── 🏷 Identity v1: ویرایشگر لقب (سینک با مینی‌اپ — همان db.set_nickname) ──
+    elif action == 'edit_nick':
+        user = await db.get_user(uid) or {}
+        nick = (user.get('nickname') or '').strip()
+        st   = await db.nickname_status(uid, user)
+        cfg  = await db.get_identity_config()
+        buttons = []
+        if nick:
+            buttons.append([InlineKeyboardButton(
+                "🗑 حذف لقب", callback_data='profile:clear_nick')])
+        if not st['can_change_nickname']:
+            # Cooldown فعال — فقط حذف آزاد است (مثل مینی‌اپ)
+            next_fa = fmt_jalali_dt(
+                st['next_change_at'] or '', with_time=False) or '—'
+            buttons.append([InlineKeyboardButton(
+                "🔙 بازگشت", callback_data='profile:main')])
+            await query.edit_message_text(
+                "🏷 <b>لقب</b>\n"
+                "━━━━━━━━━━━━━━━━\n\n"
+                f"لقب فعلی: <b>{escape(nick) or '—'}</b>\n\n"
+                f"⏳ تغییر بعدی لقب از <b>{next_fa}</b> ممکن می‌شود.\n"
+                "<i>حذف لقب همیشه آزاد است.</i>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(buttons))
+            return
+        context.user_data['profile_edit'] = 'nickname'
+        context.user_data['mode']         = 'profile_edit'
+        mn  = int(cfg.get('min_length', 3))
+        mx  = int(cfg.get('max_length', 24))
+        cd  = int(cfg.get('cooldown_days', 30))
+        buttons.append([InlineKeyboardButton(
+            "❌ لغو", callback_data='profile:cancel_edit')])
+        await query.edit_message_text(
+            "🏷 <b>تغییر لقب</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"لقب فعلی: <b>{escape(nick) if nick else '—'}</b>\n\n"
+            "لقب جدید را بنویسید:\n"
+            f"▫️ {mn} تا {mx} نویسه — فارسی/انگلیسی/عدد\n"
+            "▫️ لینک، شماره تماس و آیدی تلگرام ممنوع\n"
+            f"▫️ پس از تغییر، تا {cd} روز قفل می‌شود!\n\n"
+            "<i>نام واقعی در نمره، حضور و گزارش‌ها همیشه"
+            " ثابت می‌ماند.</i>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif action == 'clear_nick':
+        ok, err, info = await db.set_nickname(
+            uid, '', changed_by='user', reason='ربات تلگرام')
+        await query.answer(
+            "✅ لقب پاک شد؛ نام واقعی نمایش داده می‌شود."
+            if ok else f"⚠️ {db.nick_error_text(err, info)}",
+            show_alert=True)
+        user, stats, open_t = await _get_profile_data(uid)
+        await query.edit_message_text(
+            _profile_text(user, stats, open_t),
+            parse_mode='HTML',
+            reply_markup=_profile_keyboard(user))
+
+    # ── 🏷 Identity v1: سوییچ نمایش اسم واقعی (همان فیلد مینی‌اپ) ──
+    elif action == 'toggle_privacy':
+        user     = await db.get_user(uid) or {}
+        was_on   = user.get('show_real_name') is not False
+        await db.set_show_real_name(uid, not was_on)
+        await query.answer(
+            "🔒 در فضای عمومی فقط لقب نمایش داده می‌شود."
+            if was_on else
+            "👁 نام واقعی هم نمایش داده می‌شود.",
+            show_alert=True)
+        user, stats, open_t = await _get_profile_data(uid)
+        await query.edit_message_text(
+            _profile_text(user, stats, open_t),
+            parse_mode='HTML',
+            reply_markup=_profile_keyboard(user))
+
     elif action == 'cancel_edit':
         context.user_data.pop('profile_edit', None)
         context.user_data.pop('mode', None)
@@ -200,7 +293,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             _profile_text(user, stats, open_t),
             parse_mode='HTML',
-            reply_markup=_profile_keyboard()
+            reply_markup=_profile_keyboard(user)
         )
 
     elif action == 'edit_group':
@@ -235,7 +328,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             _profile_text(user, stats, open_t),
             parse_mode='HTML',
-            reply_markup=_profile_keyboard()
+            reply_markup=_profile_keyboard(user)
         )
 
     elif action == 'edit_intake':
@@ -271,7 +364,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             _profile_text(user, stats, open_t),
             parse_mode='HTML',
-            reply_markup=_profile_keyboard()
+            reply_markup=_profile_keyboard(user)
         )
 
 
@@ -324,6 +417,33 @@ async def profile_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 InlineKeyboardButton("👤 مشاهده پروفایل", callback_data='profile:main')
             ]])
         )
+
+    # 🏷 Identity v1 — ورود متن لقب (Validation همان db — سینک با مینی‌اپ)
+    elif field == 'nickname':
+        ok, err, info = await db.set_nickname(
+            uid, text, changed_by='user', reason='ربات تلگرام')
+        if not ok:
+            await update.message.reply_text(
+                f"⚠️ {db.nick_error_text(err, info)}\n\n"
+                "دوباره بنویسید یا «❌ لغو» را بزنید:")
+            return
+        context.user_data.pop('profile_edit', None)
+        context.user_data.pop('mode', None)
+        if info.get('nickname'):
+            msg = (
+                f"✅ لقب ثبت شد: <b>{escape(info['nickname'])}</b>\n\n"
+                "از این پس در رتبه‌بندی، فید و نشان‌ها همین نام دیده می‌شود.\n"
+                "<i>نام واقعی در نمره و گزارش‌ها ثابت می‌ماند.</i>"
+            )
+        else:
+            msg = "✅ لقب پاک شد؛ نام واقعی نمایش داده می‌شود."
+        await update.message.reply_text(
+            msg,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("👤 مشاهده پروفایل", callback_data='profile:main')
+            ]])
+        )
     else:
         context.user_data.pop('profile_edit', None)
         context.user_data.pop('mode', None)
@@ -340,5 +460,5 @@ async def show_profile_msg(update: Update):
     await update.message.reply_text(
         _profile_text(user, stats, open_t, sub_line),
         parse_mode='HTML',
-        reply_markup=_profile_keyboard()
+        reply_markup=_profile_keyboard(user)
     )
