@@ -6,6 +6,7 @@
 import os
 import asyncio
 import logging
+from html import escape
 from datetime import date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -161,7 +162,8 @@ async def _build_leaderboard_text(uid: int) -> tuple:
     lines   = ["🏆 <b>جدول برترین‌ها</b>\n━━━━━━━━━━━━━━━━\n"]
     medals  = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
     for i, u in enumerate(leaders):
-        name    = u.get('name', 'کاربر')
+        # 🏷 Identity v1 — نام نمایشی (لقب؟لقب:نام واقعی)، سینک با مینی‌اپ
+        name    = escape(db.display_name_of(u) or 'کاربر')
         correct = int(u.get('correct_answers', 0) or 0)
         total   = int(u.get('total_answers', 0) or 0)
         pct     = round(correct / total * 100) if total > 0 else 0
