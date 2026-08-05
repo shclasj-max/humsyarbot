@@ -1904,11 +1904,11 @@ async def design(
             "creator_id":
                 user["id"],
 
+            # 🏷 Identity v1 — سطح اجتماعی: display_name
             "creator_name":
-                database_user.get(
-                    "name",
-                    "",
-                ),
+                db.display_name_of(database_user)
+                if isinstance(database_user, Mapping)
+                else "",
 
             "approved":
                 privileged,
