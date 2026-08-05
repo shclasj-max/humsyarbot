@@ -2377,6 +2377,7 @@ async def _show_user_detail(query, context, target_uid: int):
     text = (
         f"👤 <b>پروفایل کاربر</b>\n━━━━━━━━━━━━━━━━\n\n"
         f"📛 نام: <b>{user.get('name','')}</b>\n"
+        f"🏷 لقب: <b>{user.get('nickname') or '—'}</b>\n"  # 🏷 Identity v1
         f"🎓 شماره: <code>{user.get('student_id','') or '—'}</code>\n"
         f"👥 گروه: <b>{user.get('group','')}</b>\n"
         f"📱 یوزرنیم: {uname}\n"
