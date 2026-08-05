@@ -101,25 +101,8 @@ async def update_name(body: NameUpdate, user=Depends(get_current_user)):
     return {"ok": True, "name": name}
 
 
-# 🏷 Identity v1 — پیام‌های خطای لقب (همه فارسی، سمت سرور)
-_NICK_ERRORS = {
-    "empty":        "لقب خالی است",
-    "too_short":    "لقب کوتاه است (حداقل طول از تنظیمات)",
-    "too_long":     "لقب بلند است (حداکثر از تنظیمات)",
-    "bad_chars":    "فقط حروف فارسی/انگلیسی، عدد، فاصله، _ و - و ایموجی محدود مجاز است",
-    "emoji_spam":   "بیش از حد ایموجی (حداکثر ۳ عدد)",
-    "emoji_only":   "لقب نمی‌تواند فقط ایموجی باشد",
-    "emoji_denied": "استفاده از ایموجی در لقب خاموش است",
-    "space_denied": "فاصله در لقب مجاز نیست",
-    "link_denied":  "لینک در لقب مجاز نیست",
-    "phone_denied": "شماره تماس در لقب مجاز نیست",
-    "tg_denied":    "آیدی/اشاره تلگرامی در لقب مجاز نیست",
-    "reserved":     "این لقب رزرو شده است",
-    "blacklisted":  "این لقب مجاز نیست",
-    "taken":        "این لقب قبلاً انتخاب شده است",
-    "cooldown":     "فعلاً نمی‌توانی لقب را تغییر بدهی (Cooldown)",
-    "not_found":    "کاربر پیدا نشد",
-}
+# 🏷 Identity v1 — پیام‌های خطای لقب از db.NICK_ERROR_FA می‌آیند
+# (تک‌منبع مشترک API/Bot — §یک منبع واحد)
 
 
 class NicknameUpdate(BaseModel):
@@ -137,12 +120,10 @@ async def update_nickname(
         user["id"], body.nickname, changed_by="user",
     )
     if not ok:
-        detail = _NICK_ERRORS.get(err, err)
-        if err == "cooldown" and info.get("next_change_at"):
-            detail = (
-                f"{detail} — از {info['next_change_at'][:10]} به بعد"
-            )
-        raise HTTPException(status_code=422, detail=detail)
+        raise HTTPException(
+            status_code=422,
+            detail=db.nick_error_text(err, info),
+        )
     return {
         "ok": True,
         "nickname": info.get("nickname"),
