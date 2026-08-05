@@ -62,6 +62,9 @@ async def get_dashboard(user=Depends(get_current_user)):
     return {
         "user": {
             "name": _text(db_user.get("name")),
+            # 🏷 Identity v1 (افزایشی)
+            "nickname": db_user.get("nickname"),
+            "display_name": db.display_name_of(db_user),
             "intake": _text(db_user.get("intake")),
             "group": group,
             "role": role or "student",
@@ -111,7 +114,12 @@ async def leaderboard(
             result.append(
                 {
                     "rank": len(result) + 1,
-                    "name": _text(item.get("name"), "کاربر") or "کاربر",
+                    # 🏷 Identity v1 — سطح اجتماعی Leaderboard:
+                    # display_name (بدون کوئری اضافه — سند کامل اینجاست)
+                    "name": _text(
+                        item.get("nickname") or item.get("name"),
+                        "کاربر",
+                    ) or "کاربر",
                     "correct": correct,
                     "total": total,
                     "percent": min(100, percent),
