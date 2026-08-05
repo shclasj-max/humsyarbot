@@ -4926,6 +4926,35 @@ class DB:
             return nick
         return (user.get('name') or '').strip() or 'کاربر هامزیار'
 
+    # پیام‌های فارسی خطای لقب — تک‌منبع مشترک API و Bot (§یک منبع واحد)
+    NICK_ERROR_FA = {
+        'empty':        'لقب خالی است',
+        'too_short':    'لقب کوتاه است (حداقل طول از تنظیمات)',
+        'too_long':     'لقب بلند است (حداکثر از تنظیمات)',
+        'bad_chars':    'فقط حروف فارسی/انگلیسی، عدد، فاصله، _ و - و ایموجی محدود مجاز است',
+        'emoji_spam':   'بیش از حد ایموجی (حداکثر ۳ عدد)',
+        'emoji_only':   'لقب نمی‌تواند فقط ایموجی باشد',
+        'emoji_denied': 'استفاده از ایموجی در لقب خاموش است',
+        'space_denied': 'فاصله در لقب مجاز نیست',
+        'link_denied':  'لینک در لقب مجاز نیست',
+        'phone_denied': 'شماره تماس در لقب مجاز نیست',
+        'tg_denied':    'آیدی/اشاره تلگرامی در لقب مجاز نیست',
+        'reserved':     'این لقب رزرو شده است',
+        'blacklisted':  'این لقب مجاز نیست',
+        'taken':        'این لقب قبلاً انتخاب شده است',
+        'cooldown':     'فعلاً نمی‌توانی لقب را تغییر بدهی (Cooldown)',
+        'not_found':    'کاربر پیدا نشد',
+    }
+
+    def nick_error_text(self, err: str, info: dict = None) -> str:
+        """متن فارسی خطای لقب (+ تاریخ در Cooldown) — مشترک API/Bot."""
+        info = info or {}
+        detail = self.NICK_ERROR_FA.get(err, err or 'خطای نامشخص')
+        if err == 'cooldown' and info.get('next_change_at'):
+            detail = (f"{detail} — "
+                      f"از {str(info['next_change_at'])[:10]} به بعد")
+        return detail
+
     async def get_identity_config(self) -> dict:
         """تنظیمات لایه‌ی هویت — قابل تغییر بدون Deploy (§Settings)."""
         doc = await self.settings.find_one({'_id': 'identity_config'})
