@@ -143,6 +143,9 @@ async def list_users(admin=Depends(get_admin_user), search: Optional[str]=Query(
     }
     users = await db.users.find(q, _projection).sort("registered_at",-1).to_list(500)
     return {"users":[{"id":u.get("user_id"),"name":u.get("name",""),
+        # 🏷 Identity v1 — ادمین همیشه هر دو هویت را می‌بیند (§۳)
+        "nickname": u.get("nickname"),
+        "display_name": db.display_name_of(u),
         "student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
         "approved":u.get("approved",False),"suspended":u.get("suspended",False),
@@ -159,7 +162,10 @@ async def pending_users(admin=Depends(get_admin_user)):
 async def user_detail(uid: int, admin=Depends(get_admin_user)):
     u = await db.get_user(uid)
     if not u: raise HTTPException(404, "کاربر پیدا نشد")
-    return {"user":{"id":u.get("user_id"),"name":u.get("name",""),"student_id":u.get("student_id",""),
+    return {"user":{"id":u.get("user_id"),"name":u.get("name",""),
+        "nickname": u.get("nickname"),
+        "display_name": db.display_name_of(u),
+        "student_id":u.get("student_id",""),
         "group":u.get("group",""),"intake":u.get("intake",""),"role":u.get("role","student"),
         "approved":u.get("approved",False),"suspended":u.get("suspended",False),
         "registered_at":u.get("registered_at","")[:10],"total_answers":u.get("total_answers",0),
@@ -332,6 +338,7 @@ class UserPatch(BaseModel):
     name: Optional[str]=None; group: Optional[str]=None
     intake: Optional[str]=None; student_id: Optional[str]=None
     role: Optional[str]=None
+    nickname: Optional[str]=None   # 🏷 Identity v1
 
 @router.patch("/users/{uid}")
 async def edit_user(uid: int, body: UserPatch, admin=Depends(get_admin_user)):
@@ -343,6 +350,17 @@ async def edit_user(uid: int, body: UserPatch, admin=Depends(get_admin_user)):
     if body.role       is not None:
         if body.role not in ("student","content_admin","support"): raise HTTPException(422,"نقش نامعتبر")
         updates["role"]=body.role
+    # 🏷 Identity v1 — لقب از مسیر IdentityService (اعتبارسنجی
+    # کامل + bypass Cooldown برای ادمین + Audit خودکار در db)
+    if body.nickname is not None:
+        actor_id = admin["id"] if isinstance(admin, dict) else 0
+        ok, err, _info = await db.set_nickname(
+            uid, body.nickname,
+            changed_by=f"admin:{actor_id}",
+            reason="پنل مدیریت",
+        )
+        if not ok:
+            raise HTTPException(422, f"لقب نامعتبر: {err}")
     if updates:
         await db.update_user(uid,updates)
         await _audit(admin, "ویرایش اطلاعات کاربر", "Users", severity="WARNING",
