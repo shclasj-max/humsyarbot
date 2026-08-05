@@ -708,7 +708,21 @@ async def handle_question_answer(update: Update, context: ContextTypes.DEFAULT_T
 
     correct_idx = q_doc.get('correct_answer', 0)
     is_correct  = (sel == correct_idx)
+
+    # 👑 Prestige (موج P0): پیش‌چک یک‌بارهرسؤال → ثبت → رویداد موتور
+    try:
+        _ft = (await db.answers.find_one(
+            {'user_id': uid, 'question_id': qid}, {'_id': 1})) is None
+    except Exception:
+        _ft = True
     await db.save_answer(uid, qid, sel, is_correct)
+    try:
+        _ps_ev = await db.prestige_event(uid, 'answer', {
+            'is_correct': is_correct,
+            'difficulty': q_doc.get('difficulty', ''),
+            'first_time': _ft})
+    except Exception:
+        _ps_ev = None
 
     quiz = context.user_data.setdefault('quiz', {})
     if is_correct:
@@ -729,6 +743,26 @@ async def handle_question_answer(update: Update, context: ContextTypes.DEFAULT_T
             f"{q_doc['question']}\n\n{options_text}")
     if expl:
         text += f"\n💡 <b>توضیح:</b> {expl}"
+
+    # 👑 Prestige: خط XP درون همین پیام (بازخورد تعاملی — اعلان جداگانه‌ی جدیدی نیست)
+    if _ps_ev and not _ps_ev.get('ignored'):
+        _d = _ps_ev.get('display', {})
+        _e = _ps_ev.get('events', {})
+        if _ps_ev.get('xp_gained', 0) > 0:
+            text += (f"\n\n⚡ +<b>{_ps_ev['xp_gained']}</b> XP"
+                     f" · {_d.get('icon','')} {_d.get('title','')} {_d.get('stars','')}")
+            if _e.get('streak_new_day') and _ps_ev['streak']['current'] >= 2:
+                text += f" · 🔥 {_ps_ev['streak']['current']} روز"
+        if _e.get('rank_up'):
+            _ru = _e['rank_up']
+            text += (f"\n\n🎉 <b>تبریک! ارتقای رنک</b>\n"
+                     f"حالا {_ru['icon']} <b>{_ru['to']}</b> هستی! 🛡 سپر ارتقا هم فعال شد.")
+        elif _e.get('div_up'):
+            _du = _e['div_up']
+            text += (f"\n\n🎉 <b>ارتقا!</b> حالا {_du['icon']} {_du['rank']}"
+                     f" <b>{_du['roman']}</b> هستی!")
+        elif _e.get('challenge_ready'):
+            text += "\n\n⭐ <b>چالش ارتقا آماده است!</b> برای رنک بعدی باید چالش بزنی."
 
     # تعیین دکمه بازگشت صحیح
     mode    = quiz.get('mode', 'free')
@@ -1331,7 +1365,8 @@ async def _do_insert_manual_question(update, context, q: dict, uid: int):
 
     # دریافت نام طراح
     creator_user = await db.get_user(uid)
-    creator_name = creator_user.get('name', '') if creator_user else ''
+    # 🏷 Identity v1 — سطح اجتماعی طراح: display_name (اسنپ‌شات لحظه‌ای)
+    creator_name = db.display_name_of(creator_user) if creator_user else ''
 
     result = await db.questions.insert_one({
         'lesson':         q.get('lesson', ''),
@@ -1572,7 +1607,8 @@ async def _do_insert_ai_question(query, context):
     auto     = is_ca or is_admin
 
     creator_user = await db.get_user(uid)
-    creator_name = creator_user.get('name', '') if creator_user else ''
+    # 🏷 Identity v1 — سطح اجتماعی طراح: display_name (اسنپ‌شات لحظه‌ای)
+    creator_name = db.display_name_of(creator_user) if creator_user else ''
 
     await db.questions.insert_one({
         'lesson':         context.user_data.get('ai_q_lesson', ''),
