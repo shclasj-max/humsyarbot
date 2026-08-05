@@ -119,6 +119,9 @@ class DB:
                 self.tickets.create_index([('user_id', 1), ('status', 1)], background=True),
                 self.qbank_files.create_index([('lesson', 1), ('topic', 1)], background=True),
                 self.intakes.create_index('code', unique=True, background=True),
+                # 🏷 Identity v1 — یکتایی لقب case-insensitive:
+                # unique + sparse (فقط اسنادی که فیلد دارند/غیرnull)
+                self.users.create_index('nickname_normalized', unique=True, sparse=True, background=True),
                 # 🚀 موج ۴.۶۰ — پوشش کوئری‌های داغ پنل اشتراک:
                 # فیلتر status + مرتب‌سازی submitted_at/end_date و
                 # تاریخچه‌ی پرداخت هر کاربر. بدون این‌ها = Full
@@ -323,6 +326,13 @@ class DB:
         regex = {'$regex': re.escape(raw), '$options': 'i'}
         or_clauses.append({'name': regex})
         or_clauses.append({'student_id': regex})
+
+        # ۴) 🏷 Identity v1 — جست‌وجو هم‌زمان روی لقب:
+        # هم substring روی خود لقب، هم تطبیق case-insensitive روی
+        # نرمال‌شده (برای پیدا‌کردن دقیق یک لقب)
+        or_clauses.append({'nickname': regex})
+        or_clauses.append({'nickname_normalized': {
+            '$regex': re.escape(raw.lower()), '$options': 'i'}})
 
         return {'$or': or_clauses}
 
@@ -3058,7 +3068,9 @@ class DB:
                     continue
                 rows.append({
                     'uid': int(raw2.get('user_id', 0) or 0),
-                    'name': (raw2.get('name') or 'کاربر')
+                    # 🏷 Identity v1 — display_name + حفظ privacy
+                    # قدیمی (privacy_public=False ⇒ ناشناس، دست‌نخورده)
+                    'name': self.display_name_of(raw2)
                             if uu.get('privacy_public', True) else 'یک دانشجو',
                     'privacy': bool(uu.get('privacy_public', True)),
                     'value': v,
@@ -3197,9 +3209,10 @@ class DB:
             if uids:
                 try:
                     users = await self.users.find({'user_id': {'$in': uids}},
-                        {'user_id': 1, 'name': 1, 'privacy_public': 1}).to_list(len(uids))
+                        {'user_id': 1, 'name': 1, 'nickname': 1, 'privacy_public': 1}).to_list(len(uids))
+                    # 🏷 Identity v1 — فید اجتماعی با display_name
                     names = {d['user_id']:
-                             ((d.get('name') or 'کاربر') if d.get('privacy_public', True)
+                             (self.display_name_of(d) if d.get('privacy_public', True)
                               else 'یک دانشجو') for d in users}
                 except Exception:
                     pass
@@ -4875,6 +4888,296 @@ class DB:
             }},
             upsert=True,
         )
+
+    # ══════════════════════════════════════════════════
+    #  🏷 Identity Layer v1 — لقب (Nickname)
+    #  تک‌منبع نمایش نام (§۴): full_name=هویت واقعی (آموزش/
+    #  مدیریت)، nickname=هویت اجتماعی، display_name=آنچه
+    #  رابط‌ها نشان می‌دهند (nickname یا name). همه‌چیز
+    #  در همان سند users است ⇒ Hot Path صفر کوئری اضافه.
+    #  Future-ready: رنگ/تأیید/بج لقب = فقط توسعه‌ی
+    #  display_name_of، بدون Refactor.
+    # ══════════════════════════════════════════════════
+
+    # کلمات رزروشده (بذر — در identity_config قابل ویرایش است)
+    RESERVED_NICKNAMES = [
+        'admin', 'support', 'system', 'developer', 'moderator',
+        'bot', 'humsyar', 'هامزیار', 'مدیر', 'پشتیبانی', 'ادمین',
+    ]
+
+    IDENTITY_DEFAULTS = {
+        'min_length':       3,
+        'max_length':       24,
+        'cooldown_days':    30,
+        'allow_emoji':      True,
+        'allow_spaces':     True,
+        'blacklist':        [],
+        'reserved_words':   RESERVED_NICKNAMES,
+    }
+
+    def display_name_of(self, user: dict) -> str:
+        """🏷 تک‌منبع نمایش نام — SYNC (بدون کوئری، §Performance).
+
+        قانون §۳: لقب اگر هست، همان؛ وگرنه نام واقعی."""
+        if not isinstance(user, dict):
+            return 'کاربر هامزیار'
+        nick = (user.get('nickname') or '').strip()
+        if nick:
+            return nick
+        return (user.get('name') or '').strip() or 'کاربر هامزیار'
+
+    async def get_identity_config(self) -> dict:
+        """تنظیمات لایه‌ی هویت — قابل تغییر بدون Deploy (§Settings)."""
+        doc = await self.settings.find_one({'_id': 'identity_config'})
+        cfg = dict(self.IDENTITY_DEFAULTS)
+        if doc:
+            overrides = doc.get('config') or {}
+            for key in self.IDENTITY_DEFAULTS:
+                if key in overrides and overrides[key] is not None:
+                    cfg[key] = overrides[key]
+        return cfg
+
+    async def update_identity_config(self, patch: dict,
+                                     actor: int = 0) -> dict:
+        """به‌روزرسانی whitelist تنظیمات هویت (پنل ادمین)."""
+        allowed = set(self.IDENTITY_DEFAULTS)
+        clean = {k: v for k, v in (patch or {}).items() if k in allowed}
+        await self.settings.update_one(
+            {'_id': 'identity_config'},
+            {'$set': {**{f'config.{k}': v for k, v in clean.items()},
+                      'updated_by': actor,
+                      'updated_at': datetime.now().isoformat()}},
+            upsert=True,
+        )
+        return await self.get_identity_config()
+
+    # ── Normalize و Validate (کاملاً سمت سرور — §قوانین) ──
+
+    _INVISIBLE_CHARS = (
+        '​‌‍‎‏‪‫‬‭‮⁠'
+        '﻿᠎‌'
+    )
+
+    _EMOJI_RE = None   # lazy compile
+
+    @classmethod
+    def _emoji_pattern(cls):
+        if cls._EMOJI_RE is None:
+            import re as _re
+            cls._EMOJI_RE = _re.compile(
+                '[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍‏⁉‼™↔-↙'
+                '⤴-⤵�-�️]'
+            )
+        return cls._EMOJI_RE
+
+    def _norm_nick(self, raw: str) -> str:
+        """Normalize (§قوانین): NFKC (Ａｍｉｒ→Amir) + حذف
+        کاراکترهای نامرئی/Zero-Width + جمع‌کردن فاصله‌های اضافه + trim."""
+        import re
+        import unicodedata
+        text = unicodedata.normalize('NFKC', raw or '')
+        for ch in self._INVISIBLE_CHARS:
+            text = text.replace(ch, '')
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
+    def validate_nickname(self, raw: str, cfg: dict):
+        """اعتبارسنجی کامل لقب — خروجی: (ok, err, clean)
+
+        کنترل‌ها: طول، الفبا (فا/En/عدد/_/-/space)، سقف ایموجی،
+        HTML/Markdown/RTL-hack/Injection (از مسیر الفبا رد می‌شوند)،
+        لینک/تلفن/@آیدی، رزرو و بلک‌لیست (case-insensitive)."""
+        import re
+        clean = self._norm_nick(raw)
+
+        if not clean:
+            return False, 'empty', clean
+
+        # طول با شمارش یونیکد (بدون ایموجی‌ها هم طول کافی باشد؟ — خیر؛ کل)
+        min_len = int(cfg.get('min_length', 3))
+        max_len = int(cfg.get('max_length', 24))
+        if len(clean) < min_len:
+            return False, 'too_short', clean
+        if len(clean) > max_len:
+            return False, 'too_long', clean
+
+        # ایموجی — سقف ۳ عدد ضداسپم (§Emoji Spam)
+        emoji_hits = self._emoji_pattern().findall(clean)
+        if emoji_hits and not cfg.get('allow_emoji', True):
+            return False, 'emoji_denied', clean
+        if len(emoji_hits) > 3:
+            return False, 'emoji_spam', clean
+        if emoji_hits and len(clean) == len(emoji_hits) + (
+                ' ' in clean and clean.count(' ') or 0):
+            # فقط ایموجی/فاصله = بدون حرف ⇒ نام نیست
+            letters = self._emoji_pattern().sub('', clean).replace(' ', '')
+            if not letters:
+                return False, 'emoji_only', clean
+
+        if ' ' in clean and not cfg.get('allow_spaces', True):
+            return False, 'space_denied', clean
+
+        # الفبا — هرچیزی خارج از این‌ها (HTML/Markdown/@/لینک‌گرافی/
+        # کاراکترهای کنترل/اسکریپت) داری رد مستقیم
+        base = self._emoji_pattern().sub('', clean)
+        if not re.fullmatch(
+            r'[A-Za-z0-9_\-\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF ]+',
+            base,
+        ):
+            return False, 'bad_chars', clean
+
+        # لینک/تلفن/آیدی تلگرام (§Abuse Prevention)
+        low = clean.lower()
+        if re.search(r'(https?|www\.|t\.me|\.com|\.ir|\.net|\.org)', low):
+            return False, 'link_denied', clean
+        if re.search(r'\d[\d\s\-\.]{7,}\d', low):
+            return False, 'phone_denied', clean
+        if '@' in clean or 'تلگرام' in clean:
+            return False, 'tg_denied', clean
+
+        # رزرو + بلک‌لیست (case-insensitive)
+        canon = low
+        reserved = [str(w).lower() for w in cfg.get('reserved_words') or []]
+        blacklist = [str(w).lower() for w in cfg.get('blacklist') or []]
+        if canon in reserved:
+            return False, 'reserved', clean
+        for bad in blacklist:
+            if bad and bad in canon:
+                return False, 'blacklisted', clean
+        return True, '', clean
+
+    async def nickname_status(self, uid: int, user: dict = None) -> dict:
+        """وضعیت لقب کاربر برای API پروفایل — اگر `user` سند
+        آماده باشد از همان استفاده می‌شود (صفر کوئری اضافه)."""
+        if user is None:
+            user = await self.get_user(uid) or {}
+        cfg = await self.get_identity_config()
+        cool = int(cfg.get('cooldown_days', 30))
+        last = user.get('nickname_updated_at')
+        can_change = True
+        next_at = None
+        if last:
+            try:
+                from datetime import timedelta
+                last_dt = datetime.fromisoformat(str(last))
+                next_dt = last_dt + timedelta(days=cool)
+                if datetime.now() < next_dt:
+                    can_change = False
+                    next_at = next_dt.isoformat()
+            except ValueError:
+                pass
+        return {
+            'nickname':           user.get('nickname') or None,
+            'display_name':       self.display_name_of(user),
+            'can_change_nickname': can_change,
+            'next_change_at':     next_at,
+            'show_real_name':     user.get('show_real_name', True),
+            'cooldown_days':      cool,
+        }
+
+    async def set_nickname(self, uid: int, raw: str,
+                           changed_by: str = 'user',
+                           reason: str = ''):
+        """تنظیم/تغییر/پاک‌کردن لقب — خروجی: (ok, err, info)
+
+        • raw خالی ⇒ پاک‌کردن لقب (display به نام واقعی برمی‌گردد)
+        • Cooldown فقط برای خود کاربر؛ ادمین (changed_by!='user') بای‌پس
+        • History + display_name_cache + Audit (§Audit/§History)"""
+        user = await self.get_user(uid)
+        if not user:
+            return False, 'not_found', {}
+        cfg = await self.get_identity_config()
+        now = datetime.now().isoformat()
+        old_nick = user.get('nickname') or None
+
+        # پاک‌کردن لقب — بدون Cooldown و بدون Validation
+        if raw is None or not str(raw).strip():
+            await self.update_user(uid, {
+                'nickname':            None,
+                'nickname_normalized': None,
+                'nickname_updated_at': now,
+                'display_name_cache':  (user.get('name') or '').strip(),
+            })
+            await self.users.update_one(
+                {'user_id': uid},
+                {'$push': {'nickname_history': {
+                    'old': old_nick, 'new': None, 'at': now,
+                    'by': changed_by, 'reason': reason or 'clear',
+                }}},
+            )
+            await self._audit_nickname(uid, user, old_nick, None,
+                                       changed_by, 'حذف لقب')
+            return True, '', {'nickname': None,
+                              'display_name': (user.get('name') or '').strip()}
+
+        ok, err, clean = self.validate_nickname(raw, cfg)
+        if not ok:
+            return False, err, {'clean': clean}
+
+        # Cooldown — فقط برای خود کاربر (§تغییر لقب)
+        if changed_by == 'user':
+            status = await self.nickname_status(uid)
+            if not status['can_change_nickname']:
+                return False, 'cooldown', {
+                    'next_change_at': status['next_change_at']}
+
+        # یکتایی — case-insensitive روی nickname_normalized
+        canon = clean.lower()
+        clash = await self.users.find_one({
+            'nickname_normalized': canon,
+            'user_id': {'$ne': uid},
+        })
+        if clash:
+            return False, 'taken', {}
+
+        await self.update_user(uid, {
+            'nickname':            clean,
+            'nickname_normalized': canon,
+            'nickname_updated_at': now,
+            'display_name_cache':  clean,
+        })
+        await self.users.update_one(
+            {'user_id': uid},
+            {'$push': {'nickname_history': {
+                'old': old_nick, 'new': clean, 'at': now,
+                'by': changed_by, 'reason': reason or 'set',
+            }}},
+        )
+        await self._audit_nickname(uid, user, old_nick, clean,
+                                   changed_by, 'تغییر لقب')
+        return True, '', {'nickname': clean, 'display_name': clean}
+
+    async def _audit_nickname(self, uid: int, user: dict,
+                              old_nick, new_nick,
+                              changed_by: str, action: str):
+        """§Audit — هر تغییر لقب با before/after (خطا مسیر را نمی‌شکند)."""
+        try:
+            performer_id = uid
+            if changed_by.startswith('admin:'):
+                raw_id = changed_by.split(':', 1)[1]
+                if raw_id.isdigit():
+                    performer_id = int(raw_id)
+            performer = {} if performer_id == uid \
+                else (await self.get_user(performer_id) or {})
+            await self.log_action(
+                performer_id,
+                self.display_name_of(performer or user),
+                'student' if changed_by == 'user' else 'مدیر',
+                action,
+                module='Users', severity='INFO',
+                target_id=str(uid), target_type='user',
+                target_label=self.display_name_of(user),
+                before={'nickname': old_nick},
+                after={'nickname': new_nick},
+                tags=['identity'],
+            )
+        except Exception:
+            pass
+
+    async def set_show_real_name(self, uid: int, value: bool) -> bool:
+        """سوئیچ حریم خصوصی (§Privacy) — فقط نمایش را کنترل می‌کند."""
+        await self.update_user(uid, {'show_real_name': bool(value)})
+        return True
 
     # ══════════════════════════════════════════════════
     #  لاگ فعالیت حساس (audit_logs)
