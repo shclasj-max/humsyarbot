@@ -196,3 +196,19 @@ def campaign_cta_link(discount: dict) -> str:
     """🔗 Deep Link مینی‌اپ: صفحه‌ی اشتراک با کد پیش‌پُر‌شده."""
     code = discount.get('code', '')
     return f"/me/subscription?discount={code}" if code else '/me/subscription'
+
+
+def build_soldout_message(discount: dict) -> str:
+    """
+    ⛔ موج D2 — متن جایگزین کمپین پس از اتمام ظرفیت.
+    پیام‌های ارسالی‌ی کمپین با این متن (و بدون دکمه‌ی CTA) ادیت می‌شوند.
+    """
+    code = discount.get('code', '')
+    pct = _fa_int(discount.get('percent', 0))
+    return (
+        f"⛔ <b>ظرفیت کد تخفیف {code} تکمیل شد!</b>\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+        f"این کد ({pct}٪ تخفیف) به سقف استفاده رسید و دیگر فعال نیست. 🙏\n\n"
+        f"💡 نوتیفیکیشن «🎁 تخفیف‌ها» را روشن نگه دار تا "
+        f"کمپین بعدی را از دست ندهی."
+    )
