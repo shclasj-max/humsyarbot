@@ -1435,6 +1435,7 @@ async def start_discount_broadcast(
         import httpx
         sent = failed = blocked = 0
         cancelled = False
+        msg_refs = []  # ⛔ موج D2 — مرجع پیام‌های موفق برای ادیت «اتمام موجودی»
         base = f"https://api.telegram.org/bot{BOT_TOKEN}"
         reply_markup = {"inline_keyboard": kb_rows} if kb_rows else None
         async with httpx.AsyncClient(timeout=30) as cli:
@@ -1457,6 +1458,9 @@ async def start_discount_broadcast(
                         r = await cli.post(f"{base}/sendMessage", json=payload)
                         if r.status_code == 200 and r.json().get("ok"):
                             outcome = "ok"
+                            _mid = r.json().get("result", {}).get("message_id")
+                            if _mid:
+                                msg_refs.append({"c": uid, "m": _mid})
                             break
                         if r.status_code == 429:
                             # RetryAfter — صبر دقیق به اندازه‌ی اعلام تلگرام
@@ -1481,8 +1485,20 @@ async def start_discount_broadcast(
                 # گام‌بندی نرخ — الگوی _do_broadcast_send
                 await _asyncio.sleep(0.05)
                 if (i + 1) % 25 == 0 or (i + 1) == len(users):
+                    if msg_refs:
+                        try:
+                            await db.discount_bcast_add_msgs(bid, msg_refs)
+                        except Exception:
+                            pass
+                        msg_refs = []
                     await db.discount_bcast_update(bid, {
                         "sent": sent, "failed": failed, "blocked": blocked})
+        # خالی‌کردن مراجع باقی‌مانده (در صورت توقف زودهنگام)
+        if msg_refs:
+            try:
+                await db.discount_bcast_add_msgs(bid, msg_refs)
+            except Exception:
+                pass
         await db.discount_bcast_update(bid, {
             "status": "cancelled" if cancelled else "completed",
             "sent": sent, "failed": failed,
