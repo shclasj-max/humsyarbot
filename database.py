@@ -6332,6 +6332,20 @@ class DB:
                 except Exception:
                     pass
             return None
+        # ⛔ موج D2 — لحظه‌ی اتمام ظرفیت: فقط همین یک مصرف‌کننده گذار از
+        # max-1 به max را می‌بیند (فیلتر اتمیک تضمین می‌کند) ⇒ دقیقاً یک
+        # سیگنال. خروجی ربات (mini_app_outbox_job) متن کمپین‌های ارسالی
+        # را به «اتمام موجودی» ادیت می‌کند. نامحدود (۰) ⇒ هرگز.
+        try:
+            mu = int(d.get('max_uses', 0) or 0)
+            if mu > 0 and int(d.get('used_count', 0) or 0) >= mu:
+                await self.bot_notifs.insert_one({
+                    'type': 'signal', 'chat_id': 0,
+                    'text': f'__DISCOUNT_EXHAUSTED__:{code_u}',
+                    'sent': False, 'created_at': datetime.now().isoformat(),
+                })
+        except Exception:
+            pass  # سیگنال نباید مسیر خرید را بشکند
         return d
 
     async def discount_release(self, code: str, user_id: int = None):
@@ -6427,6 +6441,22 @@ class DB:
     async def discount_bcast_list(self, code: str, limit: int = 5) -> list:
         return await self.discount_bcasts.find(
             {'code': code}).sort('created_at', -1).to_list(limit)
+
+    # ⛔ موج D2 — ادیت «اتمام موجودی»: مرجع پیام‌های کمپین
+    async def discount_bcast_add_msgs(self, bid: str, refs: list):
+        """ثبت مرجع پیام‌های موفق کمپین — [{'c': chat_id, 'm': message_id}]
+        با $push ضمیمه می‌شود تا ادیت همگانیِ «اتمام موجودی» ممکن شود."""
+        if not refs:
+            return
+        await self.discount_bcasts.update_one(
+            {'broadcast_id': bid},
+            {'$push': {'sent_msgs': {'$each': refs}}})
+
+    async def discount_bcast_with_msgs(self, code: str) -> list:
+        """کمپین‌های این کد که حداقل یک مرجع پیام دارند (قابل ادیت)"""
+        return await self.discount_bcasts.find(
+            {'code': code, 'soldout_marked': {'$ne': True},
+             'sent_msgs.0': {'$exists': True}}).to_list(None)
 
     # ── وضعیت اشتراک هر کاربر (یک سند در هر کاربر، با _id = user_id) ──
     async def sub_get(self, user_id: int) -> dict:
