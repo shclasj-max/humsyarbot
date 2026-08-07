@@ -93,7 +93,8 @@ async def _show_plan_detail(query, context, plan_id: str, uid: int):
     discount_code = context.user_data.get('sub_discount_code')
     final_price = price
     if discount_code:
-        v = await db.discount_validate(discount_code)
+        # 🎟 موج D1 — اعتبارسنجی با plan_id + user_id (plan-targeting + per-user limit)
+        v = await db.discount_validate(discount_code, plan_id=str(plan['_id']), user_id=uid)
         if not v['ok']:
             context.user_data.pop('sub_discount_code', None)
             discount_code = None
@@ -186,20 +187,46 @@ async def _show_payment_details(query, context, plan_id: str):
 
 
 async def _activate_free_via_discount(query, context, plan: dict, discount_code: str):
-    """FIX جدید: مسیر کد تخفیف ۱۰۰٪ — بدون رسید، بدون بررسی ادمین، فعال‌سازی آنی"""
+    """FIX جدید: مسیر کد تخفیف ۱۰۰٪ — بدون رسید، بدون بررسی ادمین، فعال‌سازی آنی
+
+    🎟 موج D1 — ترتیب امن: validate مجدد → مصرف اتمیک → فعال‌سازی.
+    اگر در کسری از ثانیه‌ی بین انتخاب پلن و این لحظه ظرفیت پر شده باشد،
+    مصرف شکست می‌خورد و فعال‌سازی انجام نمی‌شود (نشتی ظرفیت = صفر)."""
     uid = query.from_user.id
     for k in ('sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code'):
         context.user_data.pop(k, None)
 
+    _percent = None
+    if discount_code:
+        # اعتبارسنجی دوباره‌ی سمت سرور (deep-link/prefill هم هرگز اعتماد نیست)
+        v = await db.discount_validate(discount_code, plan_id=str(plan['_id']), user_id=uid)
+        if not v.get('ok'):
+            await query.edit_message_text(
+                f"⏰ {v.get('reason', 'این کد تخفیف دیگر معتبر نیست.')}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💳 بازگشت به پلن‌ها", callback_data='sub:back')]]))
+            return
+        # مصرف اتمیک با user_id — ظرفیت سراسری ($expr) و سقف هر کاربر race-safe
+        consumed = await db.discount_consume(discount_code, user_id=uid)
+        if not consumed:
+            await query.edit_message_text(
+                "⏰ متأسفانه ظرفیت این کد همین حالا تکمیل شد.\n"
+                "بدون کد هم می‌تونی ادامه بدی 👇",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💳 مشاهده‌ی پلن‌ها", callback_data='sub:back')]]))
+            return
+        _percent = consumed.get('percent')
+
     await db.sub_activate(uid, plan['days'], plan['name'], source='payment',
                            granted_by=0, extend=True)
     if discount_code:
-        await db.discount_consume(discount_code)
         # ثبت به‌عنوان یک تراکنش approved با مبلغ صفر — برای آمار و تاریخچه
         pid = await db.sub_payment_create(
             user_id=uid, plan_id=str(plan['_id']), plan_name=plan['name'],
             price=plan['price'], final_price=0, screenshot_file_id='',
-            discount_code=discount_code,
+            discount_code=discount_code, discount_percent=_percent,
         )
         await db.sub_payment_decide(pid, approved=True, admin_id=0, note='کد تخفیف ۱۰۰٪ — خودکار')
 
@@ -233,7 +260,7 @@ async def _prompt_discount(query, context):
 
 async def discount_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text.strip().upper()
-    v = await db.discount_validate(code)
+    v = await db.discount_validate(code, user_id=update.effective_user.id)
     if not v['ok']:
         await update.message.reply_text(f"❌ {v['reason']}\n\nدوباره امتحان کن یا /cancel بزن.")
         return
@@ -244,6 +271,28 @@ async def discount_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         f"حالا یکی از پلن‌ها رو انتخاب کن:", parse_mode='HTML'
     )
     await show_paywall(update.message, update.effective_user.id)
+
+
+async def _discount_deep_link(query, context, code: str, uid: int):
+    """
+    🎟 موج D1 — CTA پیام کمپین (sub:dcode:CODE):
+    کد را از قبل در user_data قرار می‌دهد (Prefill) و کاربر مستقیم وارد
+    paywall می‌شود. validate نهایی هنگام انتخاب پلن و پرداخت Server-side
+    انجام می‌شود — این فقط ورود سریع است.
+    """
+    code = (code or '').strip().upper()
+    v = await db.discount_validate(code, user_id=uid)
+    if not v['ok']:
+        await query.edit_message_text(
+            f"⏰ <b>{v['reason']}</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💳 دیدن پلن‌های اشتراک", callback_data='sub:back')
+            ]]))
+        return
+    context.user_data['sub_discount_code'] = code
+    context.user_data.pop('sub_mode', None)
+    await show_paywall(query.message, uid, edit=True)
 
 
 # ══════════════════════════════════════════════════
@@ -273,10 +322,29 @@ async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     discount_code = context.user_data.get('sub_discount_code')
     photo = update.message.photo[-1]
 
+    # 🎟 موج D1 — مصرف کد در لحظه‌ی ثبت رسید (نه در تأیید ادمین) تا ظرفیت
+    # کد دوره‌ی انتظار را هم پوشش دهد. اگر در این لحظه ظرفیت پر/کد نامعتبر
+    # شده باشد، رسید باطل می‌شود تا کاربر با مبلغ اشتباه پرداخت نکند؛ در
+    # رد رسید می‌آید (discount_release).
+    discount_percent = None
+    if discount_code:
+        v = await db.discount_validate(discount_code, plan_id=str(plan['_id']), user_id=uid)
+        consumed = v.get('ok') and await db.discount_consume(discount_code, user_id=uid)
+        if not consumed:
+            for k in ('sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code'):
+                context.user_data.pop(k, None)
+            await update.message.reply_text(
+                "⚠️ کد تخفیفت همین حالا نامعتبر یا تکمیل ظرفیت شد — رسیدت ثبت نشد.\n"
+                "لطفاً قیمت را دوباره چک کن و در صورت تمایل رسید تازه بفرست.",
+            )
+            return
+        discount_percent = consumed.get('percent')
+
     pid = await db.sub_payment_create(
         user_id=uid, plan_id=str(plan['_id']), plan_name=plan['name'],
         price=plan['price'], final_price=final_price,
         screenshot_file_id=photo.file_id, discount_code=discount_code,
+        discount_percent=discount_percent,
     )
 
     for k in ('sub_mode', 'sub_plan_id', 'sub_final_price', 'sub_discount_code'):
@@ -334,6 +402,10 @@ async def subscription_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == 'discount':
         await _prompt_discount(query, context)
 
+    elif action == 'dcode':
+        # 🎟 موج D1 — CTA کمپین: ورود مستقیم با کد پیش‌پُر‌شده
+        await _discount_deep_link(query, context, parts[2] if len(parts) > 2 else '', uid)
+
     elif action == 'back':
         context.user_data.pop('sub_mode', None)
         await show_paywall(query.message, uid, edit=True)
@@ -368,8 +440,8 @@ async def _admin_approve(query, context, pid: str):
         payment['user_id'], days, payment['plan_name'],
         source='payment', granted_by=ADMIN_ID, extend=True
     )
-    if payment.get('discount_code'):
-        await db.discount_consume(payment['discount_code'])
+    # 🎟 موج D1 — کد تخفیف در لحظه‌ی ثبت رسید مصرف شده؛ اینجا دیگر مصرف
+    # مجدد نداریم (رفع باگ مصرف دوگانه). در رد رسید → discount_release.
 
     days_left = await db.sub_days_left(payment['user_id'])
     # 🔔 موج ۴.۹۰ — اینباکس مینی‌اپ (تأیید رسید → فعال‌سازی)
@@ -415,6 +487,10 @@ async def admin_reject_reason_handler(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("این رسید قبلاً بررسی شده.")
         return
     await db.sub_payment_decide(pid, approved=False, admin_id=update.effective_user.id, note=note)
+    # 🎟 موج D1 — کد تخفیف در ثبت رسید مصرف شد؛ در رد، ظرفیت به کاربر
+    # برمی‌گردد تا بتواند با رسید درست دوباره از همان کد استفاده کند
+    if payment.get('discount_code'):
+        await db.discount_release(payment['discount_code'], user_id=payment['user_id'])
     # 🧠 N1.2 — سینک‌فیکس: reject رسید فقط DM بود؛ آینه‌ی Inbox هم می‌نشیند
     # (DM از همان safe_send بعدی می‌رود — اینجا فقط آرشیو+Deep Link)
     await db.notify_user(payment['user_id'], 'payment_rejected',
