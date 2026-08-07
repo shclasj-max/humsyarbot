@@ -24,6 +24,13 @@ def _fmt_price(p: int) -> str:
     return f"{p:,}".replace(',', '٬') + " تومان"
 
 
+def _fa(n) -> str:
+    try:
+        return str(int(n)).translate(str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹'))
+    except Exception:
+        return str(n)
+
+
 def _back(cb='suba:main'):
     return [InlineKeyboardButton("🔙 بازگشت", callback_data=cb)]
 
@@ -510,10 +517,18 @@ async def _show_discounts(query):
         mark = "✅" if c.get('active') else "⛔️"
         used = f"{c.get('used_count',0)}/{c['max_uses'] if c.get('max_uses') else '∞'}"
         exp  = f" — تا {fmt_jalali_dt(c['expires_at'], with_time=False)}" if c.get('expires_at') else ""
-        lines.append(f"{mark} <code>{c['code']}</code> — {c['percent']}٪ — استفاده: {used}{exp}")
+        plan_note = ""
+        if c.get('target_plan_ids'):
+            plan_note = f" — 📦 {_fa(len(c['target_plan_ids']))} پلن"
+        lines.append(f"{mark} <code>{c['code']}</code> — {c['percent']}٪ — استفاده: {used}{exp}{plan_note}")
         keyboard.append([
             InlineKeyboardButton(f"{'⛔️' if c.get('active') else '✅'} {c['code']}",
                                   callback_data=f"suba:disc_toggle:{c['code']}"),
+            InlineKeyboardButton("📣", callback_data=f"suba:disc_bcast:{c['code']}"),
+            InlineKeyboardButton("👁", callback_data=f"suba:disc_prev:{c['code']}"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📊 آمار", callback_data=f"suba:disc_stats:{c['code']}"),
             InlineKeyboardButton("🗑 حذف", callback_data=f"suba:disc_del:{c['code']}"),
         ])
     keyboard.append([InlineKeyboardButton("➕ کد جدید", callback_data='suba:disc_add')])
@@ -551,6 +566,272 @@ async def handle_discount_add_text(update, context):
         await update.message.reply_text(
             "❌ فرمت اشتباه بود.\nمثال: <code>NOWRUZ20 | 20 | 0 | 30</code>", parse_mode='HTML'
         )
+
+
+# ══════════════════════════════════════════════════
+#  🎟 موج D1 — کمپین انتشار کد تخفیف (Preview / Broadcast / Stats)
+# ══════════════════════════════════════════════════
+
+async def _campaign_text(discount: dict):
+    """متن HTML کمپین — از موتور مشترک discount_campaign (Dynamic)."""
+    from discount_campaign import build_campaign_message
+    _, text = await build_campaign_message(db, discount)
+    return text
+
+
+def _campaign_cta_kb(discount: dict):
+    """کیبورد زیر پیام کمپین: Deep Link مینی‌اپ + دیپ‌لینک بات (fallback)."""
+    from utils import webapp_kb
+    from discount_campaign import campaign_cta_link
+    code = discount['code']
+    kb = webapp_kb(campaign_cta_link(discount), label='🎟 دریافت اشتراک با تخفیف')
+    rows = list(kb.inline_keyboard) if kb else []
+    rows.append([InlineKeyboardButton(
+        "💳 تهیه اشتراک با تخفیف (در بات)",
+        callback_data=f"sub:dcode:{code}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show_discount_preview(query, code: str):
+    discount = await db.discount_get(code)
+    if not discount:
+        await query.answer("❌ کد پیدا نشد.", show_alert=True)
+        return
+    text = await _campaign_text(discount)
+    await query.message.reply_text(
+        "👁 <b>پیش‌نمایش پیام کمپین</b>\n────────────\n" + text,
+        parse_mode='HTML',
+        reply_markup=_campaign_cta_kb(discount))
+    try:
+        await send_audit_log(query.from_user, f"👁 پیش‌نمایش کمپین کد {code}", 'subscriptions')
+    except Exception:
+        pass
+
+
+async def _prompt_discount_broadcast(query, context, code: str):
+    discount = await db.discount_get(code)
+    if not discount:
+        await query.answer("❌ کد پیدا نشد.", show_alert=True)
+        return
+    if not discount.get('active'):
+        await query.answer("⚠️ این کد غیرفعال است — اول فعالش کن.", show_alert=True)
+        return
+    # ضد دابل‌کلیک: اگر broadcast همین کد در حال ارسال است
+    active_bc = await db.discount_bcast_active_for(code)
+    if active_bc:
+        await query.answer("⏳ انتشار قبلی همین کد هنوز در حال اجراست.", show_alert=True)
+        return
+    counts = []
+    for seg, label in (('all', 'همه کاربران'), ('subscribers', 'دارای اشتراک فعال'),
+                        ('no_sub', 'بدون اشتراک فعال')):
+        users = await db.discount_segment_users(seg)
+        counts.append((seg, label, len(users)))
+    context.user_data['bcast_draft_code'] = code
+    lines = "\n".join(f"• {l}: <b>{_fa(c)}</b> نفر" for _, l, c in counts)
+    text = (
+        f"📣 <b>انتشار کد {discount['code']}</b>\n━━━━━━━━━━━━━━━━\n"
+        f"💰 {discount['percent']}٪ تخفیف\n\n"
+        f"مخاطب را انتخاب کن:\n{lines}\n\n"
+        f"پیامِ آماده‌ی کمپین (پلن‌ها و قیمت‌ها Dynamic از سیستم) برای همه ارسال می‌شود "
+        f"و دکمه‌ی CTA مستقیم به صفحه‌ی اشتراک دارد."
+    )
+    kb = [[InlineKeyboardButton(f"📨 {l} ({_fa(c)})", callback_data=f"suba:disc_bcast_go:{code}:{s}")]
+          for s, l, c in counts]
+    kb.append(_back('suba:discounts'))
+    await query.edit_message_text(text, parse_mode='HTML',
+                                  reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _execute_discount_broadcast(query, context, code: str, segment: str):
+    import asyncio
+    from telegram.error import RetryAfter, Forbidden, BadRequest, TimedOut, NetworkError
+    discount = await db.discount_get(code)
+    if not discount or not discount.get('active'):
+        await query.answer("❌ کد معتبر/فعال نیست.", show_alert=True)
+        return
+    active_bc = await db.discount_bcast_active_for(code)  # ضد دابل‌کلیک (لایه اجرا)
+    if active_bc:
+        await query.answer("⏳ انتشار قبلی همین کد هنوز در حال اجراست.", show_alert=True)
+        return
+
+    text = await _campaign_text(discount)
+    kb = _campaign_cta_kb(discount)
+    users = await db.discount_segment_users(segment)
+    # 🎚 ادغام نوتیفیکیشن: کاربرانی که دسته‌ی «🎁 تخفیف‌ها» را خاموش
+    # کرده‌اند از ارسال DM کنار گذاشته می‌شوند (اینباکس همچنان آرشیو می‌شود)
+    try:
+        _defaults = await db.get_notif_defaults()
+        seg_total = len(users)
+        users = [u for u in users if db.notif_pref_on(
+            u.get('notification_settings', {}), 'discounts', _defaults)]
+    except Exception:
+        seg_total = len(users)
+    seg_label = {'all': 'همه کاربران', 'subscribers': 'دارای اشتراک فعال',
+                 'no_sub': 'بدون اشتراک فعال'}.get(segment, segment)
+
+    bid = await db.discount_bcast_create(code, segment, query.from_user.id, source='bot')
+    await db.discount_bcast_update(bid, {'total': len(users)})
+    _pref_note = (f" (🔕 {_fa(seg_total - len(users))} نفر اعلان تخفیف را "
+                  f"خاموش کرده‌اند)") if seg_total != len(users) else ""
+    await query.edit_message_text(
+        f"📣 <b>در حال انتشار {discount['code']}…</b>\n\n"
+        f"👥 مخاطب: {seg_label} — {_fa(len(users))} نفر{_pref_note}\n"
+        f"🆔 <code>{bid}</code>\n\nپیشرفت همین‌جا بروزرسانی می‌شود…",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⛔ توقف انتشار", callback_data=f'suba:disc_bcast_stop:{bid}')
+        ]])
+    )
+    try:
+        await send_audit_log(query.from_user,
+            f"📣 شروع انتشار کد {code} → {seg_label} ({bid})", 'subscriptions')
+    except Exception:
+        pass
+
+    async def _run():
+        sent, failed, blocked = 0, 0, 0
+        cancelled = False
+        last_note = 0
+        for i, u in enumerate(users):
+            # ⛔ پشتیبانی از توقف: هر ۲۰ نفر وضعیت را از دیتابیس می‌خوانیم
+            if i > 0 and i % 20 == 0:
+                cur = await db.discount_bcast_get(bid)
+                if cur and cur.get('status') == 'cancelled':
+                    cancelled = True
+                    break
+            uid = u['user_id']
+            outcome = 'fail'  # ok | fail | blocked — شمارش دقیق هر کاربر
+            for _attempt in range(3):
+                try:
+                    await context.bot.send_message(
+                        uid, text, parse_mode='HTML', reply_markup=kb)
+                    outcome = 'ok'
+                    break
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 0.5)
+                    continue
+                except Forbidden:
+                    outcome = 'blocked'
+                    await db.mark_user_blocked(uid)
+                    break
+                except (TimedOut, NetworkError):
+                    await asyncio.sleep(1.5)
+                    continue
+                except BadRequest:
+                    break
+                except Exception:
+                    break
+            if outcome == 'ok':
+                sent += 1
+            elif outcome == 'blocked':
+                blocked += 1
+            else:
+                failed += 1
+            # گام‌بندی نرخ — الگوی _do_broadcast_send (جلوگیری از طوفان 429)
+            await asyncio.sleep(0.05)
+            # پیشرفت هر ۲۵ کاربر
+            if (i + 1) % 25 == 0 or (i + 1) == len(users):
+                if (i + 1) - last_note >= 25 or (i + 1) == len(users):
+                    last_note = i + 1
+                    await db.discount_bcast_update(bid, {
+                        'sent': sent, 'failed': failed, 'blocked': blocked})
+                    try:
+                        await query.edit_message_text(
+                            f"📣 <b>در حال انتشار {discount['code']}…</b>\n\n"
+                            f"👥 {_fa(len(users))} نفر — پیشرفت: "
+                            f"{_fa(i+1)}/{_fa(len(users))}\n"
+                            f"✅ {_fa(sent)} | ❌ {_fa(failed)} | 🚫 {_fa(blocked)}",
+                            parse_mode='HTML')
+                    except Exception:
+                        pass
+        await db.discount_bcast_update(bid, {
+            'status': 'cancelled' if cancelled else 'completed',
+            'sent': sent, 'failed': failed,
+            'blocked': blocked, 'finished_at': __import__('datetime').datetime.now().isoformat(),
+        })
+        # اینباکس مینی‌اپ (اختیاری): برای کاربرانی که موفق گرفتند
+        try:
+            link = __import__('discount_campaign', fromlist=['campaign_cta_link']) \
+                .campaign_cta_link(discount)
+            await db.inbox_add_many([
+                {'user_id': u['user_id'], 'type': 'discount',
+                 'title': f"🎟 تخفیف {discount['percent']}٪ — کد {discount['code']}",
+                 'body': text.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<s>', '').replace('</s>', '')[:240],
+                 'link': link}
+                for u in users[:500]
+            ])
+        except Exception:
+            pass
+        rate = (sent / len(users) * 100) if users else 0
+        title = f"⛔ <b>انتشار {discount['code']} متوقف شد</b>" if cancelled \
+            else f"✅ <b>گزارش انتشار {discount['code']}</b>"
+        summary = (
+            f"{title}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"👥 هدف: {_fa(len(users))} ({seg_label}){_pref_note}\n"
+            f"✅ موفق: {_fa(sent)}\n"
+            f"❌ ناموفق: {_fa(failed)}\n"
+            f"🚫 بلاک‌کننده: {_fa(blocked)}\n"
+            f"📨 نرخ موفقیت: {_fa(round(rate, 2))}٪\n"
+            f"🆔 <code>{bid}</code>"
+        )
+        try:
+            await query.edit_message_text(summary, parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([_back('suba:discounts')]))
+        except Exception:
+            await safe_send(context.bot, query.from_user.id, summary)
+        try:
+            if cancelled:
+                await send_audit_log(query.from_user,
+                    f"⛔ انتشار {code} لغو شد — تا لحظه‌ی توقف ✅{sent} ❌{failed} 🚫{blocked} ({bid})",
+                    'subscriptions')
+            else:
+                await send_audit_log(query.from_user,
+                    f"📣 انتشار {code} تمام شد — ✅{sent} ❌{failed} 🚫{blocked} ({bid})",
+                    'subscriptions')
+        except Exception:
+            pass
+
+    asyncio.create_task(_run())
+
+
+async def _show_discount_stats(query, code: str):
+    discount = await db.discount_get(code)
+    if not discount:
+        await query.answer("❌ کد پیدا نشد.", show_alert=True)
+        return
+    pay = await db.discount_payment_stats(code)
+    bcasts = await db.discount_bcast_list(code, 3)
+    mu = discount.get('max_uses', 0)
+    used = discount.get('used_count', 0)
+    remaining = max(0, mu - used) if mu > 0 else '∞'
+    targets = discount.get('target_plan_ids') or []
+    if targets:
+        plans = await db.sub_plan_list(only_active=False)
+        names = [p['name'] for p in plans if str(p['_id']) in [str(t) for t in targets]]
+        plans_txt = '، '.join(names) or f"{_fa(len(targets))} پلن"
+    else:
+        plans_txt = 'همه پلن‌های فعال'
+    bc_lines = ''
+    for b in bcasts:
+        st = {'sending': '⏳', 'completed': '✅', 'failed': '❌', 'cancelled': '🚫'}.get(b.get('status'), '❔')
+        bc_lines += (f"\n{st} <code>{b.get('broadcast_id','')}</code> — "
+                     f"{_fa(b.get('sent',0))}/{_fa(b.get('total',0))}")
+    text = (
+        f"📊 <b>آمار {discount['code']}</b>\n━━━━━━━━━━━━━━━━\n"
+        f"💰 تخفیف: {discount['percent']}٪\n"
+        f"🎟 مصرف: {_fa(used)}/{_fa(mu) if mu else '∞'} — باقی: {_fa(remaining) if remaining != '∞' else '∞'}\n"
+        f"📦 پلن‌های هدف: {plans_txt}\n"
+        f"👥 سقف هر کاربر: {_fa(discount.get('per_user_limit') or 0) or 'نامحدود'}\n"
+        f"⏰ انقضا: {discount.get('expires_at','—')[:10] if discount.get('expires_at') else 'بدون انقضا'}\n"
+        f"────────────────────\n"
+        f"💳 پرداخت‌های تأییدشده با این کد: {_fa(pay['usage_approved'])}\n"
+        f"💰 مبلغ تخفیف‌داده‌شده: {_fmt_price(pay['discount_given'])}\n"
+        f"📥 درآمد (با تخفیف): {_fmt_price(pay['revenue'])}"
+        f"{bc_lines}"
+    )
+    await query.edit_message_text(text, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([_back('suba:discounts')]))
 
 
 # ══════════════════════════════════════════════════
@@ -812,6 +1093,24 @@ async def subscription_admin_callback(update: Update, context: ContextTypes.DEFA
     elif action == 'disc_del':
         await db.discount_delete(parts[2])
         await _show_discounts(query)
+    # 🎟 موج D1 — کمپین: پیش‌نمایش/انتشار/آمار
+    elif action == 'disc_prev':
+        await _show_discount_preview(query, parts[2])
+    elif action == 'disc_bcast':
+        await _prompt_discount_broadcast(query, context, parts[2])
+    elif action == 'disc_bcast_go':
+        await _execute_discount_broadcast(query, context, parts[2], parts[3])
+    elif action == 'disc_bcast_stop':
+        # ⛔ توقف انتشار در حال اجرا — حلقه‌ی ارسال هر ۲۰ نفر وضعیت را می‌خواند
+        bc = await db.discount_bcast_get(parts[2])
+        if bc and bc.get('status') == 'sending':
+            await db.discount_bcast_update(parts[2], {'status': 'cancelled'})
+            await query.answer("⛔ درخواست توقف ثبت شد؛ ارسال در اولین گام متوقف می‌شود.",
+                               show_alert=True)
+        else:
+            await query.answer("این انتشار دیگر در حال اجرا نیست.", show_alert=True)
+    elif action == 'disc_stats':
+        await _show_discount_stats(query, parts[2])
 
     elif action == 'grant':
         await _show_grant_menu(query)
