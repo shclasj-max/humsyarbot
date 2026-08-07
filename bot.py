@@ -380,6 +380,74 @@ async def new_resources_notif_job(context: ContextTypes.DEFAULT_TYPE):
     await _run_new_resources_notif(context.bot, force=False)
 
 
+async def _discount_soldout_edit_task(bot, code: str):
+    """
+    ⛔ موج D2 — ادیت همگانی «اتمام موجودی»:
+    همه‌ی پیام‌های کمپینِ این کد (در هر دو مسیر بات و وب) که مرجعشان در
+    سند کمپین ذخیره شده، به متن «ظرفیت تکمیل شد» (بدون دکمه‌ی CTA) ادیت
+    می‌خورند. RetryAfter با صبر دقیق + گام ۰٫۰۵ثانیه؛ پیام حذف‌شده/
+    از‌دست‌رفته نادیده گرفته می‌شود. ایدمپوتنت: هر کمپین با فلگ
+    soldout_marked فقط یک‌بار پردازش می‌شود.
+    """
+    from telegram.error import RetryAfter, BadRequest, TimedOut, NetworkError
+    try:
+        discount = await db.discount_get(code)
+        if not discount:
+            return
+        from discount_campaign import build_soldout_message
+        soldout = build_soldout_message(discount)
+        bcasts = await db.discount_bcast_with_msgs(code)
+        if not bcasts:
+            return
+        total = edited = skipped = 0
+        for bc in bcasts:
+            refs = bc.get('sent_msgs') or []
+            bc_edited = 0
+            for ref in refs:
+                total += 1
+                done = False
+                for _attempt in range(3):
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=ref['c'], message_id=ref['m'],
+                            text=soldout, parse_mode='HTML', reply_markup=None)
+                        done = True
+                        break
+                    except RetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 0.5)
+                        continue
+                    except BadRequest:
+                        break  # «پیام پیدا نشد»/«محتوا یکسان» — نادیده
+                    except (TimedOut, NetworkError):
+                        await asyncio.sleep(1.5)
+                        continue
+                    except Exception:
+                        break
+                if done:
+                    edited += 1
+                    bc_edited += 1
+                else:
+                    skipped += 1
+                await asyncio.sleep(0.05)  # گام‌بندی نرخ تلگرام
+            await db.discount_bcast_update(bc['broadcast_id'], {
+                'soldout_marked': True,
+                'soldout_at': datetime.now().isoformat(),
+                'soldout_edited': bc_edited,
+            })
+        logger.info(f"⛔ D2 soldout edit: {code} → ✅{edited} ⏭{skipped} (مجموع {total})")
+        try:
+            from utils import send_audit_log
+            await send_audit_log(
+                bot, 'system', 'سیستم کمپین', 0,
+                f"⛔ کد تخفیف {code} تکمیل ظرفیت شد — {edited} پیام کمپین به «اتمام موجودی» ادیت شد",
+                module='Discounts', severity='INFO',
+                target_label=code, tags=['اتمام_ظرفیت_کد', 'کمپین'])
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"_discount_soldout_edit_task error ({code}): {e}")
+
+
 async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
     """
     🔴 FIX حیاتی: پردازش صف «bot_notifications» که بک‌اند Mini App
@@ -460,6 +528,21 @@ async def mini_app_outbox_job(context: ContextTypes.DEFAULT_TYPE):
                             "❌ ساخت فایل پشتیبان ناموفق بود — جزئیات در لاگ سرور.")
                     except Exception:
                         pass
+                continue
+
+            # ── ⛔ موج D2 — سیگنال اتمام ظرفیت کد تخفیف ──
+            # با آخرین مصرف (گذار اتمیک max-1→max) دقیقاً یک‌بار نوشته می‌شود؛
+            # پیام‌های کمپینِ ذخیره‌شده به «اتمام موجودی» ادیت می‌خورند.
+            if text.startswith("__DISCOUNT_EXHAUSTED__"):
+                try:
+                    _code = text.split(":", 1)[1] if ":" in text else ""
+                    await coll.update_one({"_id": d["_id"]}, {"$set": {
+                        "sent": True, "sent_at": datetime.now().isoformat()}})
+                    if _code:
+                        asyncio.create_task(
+                            _discount_soldout_edit_task(context.bot, _code))
+                except Exception as e:
+                    logger.error(f"__DISCOUNT_EXHAUSTED__ failed: {e}")
                 continue
 
             # سایر سیگنال‌های داخلی (__*) متنی نیستند — skip
