@@ -692,6 +692,7 @@ async def _execute_discount_broadcast(query, context, code: str, segment: str):
         sent, failed, blocked = 0, 0, 0
         cancelled = False
         last_note = 0
+        msg_refs = []  # ⛔ موج D2 — مرجع پیام‌های موفق برای ادیت «اتمام موجودی»
         for i, u in enumerate(users):
             # ⛔ پشتیبانی از توقف: هر ۲۰ نفر وضعیت را از دیتابیس می‌خوانیم
             if i > 0 and i % 20 == 0:
@@ -703,9 +704,10 @@ async def _execute_discount_broadcast(query, context, code: str, segment: str):
             outcome = 'fail'  # ok | fail | blocked — شمارش دقیق هر کاربر
             for _attempt in range(3):
                 try:
-                    await context.bot.send_message(
+                    _m = await context.bot.send_message(
                         uid, text, parse_mode='HTML', reply_markup=kb)
                     outcome = 'ok'
+                    msg_refs.append({'c': uid, 'm': _m.message_id})
                     break
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after + 0.5)
@@ -729,8 +731,14 @@ async def _execute_discount_broadcast(query, context, code: str, segment: str):
                 failed += 1
             # گام‌بندی نرخ — الگوی _do_broadcast_send (جلوگیری از طوفان 429)
             await asyncio.sleep(0.05)
-            # پیشرفت هر ۲۵ کاربر
+            # پیشرفت هر ۲۵ کاربر (+ خالی‌کردن مراجع پیام در DB)
             if (i + 1) % 25 == 0 or (i + 1) == len(users):
+                if msg_refs:
+                    try:
+                        await db.discount_bcast_add_msgs(bid, msg_refs)
+                    except Exception:
+                        pass
+                    msg_refs = []
                 if (i + 1) - last_note >= 25 or (i + 1) == len(users):
                     last_note = i + 1
                     await db.discount_bcast_update(bid, {
@@ -744,6 +752,13 @@ async def _execute_discount_broadcast(query, context, code: str, segment: str):
                             parse_mode='HTML')
                     except Exception:
                         pass
+        # خالی‌کردن مراجع باقی‌مانده (در صورت توقف زودهنگام)
+        if msg_refs:
+            try:
+                await db.discount_bcast_add_msgs(bid, msg_refs)
+            except Exception:
+                pass
+            msg_refs = []
         await db.discount_bcast_update(bid, {
             'status': 'cancelled' if cancelled else 'completed',
             'sent': sent, 'failed': failed,
