@@ -346,9 +346,14 @@ async def validate_discount(
         .upper()
     )
 
+    # 🎟 موج D1 — اعتبارسنجی با plan_id + user_id (plan-targeting + per-user limit)
     result = (
         await db.discount_validate(
-            code
+            code,
+            plan_id=str(
+                plan.get("_id")
+            ),
+            user_id=user["id"],
         )
     )
 
@@ -478,6 +483,8 @@ async def buy(
     )
 
     final_price = price
+    # مقدار اولیه — برای پلن رایگانِ بدون کد، percent تعریف‌نشده باقی نماند
+    percent = None
 
     code = (
         discount_code
@@ -491,7 +498,11 @@ async def buy(
         validation = (
             await db
             .discount_validate(
-                code
+                code,
+                plan_id=str(
+                    plan.get("_id")
+                ),
+                user_id=user_id,
             )
         )
 
@@ -532,79 +543,93 @@ async def buy(
 
     # تخفیف صددرصدی:
     # بدون رسید و تأیید ادمین
-    if final_price <= 0:
-        end_date = (
-            await db.sub_activate(
-                user_id,
-
-                int(
-                    plan.get(
-                        "days",
-                        0,
-                    )
-                    or 0
-                ),
-
-                plan.get(
-                    "name",
-                    "اشتراک",
-                ),
-
-                source=
-                    "discount",
-
-                granted_by=
-                    0,
-
-                extend=
-                    True,
+    if final_price <= 0 and code:
+        # 🎟 موج D1 — مصرف اتمیک «قبل» از فعال‌سازی: اگر ظرفیت در همین
+        # کسری‌از‌لحظه پر شده باشد، فعال‌سازی انجام نمی‌شود (نشتی صفر)
+        consumed_free = await db.discount_consume(code, user_id=user_id)
+        if not consumed_free:
+            raise HTTPException(
+                status_code=422,
+                detail="ظرفیت این کد تخفیف همین حالا تکمیل شد.",
             )
-        )
-
-        payment_id = (
-            await db
-            .sub_payment_create(
-                user_id=
+    if final_price <= 0:
+        try:
+            end_date = (
+                await db.sub_activate(
                     user_id,
 
-                plan_id=
-                    plan_id,
-
-                plan_name=
-                    plan.get(
-                        "name",
-                        "",
+                    int(
+                        plan.get(
+                            "days",
+                            0,
+                        )
+                        or 0
                     ),
 
-                price=
-                    price,
+                    plan.get(
+                        "name",
+                        "اشتراک",
+                    ),
 
-                final_price=
-                    0,
+                    source=
+                        "discount",
 
-                screenshot_file_id=
-                    "",
+                    granted_by=
+                        0,
 
-                discount_code=
-                    code,
+                    extend=
+                        True,
+                )
             )
-        )
 
-        await db.sub_payment_decide(
-            payment_id,
+            payment_id = (
+                await db
+                .sub_payment_create(
+                    user_id=
+                        user_id,
 
-            approved=True,
+                    plan_id=
+                        plan_id,
 
-            admin_id=0,
+                    plan_name=
+                        plan.get(
+                            "name",
+                            "",
+                        ),
 
-            note=
-                "تخفیف ۱۰۰٪",
-        )
+                    price=
+                        price,
 
-        if code:
-            await db.discount_consume(
-                code
+                    final_price=
+                        0,
+
+                    screenshot_file_id=
+                        "",
+
+                    discount_code=
+                        code,
+
+                    discount_percent=
+                        percent,
+                )
             )
+
+            await db.sub_payment_decide(
+                payment_id,
+
+                approved=True,
+
+                admin_id=0,
+
+                note=
+                    "تخفیف ۱۰۰٪",
+            )
+        except Exception:
+            # 🎟 جبران: فعال‌سازی/ثبت تراکنش نیمه‌کاره ماند — مصرف کد که
+            # قبل از فعال‌سازی رزرو شده بود، آزاد می‌شود (نشتی صفر)
+            if code:
+                await db.discount_release(code, user_id=user_id)
+            raise
 
         return {
             "ok":
@@ -707,39 +732,51 @@ async def buy(
         )
 
 
-    payment_id = (
-        await db.sub_payment_create(
-            user_id=
-                user_id,
-
-            plan_id=
-                plan_id,
-
-            plan_name=
-                plan.get(
-                    "name",
-                    "",
-                ),
-
-            price=
-                price,
-
-            final_price=
-                final_price,
-
-            screenshot_file_id=
-                file_id,
-
-            discount_code=
-                code,
-        )
-    )
-
-
     if code:
-        await db.discount_consume(
-            code
+        # 🎟 موج D1 — مصرف اتمیک «قبل» از ثبت رسید: ظرفیت دوره‌ی انتظار
+        # بررسی هم رزرو می‌شود. در رد ادمین → discount_release. اگر ثبت
+        # رسید خطا بخورد، مصرف با release جبران می‌شود.
+        consumed_paid = await db.discount_consume(code, user_id=user_id)
+        if not consumed_paid:
+            raise HTTPException(
+                status_code=422,
+                detail="ظرفیت این کد تخفیف همین حالا تکمیل شد — رسیدی ثبت نشد.",
+            )
+    try:
+        payment_id = (
+            await db.sub_payment_create(
+                user_id=
+                    user_id,
+
+                plan_id=
+                    plan_id,
+
+                plan_name=
+                    plan.get(
+                        "name",
+                        "",
+                    ),
+
+                price=
+                    price,
+
+                final_price=
+                    final_price,
+
+                screenshot_file_id=
+                    file_id,
+
+                discount_code=
+                    code,
+
+                discount_percent=
+                    percent if code else None,
+            )
         )
+    except Exception:
+        if code:
+            await db.discount_release(code, user_id=user_id)
+        raise
 
 
     try:
