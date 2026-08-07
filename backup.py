@@ -282,12 +282,17 @@ async def build_full_backup_data() -> dict:
     subscriptions = await db.subscriptions.find({}).to_list(20000)
     sub_payments  = await db.sub_payments.find({}).to_list(20000)
     discount_codes= await db.discount_codes.find({}).to_list(1000)
+    # کمپین تخفیف: سوابق مصرف هر کاربر (per_user_limit) + کمپین‌های برودکست
+    discount_uses  = await db.discount_uses.find({}).to_list(20000)
+    discount_bcasts= await db.discount_bcasts.find({}).to_list(2000)
     data['sections']['subscription_system'] = {
-        'description': 'سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای پرداخت، کدهای تخفیف',
+        'description': 'سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای پرداخت، کدهای تخفیف و کمپین‌ها',
         'plans':          {'count': len(sub_plans),      'data': sub_plans},
         'subscriptions':  {'count': len(subscriptions),  'data': subscriptions},
         'payments':       {'count': len(sub_payments),   'data': sub_payments},
         'discount_codes': {'count': len(discount_codes), 'data': discount_codes},
+        'discount_uses':  {'count': len(discount_uses),  'data': discount_uses},
+        'discount_broadcasts': {'count': len(discount_bcasts), 'data': discount_bcasts},
     }
 
     # ── FIX جدید: نمرات ──
@@ -347,6 +352,8 @@ async def build_full_backup_data() -> dict:
         'subscriptions':  len(subscriptions),
         'sub_payments':   len(sub_payments),
         'discount_codes': len(discount_codes),
+        'discount_uses':  len(discount_uses),
+        'discount_broadcasts': len(discount_bcasts),
         'grades':         len(grades),
         'settings':       1 if settings_doc else 0,
         'content_reports':len(content_reports),
@@ -525,11 +532,15 @@ async def build_section_backup_data(section: str) -> dict:
         subscriptions  = await db.subscriptions.find({}).to_list(20000)
         sub_payments   = await db.sub_payments.find({}).to_list(20000)
         discount_codes = await db.discount_codes.find({}).to_list(1000)
-        data['description']     = 'سیستم اشتراک — پلن‌ها، وضعیت کاربران، رسیدها، کدهای تخفیف'
+        discount_uses  = await db.discount_uses.find({}).to_list(20000)
+        discount_bcasts= await db.discount_bcasts.find({}).to_list(2000)
+        data['description']     = 'سیستم اشتراک — پلن‌ها، وضعیت کاربران، رسیدها، کدهای تخفیف و کمپین‌ها'
         data['plans']           = {'count': len(sub_plans),      'data': sub_plans}
         data['subscriptions']   = {'count': len(subscriptions),  'data': subscriptions}
         data['payments']        = {'count': len(sub_payments),   'data': sub_payments}
         data['discount_codes']  = {'count': len(discount_codes), 'data': discount_codes}
+        data['discount_uses']   = {'count': len(discount_uses),  'data': discount_uses}
+        data['discount_broadcasts'] = {'count': len(discount_bcasts), 'data': discount_bcasts}
 
     elif section == 'grades':
         grades = await db.grades.find({}).to_list(20000)
@@ -915,7 +926,9 @@ async def _restore_section(section: str, sec_data: dict) -> int:
 
     elif section in ('subscription_system', 'subscription'):
         for sub, col in [('plans', 'sub_plans'), ('subscriptions', 'subscriptions'),
-                          ('payments', 'sub_payments'), ('discount_codes', 'discount_codes')]:
+                          ('payments', 'sub_payments'), ('discount_codes', 'discount_codes'),
+                          ('discount_uses', 'discount_uses'),
+                          ('discount_broadcasts', 'discount_bcasts')]:
             rows = sec_data.get(sub, {}).get('data', [])
             total += await _upsert_many(getattr(db, col), rows)
 
