@@ -307,7 +307,7 @@ async def grant_content_admin(uid: int, admin=Depends(get_admin_user)):
     if not user: raise HTTPException(404)
     await db.update_user(uid,{"role":"content_admin"})
     _notify(uid, "🎓 <b>دسترسی ادمین محتوا به شما داده شد!</b>", "content_admin_granted")
-    await _audit(admin, "اعطای دسترسی مدیر محتوا", "Roles", severity="HIGH",
+    await _audit(admin, "اعطای دسترسی ادمین ارشد محتوا", "Roles", severity="HIGH",
         target_id=uid, target_type="user", target_label=user.get("name",""),
         tags=["اعطای_نقش","پنل_وب"])
     return {"ok":True}
@@ -316,7 +316,7 @@ async def grant_content_admin(uid: int, admin=Depends(get_admin_user)):
 async def revoke_content_admin(uid: int, admin=Depends(get_admin_user)):
     await db.update_user(uid,{"role":"student"})
     _notify(uid, "⚠️ دسترسی ادمین محتوای شما لغو شد.", "content_admin_revoked")
-    await _audit(admin, "لغو دسترسی مدیر محتوا", "Roles", severity="HIGH",
+    await _audit(admin, "لغو دسترسی ادمین ارشد محتوا", "Roles", severity="HIGH",
         target_id=uid, target_type="user",
         tags=["لغو_نقش","پنل_وب"])
     return {"ok":True}
