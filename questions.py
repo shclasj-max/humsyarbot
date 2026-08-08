@@ -111,6 +111,14 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         item = await db.get_qbank_file(fid)
         if not item:
             await query.answer("فایل پیدا نشد!", show_alert=True); return
+        # 🌊 C1 — ضد ID-manipulation: فایل بانک سوال فقط در scope دانشجو
+        _stu_q = await db.get_user(uid)
+        _allowed_q = db.student_intake_filter((_stu_q or {}).get('intake', ''))
+        # دارندگان دسترسی مدیریتی (پیش‌نمایش ادمین) از فیلتر دانشجویی مستثنا‌اند
+        if not await db.is_content_admin(uid) and \
+                (item.get('intake') or '') not in _allowed_q:
+            await query.answer("⛔ این فایل برای ورودی شما نیست.",
+                               show_alert=True); return
         await db.inc_qbank_download(fid, uid)
         caption = (f"📁 <b>بانک سوال</b>\n📚 {item.get('lesson','')} — {item.get('topic','')}\n"
                    f"📝 {item.get('description','')}\n⬇️ {item.get('downloads',0)} دانلود")
@@ -382,6 +390,11 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if await db.is_content_admin(uid):
             # FIX طبق سند: حذف سوال در پنل محتوا قبلاً اصلاً لاگ نمی‌شد
             q_doc = await db.get_question_by_id(qid)
+            # 🌊 C1 — enforce scope قبل از حذف (ضد callback-manipulation)
+            if not await db.can_access_intake(uid, (q_doc or {}).get('intake') or ''):
+                await query.answer("⛔ دسترسی غیرمجاز — این سوال در scope شما نیست.",
+                                   show_alert=True)
+                return
             await db.delete_question(qid)
             await query.answer("🗑 سوال حذف شد!", show_alert=True)
             actor = await db.get_user(uid)
@@ -401,6 +414,12 @@ async def questions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         qid = parts[2] if len(parts) > 2 else ''
         if await db.is_content_admin(uid):
             q_doc_approve = await db.get_question_by_id(qid)
+            # 🌊 C1 — enforce scope قبل از تأیید
+            if not await db.can_access_intake(
+                    uid, (q_doc_approve or {}).get('intake') or ''):
+                await query.answer("⛔ دسترسی غیرمجاز — این سوال در scope شما نیست.",
+                                   show_alert=True)
+                return
             await db.approve_question(qid)
             await query.answer("✅ تأیید شد!", show_alert=True)
             actor = await db.get_user(uid)
@@ -631,10 +650,13 @@ async def _next_q(query, context, uid):
             ]))
         return
 
+    # 🌊 C1 — دانشجو فقط سوال‌های ورودی خودش + سراسری را می‌بیند
+    _stu = await db.get_user(uid)
+    _sf  = db.student_intake_filter((_stu or {}).get('intake', ''))
     if mode == 'weak':
         qs = await db.get_weak_questions(uid, limit=1)
     else:
-        qs = await db.get_questions(lesson=lesson, topic=topic, difficulty=diff, limit=1, exclude=done)
+        qs = await db.get_questions(lesson=lesson, topic=topic, difficulty=diff, limit=1, exclude=done, intake=_sf)
 
     if not qs:
         await query.edit_message_text(
@@ -835,7 +857,11 @@ async def _fb_topics(query, context, lesson):
 
 
 async def _fb_files(query, context, lesson, topic):
-    files = await db.get_qbank_files(lesson=lesson, topic=topic)
+    # 🌊 C1 — دانشجو فقط فایل‌های ورودی خودش + سراسری را می‌بیند
+    _stu = await db.get_user(query.from_user.id)
+    files = await db.get_qbank_files(
+        lesson=lesson, topic=topic,
+        intake=db.student_intake_filter((_stu or {}).get('intake', '')))
     # بازگشت صحیح: به لیست مباحث همان درس
     back_cb = f'questions:fb_lesson:{context.user_data.get("_fb_lessons", []).index(lesson)}' \
         if lesson in context.user_data.get('_fb_lessons', []) else 'questions:file_bank'
@@ -1379,6 +1405,10 @@ async def _do_insert_manual_question(update, context, q: dict, uid: int):
         'creator_id':     uid,
         'creator_name':   creator_name,
         'by_bot':         by_bot,
+        # 🌊 C1 — scope سوال: ادمین محتوا → ورودی انتخاب‌شده در پنل؛
+        # دانشجو → ورودی خودش؛ پیش‌فرض '' = سراسری
+        'intake':         (context.user_data.get('ca_intake', '') if is_ca
+                           else (creator_user.get('intake', '') or '')),
         'approved':       auto,
         'created_at':     datetime.now().isoformat(),
         'attempt_count':  0,
@@ -1622,6 +1652,7 @@ async def _do_insert_ai_question(query, context):
         'creator_name':   creator_name,
         'creator_type':   'ai',          # ⚠️ تگِ جدید — برای گزارشِ «این سوال رو کی ساخته»
         'by_bot':         False,
+        'intake':         '',            # 🌊 C1 — سوالات هوشیار = سراسری
         'approved':       auto,
         'created_at':     datetime.now().isoformat(),
         'attempt_count':  0,
@@ -1675,6 +1706,20 @@ async def _ca_question_list(query, uid: int, context):
         q_filter['creator_type'] = {'$ne': 'ai'}
     elif f_source == 'ai':
         q_filter['creator_type'] = 'ai'
+
+    # 🌊 موج C1 — فیلتر scope ورودی (Backend-Enforced):
+    # scoped → دقیقاً scope خودش؛ ادمین ارشد → context انتخاب‌شده در پنل؛
+    # مالک بدون context → رفتار قدیمی (نمایش همه) حفظ می‌شود.
+    _intake_note = None
+    _cscope = await db.get_content_scope(uid)
+    if _cscope and _cscope['kind'] == 'scoped':
+        q_filter['intake'] = _cscope.get('intake') or ''
+        _intake_note = q_filter['intake']
+    elif _cscope and _cscope['kind'] == 'global' and uid != ADMIN_ID:
+        _ctx_i = context.user_data.get('ca_intake')
+        if _ctx_i is not None:
+            q_filter['intake'] = _ctx_i
+            _intake_note = _ctx_i
 
     questions = await db.questions.find(q_filter).sort('created_at', -1).to_list(200)
 
@@ -1731,9 +1776,16 @@ async def _ca_question_list(query, uid: int, context):
     back_cb = 'ca:main' if uid != int(__import__('os').getenv('ADMIN_ID', '0')) else 'admin:main'
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb)])
 
+    # 🌊 C1 — نمایش label ورودی فعال در هدر (اگر فیلتر scope فعال است)
+    if _intake_note is not None:
+        from content_admin import _intake_label as _ilabel
+        _scope_line = f"📅 ورودی: <b>{await _ilabel(_intake_note)}</b>\n"
+    else:
+        _scope_line = ""
     header = (
         f"🧪 <b>مدیریت سوالات</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
+        f"{_scope_line}"
         f"📊 مجموع: <b>{total}</b>  ✅ تأیید: <b>{approved}</b>  ⏳ انتظار: <b>{pending}</b>\n"
         f"🤖 توسط بات: <b>{by_bot_c}</b>  ✏️ توسط دانشجو: <b>{by_stu_c}</b>\n\n"
         f"<i>روی هر سوال بزنید برای مشاهده و مدیریت</i>"
@@ -1757,6 +1809,12 @@ async def _ca_question_view(query, uid: int, qid: str):
     q = await db.get_question_by_id(qid)
     if not q:
         await query.answer("❌ سوال پیدا نشد!", show_alert=True)
+        return
+
+    # 🌊 C1 — enforce scope: سوال ورودی دیگر هرگز نمایش داده نمی‌شود
+    if not await db.can_access_intake(uid, q.get('intake') or ''):
+        await query.answer("⛔ دسترسی غیرمجاز — این سوال در scope شما نیست.",
+                           show_alert=True)
         return
 
     opts    = q.get('options', [])
