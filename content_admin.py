@@ -28,11 +28,95 @@ CONTENT_TYPES = [
 CA_WAITING_FILE = 50
 CA_WAITING_TEXT = 51
 
+# 🌊 موج C1 — callback مخصوص سطل «🌐 سراسری» در picker ورودی
+GLOBAL_PICK = '__global__'
+GLOBAL_INTAKE_LABEL = '🌐 سراسری'
+
 
 def _clear(context):
     for k in ['ca_mode','ca_pending_file','ca_content_type',
               'ca_edit_target','ca_edit_field','ca_ref_lang','ca_ref_volume']:
         context.user_data.pop(k, None)
+
+
+# ══════════════════════════════════════════════════════════
+#  🌊 موج C1 — ابزارهای scope ورودی (Backend-Enforced)
+# ══════════════════════════════════════════════════════════
+
+async def _intake_label(intake: str) -> str:
+    """کد ورودی → برچسب نمایشی؛ '' → 🌐 سراسری؛ کد ناموجود → خود کد."""
+    if not intake:
+        return GLOBAL_INTAKE_LABEL
+    intakes = await db.get_all_intakes()
+    return next((i['label'] for i in intakes if i['code'] == intake), intake)
+
+
+async def _deny_scope(query, uid: int):
+    """⛔ پیام استاندارد عدم دسترسی scope (§۲۷ spec) — بدون افشای جزئیات داخلی."""
+    scope = await db.get_content_scope(uid)
+    if scope and scope['kind'] == 'scoped':
+        label = await _intake_label(scope.get('intake') or '')
+        await query.answer(
+            f"⛔ دسترسی غیرمجاز\nشما فقط به محتوای ورودی «{label}» دسترسی دارید.",
+            show_alert=True)
+    else:
+        await query.answer("⛔ دسترسی غیرمجاز", show_alert=True)
+
+
+# نقشه‌ی مرکزی enforce: action → (اندیس شناسه در callback، نوع آیتم)
+# resolver مربوطه intake واقعی آیتم را از DB می‌خواند — نه از callback.
+ITEM_INTAKE_CHECKS = {
+    'lesson_up': 'lesson', 'lesson_down': 'lesson',
+    'edit_lesson_menu': 'lesson', 'edit_lesson_prompt': 'lesson',
+    'del_lesson': 'lesson', 'confirm_del_lesson': 'lesson', 'lesson': 'lesson',
+    'add_session_prompt': 'lesson',
+    'edit_session_menu': 'session', 'edit_session_prompt': 'session',
+    'del_session': 'session', 'confirm_del_session': 'session',
+    'session': 'session', 'upload_content': 'session', 'sel_ctype': 'session',
+    'content_up': 'content', 'content_down': 'content',
+    'del_content': 'content', 'confirm_del_content': 'content',
+    'ref_subject_up': 'ref_subject', 'ref_subject_down': 'ref_subject',
+    'edit_ref_subject_prompt': 'ref_subject', 'del_ref_subject': 'ref_subject',
+    'confirm_del_ref_subject': 'ref_subject', 'ref_subject': 'ref_subject',
+    'add_ref_book_prompt': 'ref_subject',
+    'ref_book_up': 'ref_book', 'ref_book_down': 'ref_book',
+    'edit_ref_book_prompt': 'ref_book', 'del_ref_book': 'ref_book',
+    'confirm_del_ref_book': 'ref_book', 'ref_book': 'ref_book',
+    'upload_ref_volume_prompt': 'ref_book', 'upload_ref': 'ref_book',
+    'del_ref_file': 'ref_file',
+}
+
+
+async def _resolve_item_intake(kind: str, item_id: str) -> str:
+    """intake واقعی آیتم از روی DB (زنجیره‌ی والد) — پیش‌فرض '' = سراسری."""
+    try:
+        if kind == 'lesson':
+            return await db.lesson_intake(item_id)
+        if kind == 'session':
+            return await db.session_intake(item_id)
+        if kind == 'content':
+            return await db.content_intake(item_id)
+        if kind == 'ref_subject':
+            return await db.ref_subject_intake(item_id)
+        if kind == 'ref_book':
+            return await db.ref_book_intake(item_id)
+        if kind == 'ref_file':
+            return await db.ref_file_intake(item_id)
+    except Exception:
+        pass
+    return ''
+
+
+async def _enforce_item_scope(query, uid: int, action: str, parts) -> bool:
+    """True اگر actor به آیتمِ callback دسترسی دارد؛ وگرنه ⛔ + False."""
+    kind = ITEM_INTAKE_CHECKS.get(action)
+    if not kind or len(parts) < 3:
+        return True
+    item_intake = await _resolve_item_intake(kind, parts[2])
+    if await db.can_access_intake(uid, item_intake):
+        return True
+    await _deny_scope(query, uid)
+    return False
 
 
 def _back_btn(label, cb):
@@ -53,6 +137,68 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not await db.is_content_admin(uid):
         await query.answer("❌ دسترسی ندارید!", show_alert=True); return
 
+    # ══════════════════════════════════════════════════════
+    #  🌊 موج C1 — گیت scope ورودی (Backend-Enforced، §۸/§۱۱ spec)
+    #  • ادمین scoped: context را روی scope خودش قفل می‌کنیم —
+    #    هیچ‌کدام از داده‌های callback/user_data trusted نیستند.
+    #  • ادمین ارشد (global): بدون context انتخاب‌شده → picker.
+    #  • تمام اکشن‌های آیتم‌محور: intake واقعی آیتم از DB خوانده
+    #    و با scope کاربر تطبیق داده می‌شود (ضد callback-manipulation).
+    # ══════════════════════════════════════════════════════
+    _cscope = await db.get_content_scope(uid)
+    if not _cscope:
+        await query.answer("❌ دسترسی ندارید!", show_alert=True); return
+    is_scoped = (_cscope['kind'] == 'scoped')
+    if is_scoped:
+        context.user_data['ca_intake'] = _cscope.get('intake') or ''
+
+    # ─ انتخاب/تغییر ورودی (فقط ادمین ارشد) ─
+    if action == 'intake':
+        if is_scoped:
+            await _deny_scope(query, uid); return
+        pick = parts[2] if len(parts) > 2 else ''
+        code = '' if pick == GLOBAL_PICK else pick
+        if code:
+            intakes = await db.get_all_intakes()
+            if not any(i['code'] == code for i in intakes):
+                await query.answer("❌ ورودی نامعتبر است!", show_alert=True); return
+        prev = context.user_data.get('ca_intake')
+        context.user_data['ca_intake'] = code
+        if prev != code:
+            try:
+                from utils import send_audit_log
+                actor = await db.get_user(uid)
+                actor_name = actor.get('name', 'ادمین محتوا') if actor else 'ادمین محتوا'
+                await send_audit_log(
+                    context.bot, 'content', actor_name, uid,
+                    "تغییر متن مدیریت محتوا", module='Content', severity='INFO',
+                    actor_role=await db.get_actor_role_label(uid),
+                    details=f"🏷 ورودی: {await _intake_label(code)}",
+                    tags=['تغییر_ورودی']
+                )
+            except Exception:
+                pass
+        await query.answer(f"📅 {await _intake_label(code)}")
+        await _show_main(query, uid, context)
+        return ConversationHandler.END
+
+    elif action == 'change_intake':
+        if is_scoped:
+            await _deny_scope(query, uid); return
+        await _show_intake_picker(query)
+        return ConversationHandler.END
+
+    ca_intake = context.user_data.get('ca_intake')
+
+    # ادمین ارشد بدون context → اول picker (§۵ spec: اولین صفحه = انتخاب ورودی)
+    if not is_scoped and ca_intake is None and action != 'main':
+        await _show_intake_picker(query)
+        return ConversationHandler.END
+
+    # enforce آیتم‌محور — قبل از هر نمایش/تغییر (ضد ID manipulation)
+    if not await _enforce_item_scope(query, uid, action, parts):
+        return ConversationHandler.END
+
     KEEP_MODE = ('sel_ctype','upload_ref','add_lesson_prompt','add_session_prompt',
                  'add_ref_subject_prompt','add_ref_book_prompt','add_faq_prompt',
                  'upload_ref_volume_prompt','upload_content',
@@ -66,7 +212,10 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     # ════ منوی اصلی ════
     if action == 'main':
-        await _show_main(query, uid)
+        if not is_scoped and ca_intake is None:
+            await _show_intake_picker(query)
+            return ConversationHandler.END
+        await _show_main(query, uid, context)
 
     # ══════════ علوم پایه ══════════
 
@@ -95,14 +244,16 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     # ─ ترتیب درس‌ها ─
     elif action == 'lesson_up':
         lid = parts[2]; idx = context.user_data.get('ca_term_idx', 0)
-        await db.reorder_up('bs_lessons', lid, {'term': TERMS[idx]})
+        await db.reorder_up('bs_lessons', lid,
+            {'term': TERMS[idx], 'intake': context.user_data.get('ca_intake', '')})
         fa = context.user_data.get('ca_from_admin', False)
         await _show_lessons(query, context, TERMS[idx],
                             back='ca:terms_admin' if fa else 'ca:terms')
 
     elif action == 'lesson_down':
         lid = parts[2]; idx = context.user_data.get('ca_term_idx', 0)
-        await db.reorder_down('bs_lessons', lid, {'term': TERMS[idx]})
+        await db.reorder_down('bs_lessons', lid,
+            {'term': TERMS[idx], 'intake': context.user_data.get('ca_intake', '')})
         fa = context.user_data.get('ca_from_admin', False)
         await _show_lessons(query, context, TERMS[idx],
                             back='ca:terms_admin' if fa else 'ca:terms')
@@ -307,22 +458,24 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif action in ('refs','refs_admin'):
         context.user_data['ca_ref_from_admin'] = from_admin
-        await _show_ref_subjects(query, back=back_main)
+        await _show_ref_subjects(query, back=back_main, context=context)
 
     # ─ ترتیب درس‌های رفرنس ─
     elif action == 'ref_subject_up':
         sid = parts[2]
-        await db.reorder_up('ref_subjects', sid, {})
+        await db.reorder_up('ref_subjects', sid,
+            {'intake': context.user_data.get('ca_intake', '')})
         fa = context.user_data.get('ca_ref_from_admin', False)
         back = 'ca:refs_admin' if fa else 'ca:refs'
-        await _show_ref_subjects(query, back=back)
+        await _show_ref_subjects(query, back=back, context=context)
 
     elif action == 'ref_subject_down':
         sid = parts[2]
-        await db.reorder_down('ref_subjects', sid, {})
+        await db.reorder_down('ref_subjects', sid,
+            {'intake': context.user_data.get('ca_intake', '')})
         fa = context.user_data.get('ca_ref_from_admin', False)
         back = 'ca:refs_admin' if fa else 'ca:refs'
-        await _show_ref_subjects(query, back=back)
+        await _show_ref_subjects(query, back=back, context=context)
 
     elif action == 'add_ref_subject_prompt':
         context.user_data['ca_mode'] = 'add_ref_subject'
@@ -460,7 +613,7 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     # ══════════ FAQ ══════════
 
     elif action == 'overview':
-        await _show_overview(query)
+        await _show_overview(query, uid, context)
 
     elif action == 'create_q':
         # redirect به بانک سوال برای طراحی سوال
@@ -505,20 +658,36 @@ async def content_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 #  توابع نمایش
 # ══════════════════════════════════════════════════════════
 
-async def _show_main(query, uid: int = None):
-    """
-    FIX جدید: اگر کاربر مدیر محتوای محدود (content_scoped) باشد،
-    یک بنر اطلاعاتی بالای منو نشان می‌دهد که فقط به ورودی خاصی
-    دسترسی دارد — تا سردرگم نشود چرا محتوای ورودی‌های دیگر را نمی‌بیند.
-    """
-    scope_banner = ""
-    if uid is not None:
-        scope_intake = await db.get_scoped_intake(uid)
-        if scope_intake:
-            intakes = await db.get_all_intakes()
-            label = next((i['label'] for i in intakes if i['code'] == scope_intake), scope_intake)
-            scope_banner = f"📅 <b>محدود به ورودی: {label}</b>\n━━━━━━━━━━━━━━━━\n\n"
-    keyboard = [
+async def _show_intake_picker(query_or_message, uid: int = None, edit: bool = True):
+    """🌊 موج C1 — اولین صفحه‌ی ادمین ارشد محتوا (§۵ spec):
+    «محتوای کدام ورودی را می‌خواهید مدیریت کنید؟»
+    ورودی‌های فعال + سطل 🌐 سراسری (محتوای legacy/مشترک)."""
+    intakes = await db.get_all_intakes()
+    active  = [i for i in intakes if i.get('active', True)]
+    kb = []
+    for i in active:
+        kb.append([InlineKeyboardButton(
+            f"📅 {i['label']}", callback_data=f"ca:intake:{i['code']}")])
+    kb.append([InlineKeyboardButton(
+        GLOBAL_INTAKE_LABEL, callback_data=f"ca:intake:{GLOBAL_PICK}")])
+    if edit:
+        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data='dashboard:refresh')])
+    text = (
+        "🎓 <b>پنل ادمین محتوا</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "محتوای کدام ورودی را می‌خواهید مدیریت کنید؟\n\n"
+        "<i>🌐 سراسری = محتوای مشترک و داده‌های قدیمی</i>"
+    )
+    if edit:
+        await query_or_message.edit_message_text(
+            text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await query_or_message.reply_text(
+            text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+
+
+def _main_keyboard(is_scoped: bool):
+    kb = [
         [InlineKeyboardButton("📊 آمار محتوا",          callback_data='ca:overview')],
         [
             InlineKeyboardButton("🔬 علوم پایه",         callback_data='ca:terms'),
@@ -527,38 +696,89 @@ async def _show_main(query, uid: int = None):
         [InlineKeyboardButton("✏️ طراحی سوال",           callback_data='ca:create_q')],
         [InlineKeyboardButton("🧪 مدیریت سوالات",        callback_data='questions:ca_q_list')],
         [InlineKeyboardButton("❓ سوالات متداول",          callback_data='ca:faq')],
-        [InlineKeyboardButton("🔙 بازگشت",               callback_data='dashboard:refresh')],
     ]
-    header = f"🎓 <b>پنل ادمین محتوا</b>\n\n{scope_banner}" if scope_banner else "🎓 <b>پنل ادمین محتوا</b>\n━━━━━━━━━━━━━━━━"
+    if not is_scoped:
+        kb.append([InlineKeyboardButton("🔄 تغییر ورودی", callback_data='ca:change_intake')])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data='dashboard:refresh')])
+    return kb
+
+
+async def _show_main(query, uid: int = None, context=None):
+    """🌊 C1 — منوی اصلی: خط وضعیت ورودی + دکمه‌ی تغییر ورودی برای
+    ادمین ارشد؛ برای ادمین ورودی خاص فقط بنر قفل (بدون picker)."""
+    cscope = await db.get_content_scope(uid) if uid else None
+    is_scoped = bool(cscope and cscope['kind'] == 'scoped')
+    if is_scoped:
+        label = await _intake_label(cscope.get('intake') or '')
+        header = (
+            "🎓 <b>پنل محتوای ورودی</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"📅 <b>ورودی تحت مدیریت:</b>\n<b>{label}</b>"
+        )
+    else:
+        intake = (context.user_data.get('ca_intake')
+                  if context is not None else None) or ''
+        label = await _intake_label(intake)
+        header = (
+            "🎓 <b>پنل ادمین محتوا</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"📅 <b>ورودی فعلی:</b> {label}"
+        )
     await query.edit_message_text(
         header, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(_main_keyboard(is_scoped))
     )
 
 
-
-async def show_ca_main(message, uid: int):
-    """فراخوانی از message_router — دکمه 🎓 پنل محتوا"""
-    keyboard = [
-        [InlineKeyboardButton("📊 آمار محتوا",          callback_data='ca:overview')],
-        [
-            InlineKeyboardButton("🔬 علوم پایه",         callback_data='ca:terms'),
-            InlineKeyboardButton("📚 رفرنس‌ها",           callback_data='ca:refs'),
-        ],
-        [InlineKeyboardButton("✏️ طراحی سوال",           callback_data='ca:create_q')],
-        [InlineKeyboardButton("🧪 مدیریت سوالات",        callback_data='questions:ca_q_list')],
-        [InlineKeyboardButton("❓ سوالات متداول",          callback_data='ca:faq')],
-    ]
+async def show_ca_main(message, uid: int, context=None):
+    """فراخوانی از message_router — دکمه 🎓 پنل محتوا
+    🌊 C1: scoped → قفل خودکار روی scope؛ global → picker در اولین ورود."""
+    cscope = await db.get_content_scope(uid)
+    is_scoped = bool(cscope and cscope['kind'] == 'scoped')
+    if is_scoped:
+        if context is not None:
+            context.user_data['ca_intake'] = cscope.get('intake') or ''
+        label = await _intake_label(cscope.get('intake') or '')
+        header = (
+            "🎓 <b>پنل محتوای ورودی</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"📅 <b>ورودی تحت مدیریت:</b>\n<b>{label}</b>"
+        )
+    else:
+        intake = (context.user_data.get('ca_intake')
+                  if context is not None else None)
+        if intake is None:
+            await _show_intake_picker(message, uid, edit=False)
+            return
+        label = await _intake_label(intake or '')
+        header = (
+            "🎓 <b>پنل ادمین محتوا</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            f"📅 <b>ورودی فعلی:</b> {label}"
+        )
+    kb = _main_keyboard(is_scoped)
+    # نسخه‌ی پیام‌محور: دکمه‌ی بازگشت تحت‌الشعاع dashboard کار نمی‌کند، حذفش می‌کنیم
+    kb = [row for row in kb
+          if not any(b.callback_data == 'dashboard:refresh' for b in row)]
     await message.reply_text(
-        "🎓 <b>پنل ادمین محتوا</b>\n━━━━━━━━━━━━━━━━",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        header, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 
-async def _show_overview(query):
-    """نمای کلی آمار — طراحی حرفه‌ای"""
-    s = await db.content_admin_stats()
+async def _show_overview(query, uid: int = None, context=None):
+    """نمای کلی آمار — 🌊 C1: محدود به intake جاریِ context (§۱۷ spec)."""
+    intake = None
+    if uid is not None:
+        cscope = await db.get_content_scope(uid)
+        if cscope and cscope['kind'] == 'scoped':
+            intake = cscope.get('intake') or ''
+        elif context is not None:
+            intake = context.user_data.get('ca_intake', '')
+    if intake is None:
+        intake = ''
+    s = await db.content_admin_stats(intake=intake)
+    intake_label = await _intake_label(intake)
 
     # ── نوار پیشرفت ──
     def bar(val, mx, width=8):
@@ -579,7 +799,8 @@ async def _show_overview(query):
     text = (
         "📊 <b>داشبورد پنل محتوا</b>\n"
         "━━━━━━━━━━━━━━━━\n"
-        f"<i>🕐 {now}</i>\n\n"
+        f"<i>🕐 {now}</i>\n"
+        f"<i>📅 ورودی: {intake_label}</i>\n\n"
 
         "📘 <b>علوم پایه</b>\n"
         f"📖 <b>{s['bs_lessons']}</b> درس   "
@@ -634,7 +855,9 @@ async def _show_terms(query, back='ca:main'):
 
 
 async def _show_lessons(query, context, term, back='ca:terms'):
-    lessons = await db.bs_get_lessons(term)
+    # 🌊 C1 — لیست درس‌ها فقط در scope انتخاب‌شده/قفل‌شده
+    lessons = await db.bs_get_lessons(
+        term, intake=context.user_data.get('ca_intake', ''))
     idx     = context.user_data.get('ca_term_idx', 0)
     kb = []
     for i, l in enumerate(lessons):
@@ -730,8 +953,11 @@ async def _show_session_content(query, context, sid):
     await query.edit_message_text(header, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def _show_ref_subjects(query, back='ca:main'):
-    subjects = await db.ref_get_subjects()
+async def _show_ref_subjects(query, back='ca:main', context=None):
+    # 🌊 C1 — موضوعات رفرنس فقط در scope انتخاب‌شده/قفل‌شده
+    intake = (context.user_data.get('ca_intake', '')
+              if context is not None else '')
+    subjects = await db.ref_get_subjects(intake=intake)
     kb = []
     for i, s in enumerate(subjects):
         sid = str(s['_id'])
@@ -836,9 +1062,23 @@ async def _show_faq(query, back='ca:main'):
 #  هندلر فایل
 # ══════════════════════════════════════════════════════════
 
+async def _ca_msg_scope(update, context):
+    """🌊 C1 — گیت scope برای هندلرهای متن/فایل: scoped روی scope خودش
+    قفل می‌شود؛ خروجی: (cscope, ctx_intake) یا (None, None) بی‌دسترسی."""
+    uid = update.effective_user.id
+    cscope = await db.get_content_scope(uid)
+    if not cscope:
+        return None, None
+    if cscope['kind'] == 'scoped':
+        context.user_data['ca_intake'] = cscope.get('intake') or ''
+    return cscope, context.user_data.get('ca_intake') or ''
+
+
 async def ca_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
     if not await db.is_content_admin(uid): return
+    _cscope, _ctx_intake = await _ca_msg_scope(update, context)
+    if not _cscope: return
     ca_mode = context.user_data.get('ca_mode','')
     if ca_mode not in ('waiting_file','waiting_ref_file'): return
 
@@ -885,6 +1125,8 @@ async def ca_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
     if not await db.is_content_admin(uid): return ConversationHandler.END
+    _cscope, _ctx_intake = await _ca_msg_scope(update, context)
+    if not _cscope: return ConversationHandler.END
     ca_mode = context.user_data.get('ca_mode','')
     text    = update.message.text.strip()
 
@@ -914,7 +1156,8 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ps = [p.strip() for p in text.split(',')]
         name = ps[0]; teacher = ps[1] if len(ps) > 1 else ''
         term = context.user_data.get('ca_term',''); idx = context.user_data.get('ca_term_idx',0)
-        result = await db.bs_add_lesson(term, name, teacher)
+        # 🌊 C1 — درس جدید دقیقاً در scope جاری context ساخته می‌شود
+        result = await db.bs_add_lesson(term, name, teacher, intake=_ctx_intake)
         _clear(context)
         msg = f"✅ درس «{name}» اضافه شد!" if result else "⚠️ این درس قبلاً وجود دارد."
         if result:
@@ -927,12 +1170,17 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ایجاد درس جدید", module='Content', severity='INFO',
                 actor_role=actor_role,
                 target_type='lesson', target_label=name,
-                details=f"ترم: {term}", tags=['ایجاد_درس']
+                details=f"ترم: {term}\n🏷 ورودی: {await _intake_label(_ctx_intake)}",
+                tags=['ایجاد_درس']
             )
         await update.message.reply_text(msg, reply_markup=_back_btn("🔙 برگشت", f'ca:term:{idx}'))
 
     elif ca_mode == 'edit_lesson':
         lid = context.user_data.get('ca_edit_target',''); field = context.user_data.get('ca_edit_field','')
+        if not await db.can_access_intake(uid, await db.lesson_intake(lid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این درس در scope شما نیست.")
+            return ConversationHandler.END
         # FIX جدید: مقدار قبلی را برای لاگ before/after نگه می‌داریم
         old_lesson = await db.bs_get_lesson(lid)
         old_value  = old_lesson.get(field, '') if old_lesson else ''
@@ -958,6 +1206,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif ca_mode == 'add_session':
         ps  = [p.strip() for p in text.split(',')]
         lid = context.user_data.get('ca_lesson_id','')
+        if not await db.can_access_intake(uid, await db.lesson_intake(lid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این درس در scope شما نیست.")
+            return ConversationHandler.END
         if len(ps) < 2:
             await update.message.reply_text(
                 "❌ فرمت اشتباه!\nمثال: <code>3, فیزیولوژی کلیه, دکتر احمدی</code>\n⌨️ /cancel",
@@ -985,6 +1237,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif ca_mode == 'edit_session':
         sid = context.user_data.get('ca_edit_target',''); field = context.user_data.get('ca_edit_field','')
+        if not await db.can_access_intake(uid, await db.session_intake(sid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این جلسه در scope شما نیست.")
+            return ConversationHandler.END
         val = int(text) if field == 'number' and text.isdigit() else text
         old_session = await db.bs_get_session(sid)
         old_value   = old_session.get(field, '') if old_session else ''
@@ -1012,6 +1268,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fid  = context.user_data.get('ca_pending_file','')
         sid  = context.user_data.get('ca_session_id','')
         ct   = context.user_data.get('ca_content_type','pdf')
+        if not await db.can_access_intake(uid, await db.session_intake(sid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این جلسه در scope شما نیست.")
+            return ConversationHandler.END
         await db.bs_add_content(sid, ct, fid, description=desc)
         tl = dict(CONTENT_TYPES).get(ct, ct)
         _clear(context)
@@ -1024,6 +1284,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bid   = context.user_data.get('ca_ref_book_id','')
         lang  = context.user_data.get('ca_ref_lang','fa')
         vol   = context.user_data.get('ca_ref_volume', 1)
+        if not await db.can_access_intake(uid, await db.ref_book_intake(bid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این رفرنس در scope شما نیست.")
+            return ConversationHandler.END
         await db.ref_add_file(bid, lang, fid, volume=vol, description=desc)
         ll = "🇮🇷 فارسی" if lang == 'fa' else "🌐 لاتین"
         _clear(context)
@@ -1032,7 +1296,8 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_back_btn("🔙 برگشت", f'ca:ref_book:{bid}'))
 
     elif ca_mode == 'add_ref_subject':
-        result = await db.ref_add_subject(text)
+        # 🌊 C1 — موضوع جدید در scope جاری context
+        result = await db.ref_add_subject(text, intake=_ctx_intake)
         fa = context.user_data.get('ca_ref_from_admin', False)
         back = 'ca:refs_admin' if fa else 'ca:refs'
         _clear(context)
@@ -1042,6 +1307,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif ca_mode == 'edit_ref_subject':
         sid = context.user_data.get('ca_edit_target','')
+        if not await db.can_access_intake(uid, await db.ref_subject_intake(sid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این موضوع در scope شما نیست.")
+            return ConversationHandler.END
         ok  = await db.ref_update_subject(sid, {'name': text})
         _clear(context)
         await update.message.reply_text(f"✅ نام به «{text}» تغییر یافت." if ok else "❌ خطا.",
@@ -1049,6 +1318,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif ca_mode == 'add_ref_book':
         sid = context.user_data.get('ca_ref_subject_id','')
+        if not await db.can_access_intake(uid, await db.ref_subject_intake(sid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این موضوع در scope شما نیست.")
+            return ConversationHandler.END
         await db.ref_add_book(sid, text)
         _clear(context)
         await update.message.reply_text(f"✅ رفرنس «{text}» اضافه شد!",
@@ -1056,6 +1329,10 @@ async def ca_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif ca_mode == 'edit_ref_book':
         bid = context.user_data.get('ca_edit_target','')
+        if not await db.can_access_intake(uid, await db.ref_book_intake(bid)):
+            _clear(context)
+            await update.message.reply_text("⛔ دسترسی غیرمجاز — این رفرنس در scope شما نیست.")
+            return ConversationHandler.END
         ok  = await db.ref_update_book(bid, {'name': text})
         _clear(context)
         await update.message.reply_text(f"✅ نام کتاب به «{text}» تغییر یافت." if ok else "❌ خطا.",
