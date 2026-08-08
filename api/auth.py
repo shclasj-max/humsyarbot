@@ -120,10 +120,42 @@ def require_perm(permission: str):
 
 
 async def get_content_admin_user(user=Depends(get_current_user)) -> dict:
-    role = user["_db"].get("role", "student")
-    if user["id"] != ADMIN_ID and role not in ("admin", "content_admin"):
+    """🌊 موج C1 — گیت پنل محتوا: هر دارنده‌ی scope معتبر عبور می‌کند:
+    مالک/ادمین/ادمین ارشد محتوا (global) و ادمین محتوای ورودی خاص (scoped).
+    scope محاسبه‌شده روی user['_scope'] سوار می‌شود تا endpointها با
+    enforce_content_intake تصمیم نهایی را بگیرند — گیت فقط «ورود به
+    پنل» است، سطح دسترسیِ هر عملیات در خود endpoint enforce می‌شود."""
+    scope = await db.get_content_scope(user["id"])
+    if not scope:
         raise HTTPException(status_code=403, detail="content_admin_only")
+    user["_scope"] = scope
     return user
+
+
+async def get_content_global_user(user=Depends(get_current_user)) -> dict:
+    """فقط ادمین ارشد محتوا/مالک/ادمین — معادل دقیق رفتار قبلیِ
+    get_content_admin_user برای بخش‌هایی که scope ندارند
+    (schedule/grades/reports) — ادمین ورودی خاص همچنان ۴۰۳."""
+    scope = await db.get_content_scope(user["id"])
+    if not scope or scope.get("kind") != "global":
+        raise HTTPException(status_code=403, detail="content_admin_only")
+    user["_scope"] = scope
+    return user
+
+
+def resolve_content_intake(user: dict, requested=None) -> str:
+    """تصمیم نهایی intake برای یک endpoint محتوا (§۱۰ spec):
+      • global → intake درخواستی (پیش‌فرض '' = سراسری)
+      • scoped → اگر intake درخواستی با scope مغایرت داشت ۴۰۳؛
+        در غیر این صورت همیشه scope (نه چیزی که کلاینت فرستاده)
+    """
+    scope = user.get("_scope") or {"kind": "scoped", "intake": ""}
+    if scope.get("kind") == "global":
+        return (requested or "") if requested is not None else ""
+    own = scope.get("intake") or ""
+    if requested not in (None, "", own):
+        raise HTTPException(status_code=403, detail="intake_out_of_scope")
+    return own
 
 
 async def get_resource_access_user(user=Depends(get_current_user)) -> dict:
