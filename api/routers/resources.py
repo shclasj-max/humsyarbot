@@ -18,6 +18,24 @@ router = APIRouter()
 _sending_users: set[int] = set()
 
 
+async def _viewer_intake(user: dict):
+    """🌊 C1 — scope دید محتوا: دانشجو → [ورودی خودش، سراسری]؛
+    مدیر محتوا/مالک → None (بدون فیلتر، رفتار پیش‌نمایش قدیمی).
+    enforce در همین لایه (Backend) انجام می‌شود، نه فرانت."""
+    if await db.is_content_admin(user["id"]):
+        return None
+    return db.student_intake_filter(
+        (user.get("_db") or {}).get("intake", ""))
+
+
+def _intake_guard(item_intake: str, filt, what: str = "این بخش"):
+    if filt is not None and (item_intake or "") not in filt:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{what} برای ورودی شما نیست",
+        )
+
+
 def _text(
     value,
     default: str = "",
@@ -79,8 +97,16 @@ def _public_file(
 async def terms(
     user=Depends(get_resource_access_user),
 ):
+    # 🌊 C1 — ترم‌ها/شمارش درس‌ها فقط در scope دید کاربر
+    filt = await _viewer_intake(user)
+    fq = (
+        {"intake": {"$in": filt}}
+        if filt is not None
+        else {}
+    )
     raw_terms = await db.bs_lessons.distinct(
-        "term"
+        "term",
+        fq,
     )
 
     term_names = sorted(
@@ -95,9 +121,7 @@ async def terms(
 
     for term in term_names:
         count = await db.bs_lessons.count_documents(
-            {
-                "term": term,
-            }
+            dict(fq, term=term)
         )
 
         result.append(
@@ -121,7 +145,8 @@ async def lessons(
     user=Depends(get_resource_access_user),
 ):
     items = await db.bs_get_lessons(
-        term
+        term,
+        intake=await _viewer_intake(user),
     )
 
     result = []
@@ -179,6 +204,12 @@ async def sessions(
     lesson_id: str,
     user=Depends(get_resource_access_user),
 ):
+    # 🌊 C1 — ضد ID-manipulation: درس ورودی دیگر ⇒ ۴۰۳
+    _intake_guard(
+        await db.lesson_intake(lesson_id),
+        await _viewer_intake(user),
+        "این درس",
+    )
     items = await db.bs_get_sessions(
         lesson_id
     )
@@ -240,6 +271,12 @@ async def files(
     session_id: str,
     user=Depends(get_resource_access_user),
 ):
+    # 🌊 C1 — ضد ID-manipulation: جلسه ورودی دیگر ⇒ ۴۰۳
+    _intake_guard(
+        await db.session_intake(session_id),
+        await _viewer_intake(user),
+        "این جلسه",
+    )
     items = await db.bs_get_content(
         session_id
     )
@@ -285,6 +322,13 @@ async def download(
             status_code=404,
             detail="فایل پیدا نشد",
         )
+
+    # 🌊 C1 — ضد دانلود متقاطع (Backend-enforced)
+    _intake_guard(
+        await db.content_intake(content_id),
+        await _viewer_intake(user),
+        "این فایل",
+    )
 
     if not _text(
         item.get("file_id")
