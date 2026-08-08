@@ -1503,6 +1503,14 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"rbac seed/migrate error: {e}")
 
+    # 🌊 موج C1 — مهاجرت scope ورودی محتوا (idempotent: backfill '' فقط
+    # روی اسناد فاقد فیلد + rename شرطی label). خطا مانع بوت نمی‌شود.
+    try:
+        c1 = await db.migrate_content_intake_scope()
+        logger.info(f"🌊 C1 migrate content-intake-scope: {c1}")
+    except Exception as e:
+        logger.error(f"C1 migrate error: {e}")
+
     # FIX جدید: افزودن یک‌باره‌ی سؤالات FAQ اشتراک/کپی‌رایت
     try:
         await db.seed_subscription_copyright_faqs()
