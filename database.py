@@ -79,6 +79,7 @@ class DB:
         self.roles        = _db['roles']
         self.user_roles   = _db['user_roles']
         self.perm_catalog = _db['perm_catalog']
+        self.migrations   = _db['migrations']        # 🌊 C1 — وضعیت مهاجرت‌ها
         self.audit_logs   = _db['audit_logs']       # FIX جدید: لاگ فعالیت‌های حساس
         # FIX جدید: سیستم اشتراک — پلن‌ها، وضعیت هر کاربر، رسیدهای
         # در انتظار بررسی، و کدهای تخفیف
@@ -111,6 +112,12 @@ class DB:
                 self.users.create_index('intake', background=True),
                 self.questions.create_index('approved', background=True),
                 self.questions.create_index([('lesson', 1), ('topic', 1)], background=True),
+                # 🌊 موج C1 — کوئری داغ ورودی‌محور {(intake,term)} و
+                # فیلتر مدیریت سوال {(intake,approved)} و دانشجو
+                self.questions.create_index([('intake', 1), ('approved', 1)], background=True),
+                self.qbank_files.create_index([('intake', 1), ('lesson', 1)], background=True),
+                self.bs_lessons.create_index([('intake', 1), ('term', 1), ('order', 1)], background=True),
+                self.ref_subjects.create_index([('intake', 1), ('order', 1)], background=True),
                 self.bs_lessons.create_index([('term', 1), ('order', 1)], background=True),
                 self.bs_sessions.create_index([('lesson_id', 1), ('number', 1)], background=True),
                 self.bs_content.create_index([('session_id', 1), ('order', 1)], background=True),
@@ -429,15 +436,32 @@ class DB:
     #  علوم پایه — درس‌ها
     # ══════════════════════════════════════════════════
 
-    async def bs_get_lessons(self, term: str):
-        return await self.bs_lessons.find({'term': term}).sort('order', 1).to_list(50)
+    @staticmethod
+    def _intake_q(intake):
+        """🌊 C1 — ساخت فیلتر intake: None=بدون فیلتر (رفتار قدیمی)،
+        str=دقیقاً همان scope، list=هرکدام (مسیر دانشجو: خودش+سراسری)."""
+        if intake is None:
+            return {}
+        if isinstance(intake, (list, tuple, set)):
+            return {'intake': {'$in': list(intake)}}
+        return {'intake': intake or ''}
 
-    async def bs_add_lesson(self, term: str, name: str, teacher: str = ''):
-        if await self.bs_lessons.find_one({'term': term, 'name': name}):
+    async def bs_get_lessons(self, term: str, intake=None):
+        q = {'term': term}
+        q.update(self._intake_q(intake))
+        return await self.bs_lessons.find(q).sort('order', 1).to_list(50)
+
+    async def bs_add_lesson(self, term: str, name: str, teacher: str = '',
+                            intake: str = ''):
+        intake = intake or ''
+        if await self.bs_lessons.find_one(
+                {'term': term, 'name': name, 'intake': intake}):
             return None
-        count = await self.bs_lessons.count_documents({'term': term})
+        count = await self.bs_lessons.count_documents(
+            {'term': term, 'intake': intake})
         r = await self.bs_lessons.insert_one({
             'term': term, 'name': name, 'teacher': teacher,
+            'intake': intake,
             'order': count, 'created_at': datetime.now().isoformat(),
         })
         return r.inserted_id
@@ -787,14 +811,18 @@ class DB:
     #  رفرنس‌ها
     # ══════════════════════════════════════════════════
 
-    async def ref_get_subjects(self):
-        return await self.ref_subjects.find({}).sort('order', 1).to_list(100)
+    async def ref_get_subjects(self, intake=None):
+        q = self._intake_q(intake)
+        return await self.ref_subjects.find(q).sort('order', 1).to_list(100)
 
-    async def ref_add_subject(self, name: str):
-        if await self.ref_subjects.find_one({'name': name}): return None
-        count = await self.ref_subjects.count_documents({})
+    async def ref_add_subject(self, name: str, intake: str = ''):
+        intake = intake or ''
+        if await self.ref_subjects.find_one({'name': name, 'intake': intake}):
+            return None
+        count = await self.ref_subjects.count_documents({'intake': intake})
         r = await self.ref_subjects.insert_one({
-            'name': name, 'order': count, 'created_at': datetime.now().isoformat(),
+            'name': name, 'intake': intake,
+            'order': count, 'created_at': datetime.now().isoformat(),
         })
         return r.inserted_id
 
@@ -938,18 +966,22 @@ class DB:
     # ══════════════════════════════════════════════════
 
     async def add_qbank_file(self, lesson: str, topic: str, file_id: str,
-                             description: str, file_type: str = 'document'):
+                             description: str, file_type: str = 'document',
+                             intake: str = ''):
         r = await self.qbank_files.insert_one({
             'lesson': lesson, 'topic': topic, 'file_id': file_id,
             'file_type': file_type, 'description': description,
+            'intake': intake or '',
             'upload_date': datetime.now().isoformat(), 'downloads': 0,
         })
         return r.inserted_id
 
-    async def get_qbank_files(self, lesson: str = None, topic: str = None):
+    async def get_qbank_files(self, lesson: str = None, topic: str = None,
+                              intake=None):
         q = {}
         if lesson: q['lesson'] = lesson
         if topic:  q['topic']  = topic
+        q.update(self._intake_q(intake))
         return await self.qbank_files.find(q).sort('upload_date', -1).to_list(100)
 
     async def get_qbank_file(self, fid: str):
@@ -991,7 +1023,8 @@ class DB:
                            question: str, options: list, correct: int,
                            explanation: str, creator: int, auto_approve: bool = False,
                            chapter: str = '', tags: list = None,
-                           question_image: str = None, answer_image: str = None):
+                           question_image: str = None, answer_image: str = None,
+                           intake: str = ''):
         """
         FIX/بهبود (بانک سوالات حرفه‌ای): فیلدهای جدید و اختیاری اضافه شد —
         chapter (فصل)، tags (تگ‌ها)، question_image/answer_image (شناسه
@@ -1005,17 +1038,20 @@ class DB:
             'question': question, 'options': options, 'correct_answer': correct,
             'explanation': explanation, 'creator_id': creator,
             'question_image': question_image, 'answer_image': answer_image,
+            'intake': intake or '',
             'approved': auto_approve, 'created_at': datetime.now().isoformat(),
             'attempt_count': 0, 'correct_count': 0,
         })
         return r.inserted_id
 
     async def get_questions(self, lesson: str = None, topic: str = None,
-                            difficulty: str = None, limit: int = 1, exclude: list = None):
+                            difficulty: str = None, limit: int = 1,
+                            exclude: list = None, intake=None):
         q = {'approved': True}
         if lesson:    q['lesson'] = lesson
         if topic and topic != 'همه': q['topic'] = topic
         if difficulty: q['difficulty'] = difficulty
+        q.update(self._intake_q(intake))
         if exclude:
             try: q['_id'] = {'$nin': [ObjectId(i) for i in exclude]}
             except Exception: pass
@@ -1060,9 +1096,15 @@ class DB:
     async def get_weak_questions(self, uid: int, limit: int = 1):
         user = await self.get_user(uid)
         weak = user.get('weak_topics', []) if user else []
-        if not weak: return await self.get_questions(limit=limit)
-        return await self.questions.find(
-            {'approved': True, 'topic': {'$in': weak}}
+        # 🌊 C1 — حتی سوالات ضعف هم در همان scope ورودی دانشجو هستند
+        sf = self._intake_q(self.student_intake_filter(
+            (user or {}).get('intake', '')))
+        if not weak: return await self.get_questions(
+            limit=limit, intake=self.student_intake_filter(
+                (user or {}).get('intake', '')))
+        q = {'approved': True, 'topic': {'$in': weak}}
+        q.update(sf)
+        return await self.questions.find(q
         ).limit(limit).to_list(limit)
 
     async def get_question_by_id(self, qid: str):
@@ -3836,7 +3878,12 @@ class DB:
         d['new_users_week'] = new_users
         return d
 
-    async def content_admin_stats(self) -> dict:
+    async def content_admin_stats(self, intake=None) -> dict:
+        """آمار پنل محتوا. پیش‌فرض intake=None ⇒ رفتار قدیمی (کل سیستم).
+        🌊 C1 — با intake مشخص (از جمله '' = سراسری): فقط لنگرهای همان
+        scope شمرده می‌شوند؛ فرزندان از طریق شناسه‌ی والد join می‌شوند."""
+        if intake is not None:
+            return await self._content_admin_stats_scoped(intake)
         keys_content = [
             ('bs_lessons',   self.bs_lessons,   {}),
             ('bs_sessions',  self.bs_sessions,  {}),
@@ -3864,6 +3911,60 @@ class DB:
         r_bs, r_ref = await asyncio.gather(
             self.bs_content.aggregate(pipeline).to_list(1),
             self.ref_files.aggregate(pipeline).to_list(1),
+        )
+        result['total_downloads'] = (
+            (r_bs[0]['total']  if r_bs  else 0) +
+            (r_ref[0]['total'] if r_ref else 0)
+        )
+        return result
+
+    async def _content_admin_stats_scoped(self, intake: str) -> dict:
+        """🌊 C1 — همان ساختار content_admin_stats ولی محدود به یک scope."""
+        intake = intake or ''
+        lessons = await self.bs_lessons.find({'intake': intake}).to_list(500)
+        lids = [str(l['_id']) for l in lessons]
+        sessions = await self.bs_sessions.find(
+            {'lesson_id': {'$in': lids}}).to_list(2000) if lids else []
+        sids = [str(s['_id']) for s in sessions]
+        cq = {'session_id': {'$in': sids}} if sids else {'session_id': '__none__'}
+
+        subjects = await self.ref_subjects.find({'intake': intake}).to_list(500)
+        sub_ids = [str(s['_id']) for s in subjects]
+        books = await self.ref_books.find(
+            {'subject_id': {'$in': sub_ids}}).to_list(2000) if sub_ids else []
+        bids = [str(b['_id']) for b in books]
+        fq = {'book_id': {'$in': bids}} if bids else {'book_id': '__none__'}
+
+        keys = [
+            ('bs_lessons',   self.bs_lessons,   {'intake': intake}),
+            ('bs_sessions',  self.bs_sessions,  {'lesson_id': {'$in': lids} if lids else {'$in': []}}),
+            ('bs_total',     self.bs_content,   cq),
+            ('bs_video',     self.bs_content,   dict(cq, type='video')),
+            ('bs_pdf',       self.bs_content,   dict(cq, type='pdf')),
+            ('bs_ppt',       self.bs_content,   dict(cq, type='ppt')),
+            ('bs_voice',     self.bs_content,   dict(cq, type='voice')),
+            ('bs_note',      self.bs_content,   dict(cq, type='note')),
+            ('bs_test',      self.bs_content,   dict(cq, type='test')),
+            ('ref_subjects', self.ref_subjects, {'intake': intake}),
+            ('ref_books',    self.ref_books,    {'subject_id': {'$in': sub_ids} if sub_ids else {'$in': []}}),
+            ('ref_files',    self.ref_files,    fq),
+            ('ref_fa',       self.ref_files,    dict(fq, lang='fa')),
+            ('ref_en',       self.ref_files,    dict(fq, lang='en')),
+            ('q_total',      self.questions,    {'approved': True, 'intake': intake}),
+            ('q_pending',    self.questions,    {'approved': False, 'intake': intake}),
+            ('q_by_bot',     self.questions,    {'approved': True, 'by_bot': True, 'intake': intake}),
+            ('q_by_users',   self.questions,    {'approved': True, 'by_bot': {'$ne': True}, 'intake': intake}),
+            ('users_count',  self.users,        {'approved': True, 'intake': intake} if intake else {'approved': True}),
+        ]
+        counts = await asyncio.gather(*[col.count_documents(q) for _, col, q in keys])
+        result = {k: v for (k, col, q), v in zip(keys, counts)}
+        pipeline_bs = [{'$match': cq},
+                       {'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
+        pipeline_rf = [{'$match': fq},
+                       {'$group': {'_id': None, 'total': {'$sum': '$downloads'}}}]
+        r_bs, r_ref = await asyncio.gather(
+            self.bs_content.aggregate(pipeline_bs).to_list(1),
+            self.ref_files.aggregate(pipeline_rf).to_list(1),
         )
         result['total_downloads'] = (
             (r_bs[0]['total']  if r_bs  else 0) +
@@ -4405,8 +4506,11 @@ class DB:
     # نقش‌های ممکن و برچسب فارسی‌شان
     ROLE_LABELS = {
         'support':        '🎫 پشتیبان (فقط تیکت)',
-        'content_admin':  '🎓 مدیر محتوا (کلی)',
-        'content_scoped': '📅 مدیر محتوا (محدود به ورودی)',
+        # 🌊 موج C1 — rename برچسب‌ها (کلید نقش دست‌نخورده):
+        # content_admin  = ادمین ارشد محتوا (همه ورودی‌ها + سراسری)
+        # content_scoped = ادمین محتوای ورودی خاص (قفل‌شده روی scope_intake)
+        'content_admin':  '🎓 ادمین ارشد محتوا',
+        'content_scoped': '📅 ادمین محتوای ورودی خاص',
         'broadcaster':    '📢 مسئول اطلاعیه',
         'reviewer':       '🤓 خرخون (بررسی گزارش سوال/جزوه)',   # FIX جدید
         'bot_admin':      '👮 ادمین ربات (نماینده)',            # FIX جدید
@@ -4480,13 +4584,121 @@ class DB:
         """
         اگه کاربر مدیر محتوای محدود به یک ورودی خاص باشد، کد آن
         ورودی را برمی‌گرداند، وگرنه None (یعنی دسترسی کامل/بدون محدودیت)
+        🌊 موج C1: منبع دوم — دارندگان مجوز content.scoped که فقط در
+        user_roles.scope_intake ثبت شده‌اند (داربست تک‌منبع RBAC).
         """
         if uid == int(os.getenv('ADMIN_ID', '0')):
             return None
         doc = await self.get_admin_role(uid)
         if doc and doc.get('role') == 'content_scoped':
             return doc.get('scope_intake')
+        # C1 — fallback: نقش دیتابیس‌محور با scope (میرور دوطرفه موجود،
+        # ولی اگر user_roles جلوتر بود، scope از آنجا خوانده می‌شود)
+        ur = await self.user_roles.find_one({'_id': uid})
+        if ur and ur.get('scope_intake'):
+            scope = ur.get('scope_intake')
+            keys  = list(ur.get('roles') or [])
+            if 'content_scoped' in keys:
+                return scope
+            # نقش سفارشی دارای مجوز content.scoped
+            if await self.has_perm(uid, 'content.scoped'):
+                return scope
         return None
+
+    # ══════════════════════════════════════════════════
+    #  🌊 موج C1 — متن (scope) محتوای ورودی‌محور
+    #  قرارداد: intake='' یعنی «🌐 سراسری» (شامل داده legacy).
+    #  لنگرهای scope: bs_lessons / ref_subjects / questions / qbank_files
+    #  فرزندان scope را از والد به ارث می‌برند (resolver زنجیره‌ای).
+    # ══════════════════════════════════════════════════
+
+    async def get_content_scope(self, uid: int) -> dict:
+        """
+        منبع واحد تصمیم scope محتوا (§۸ spec):
+          {'kind':'global'}              → ادمین ارشد محتوا/مالک/ادمین
+          {'kind':'scoped','intake': X}  → ادمین محتوای ورودی خاص
+          None                           → کاربر عادی (دسترسی مدیریتی ندارد)
+        ترتیب: global همیشه بر scoped غلبه دارد (Never-Narrow).
+        """
+        if uid == int(os.getenv('ADMIN_ID', '0')):
+            return {'kind': 'global', 'intake': None}
+        u = await self.get_user(uid)
+        if u and u.get('role') in ('admin', 'content_admin'):
+            return {'kind': 'global', 'intake': None}
+        doc = await self.get_admin_role(uid)
+        if doc and doc.get('role') == 'content_scoped' and doc.get('scope_intake'):
+            return {'kind': 'scoped', 'intake': doc.get('scope_intake')}
+        # RBAC دیتابیس‌محور
+        if await self.has_perm(uid, 'content.manage'):
+            return {'kind': 'global', 'intake': None}
+        if await self.has_perm(uid, 'content.scoped'):
+            scope = await self.get_scoped_intake(uid)
+            if scope:
+                return {'kind': 'scoped', 'intake': scope}
+            # مجوز scoped بدون scope تنظیم‌شده ⇒ legacy رفتار: فقط سراسری
+            return {'kind': 'scoped', 'intake': ''}
+        return None
+
+    async def can_access_intake(self, uid: int, intake: str) -> bool:
+        """enforce مدیریتی: آیا actor اجازه‌ی CRUD/مشاهده‌ی مدیریتی محتوای
+        این intake را دارد؟ global → همه؛ scoped → فقط دقیقاً scope خودش."""
+        scope = await self.get_content_scope(uid)
+        if not scope:
+            return False
+        if scope['kind'] == 'global':
+            return True
+        return (intake or '') == (scope.get('intake') or '')
+
+    # ── resolverهای زنجیره‌ای intake (پیش‌فرض '' = سراسری) ──
+
+    async def lesson_intake(self, lesson_id: str) -> str:
+        try:
+            d = await self.bs_lessons.find_one(
+                {'_id': ObjectId(lesson_id)})
+            return (d or {}).get('intake') or ''
+        except Exception:
+            return ''
+
+    async def session_intake(self, session_id: str) -> str:
+        s = await self.bs_get_session(session_id)
+        if not s:
+            return ''
+        return await self.lesson_intake(s.get('lesson_id', ''))
+
+    async def content_intake(self, content_id: str) -> str:
+        c = await self.bs_get_content_item(content_id)
+        if not c:
+            return ''
+        return await self.session_intake(c.get('session_id', ''))
+
+    async def ref_subject_intake(self, subject_id: str) -> str:
+        try:
+            d = await self.ref_subjects.find_one(
+                {'_id': ObjectId(subject_id)})
+            return (d or {}).get('intake') or ''
+        except Exception:
+            return ''
+
+    async def ref_book_intake(self, book_id: str) -> str:
+        b = await self.ref_get_book(book_id)
+        if not b:
+            return ''
+        return await self.ref_subject_intake(b.get('subject_id', ''))
+
+    async def ref_file_intake(self, file_id: str) -> str:
+        f = await self.ref_get_file(file_id)
+        if not f:
+            return ''
+        return await self.ref_book_intake(f.get('book_id', ''))
+
+    async def question_intake(self, qid: str) -> str:
+        q = await self.get_question_by_id(qid)
+        return (q or {}).get('intake') or ''
+
+    def student_intake_filter(self, user_intake: str):
+        """لیست intakeهای قابل مشاهده برای دانشجو: ورودی خودش + سراسری.
+        این تنها قرارداد خواندن سمت دانشجوست (Bot + API)."""
+        return [user_intake or '', ''] if user_intake else ['']
 
     # ══════════════════════════════════════════════════
     #  🛡 RBAC دیتابیس‌محور — موج W1 (Execution Contract 🔒)
@@ -4646,6 +4858,68 @@ class DB:
                 count_ur += 1
 
         return {'from_admin_roles': count_ar, 'from_users_role': count_ur}
+
+    # ══════════════════════════════════════════════════
+    #  🌊 موج C1 — مهاجرت scope ورودی محتوا
+    # ══════════════════════════════════════════════════
+
+    async def migrate_content_intake_scope(self) -> dict:
+        """مهاجرت Safe + Idempotent + Re-runnable (§۲۴ spec).
+
+        ۱) backfill «intake:''» (= 🌐 سراسری/legacy) روی چهار لنگر
+           محتوایی — فقط اسنادِ فاقد فیلد ($exists:false) ⇒ اجرای
+           دوباره صفر نوشتاری و هیچ overrideای رخ نمی‌دهد. هیچ سندی
+           حذف نمی‌شود و داده‌ی بدون scope orphan نمی‌شود ('' همان
+           سطل نگه‌داری legacy است).
+        ۲) rename شرطی label نقش‌های content_* در کالکشن roles — فقط
+           اگر label هنوز یکی از برچسب‌های قدیمیِ شناخته‌شده باشد؛
+           برچسب سفارشی‌شده‌ی دستی ادمین هرگز له نمی‌شود.
+        ۳) وضعیت اجرا در کالکشن migrations ثبت می‌شود (قابل ردیابی).
+        """
+        now = datetime.now().isoformat()
+        backfilled = {}
+        for name, col in [('bs_lessons', self.bs_lessons),
+                          ('ref_subjects', self.ref_subjects),
+                          ('questions', self.questions),
+                          ('qbank_files', self.qbank_files)]:
+            r = await col.update_many(
+                {'intake': {'$exists': False}},
+                {'$set': {'intake': ''}},
+            )
+            backfilled[name] = r.modified_count
+
+        # rename شرطی label — کلید نقش دست‌نخورده می‌ماند
+        label_map = {
+            'content_admin': {
+                'olds': ['🎓 مدیر محتوا (کلی)', 'مدیر محتوا (کلی)',
+                         'مدیر محتوا کلی', 'مدیر محتوا'],
+                'new': self.ROLE_LABELS['content_admin'],
+            },
+            'content_scoped': {
+                'olds': ['📅 مدیر محتوا (محدود به ورودی)',
+                         '📅 مدیر محتوا (محدود)', 'مدیر محتوا (محدود به ورودی)'],
+                'new': self.ROLE_LABELS['content_scoped'],
+            },
+        }
+        labels_renamed = 0
+        for key, cfg in label_map.items():
+            r = await self.roles.update_one(
+                {'_id': key, 'label': {'$in': cfg['olds']}},
+                {'$set': {'label': cfg['new'],
+                          'icon': cfg['new'].split(' ')[0],
+                          'updated_at': now}},
+            )
+            labels_renamed += r.modified_count
+
+        await self.migrations.update_one(
+            {'_id': 'c1_content_intake_scope'},
+            {'$set': {'backfilled': backfilled,
+                      'labels_renamed': labels_renamed,
+                      'last_run_at': now},
+             '$setOnInsert': {'first_run_at': now}},
+            upsert=True,
+        )
+        return {'backfilled': backfilled, 'labels_renamed': labels_renamed}
 
     # ──────────────────────────────────────────────────
     #  CRUD نقش‌ها
@@ -5347,7 +5621,7 @@ class DB:
             return clean or role_doc.get('role', 'نامشخص')
         user = await self.get_user(uid)
         if user and user.get('role') == 'content_admin':
-            return 'مدیر محتوا'
+            return 'ادمین ارشد محتوا'
         return 'دانشجو'
 
     async def get_logs_by_correlation(self, correlation_id: str) -> list:
