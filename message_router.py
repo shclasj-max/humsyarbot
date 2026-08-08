@@ -217,7 +217,9 @@ async def _route_menu_button(update, context, text: str, uid: int, user: dict):
     elif text == "🎓 پنل محتوا":
         if await db.is_content_admin(uid):
             from content_admin import show_ca_main
-            await show_ca_main(update.message, uid)
+            # 🌊 C1 — context پاس داده می‌شود تا اسکوپ ورودی (انتخاب‌شده
+            # یا قفل‌شده) از user_data خوانده/نوشته شود
+            await show_ca_main(update.message, uid, context)
         else:
             await update.message.reply_text("❌ دسترسی ندارید.")
 
