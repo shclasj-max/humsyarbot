@@ -75,11 +75,29 @@ def _public_reference_file(
     }
 
 
+async def _viewer_intake(user: dict):
+    """🌊 C1 — دانشجو: [ورودی خودش، سراسری]؛ مدیر محتوا/مالک: بدون فیلتر."""
+    if await db.is_content_admin(user["id"]):
+        return None
+    return db.student_intake_filter(
+        (user.get("_db") or {}).get("intake", ""))
+
+
+def _intake_guard(item_intake: str, filt, what: str = "این بخش"):
+    if filt is not None and (item_intake or "") not in filt:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{what} برای ورودی شما نیست",
+        )
+
+
 @router.get("/subjects")
 async def subjects(
     user=Depends(get_resource_access_user),
 ):
-    items = await db.ref_get_subjects()
+    items = await db.ref_get_subjects(
+        intake=await _viewer_intake(user)
+    )
 
     result = []
 
@@ -136,6 +154,13 @@ async def books(
             status_code=404,
             detail="موضوع پیدا نشد",
         )
+
+    # 🌊 C1 — ضد ID-manipulation: موضوع ورودی دیگر ⇒ ۴۰۳
+    _intake_guard(
+        await db.ref_subject_intake(subject_id),
+        await _viewer_intake(user),
+        "این موضوع",
+    )
 
     book_items = await db.ref_get_books(
         subject_id
@@ -217,6 +242,13 @@ async def files(
             status_code=404,
             detail="کتاب پیدا نشد",
         )
+
+    # 🌊 C1 — ضد ID-manipulation: کتاب ورودی دیگر ⇒ ۴۰۳
+    _intake_guard(
+        await db.ref_book_intake(book_id),
+        await _viewer_intake(user),
+        "این کتاب",
+    )
 
     file_items = await db.ref_get_files(
         book_id
@@ -308,6 +340,13 @@ async def download(
                 "فایل رفرنس پیدا نشد"
             ),
         )
+
+    # 🌊 C1 — ضد دانلود متقاطع (Backend-enforced)
+    _intake_guard(
+        await db.ref_file_intake(file_id),
+        await _viewer_intake(user),
+        "این فایل",
+    )
 
     if not _text(
         item.get("file_id")
