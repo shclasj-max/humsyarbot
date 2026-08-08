@@ -512,6 +512,10 @@ async def practice(
             exclude=exclude_ids(
                 exclude
             ),
+            # 🌊 C1 — سوال‌های ورودی دانشجو + سراسری (Backend-enforced)
+            intake=db.student_intake_filter(
+                (user.get("_db") or {}).get("intake", "")
+            ),
         )
     )
 
@@ -603,6 +607,10 @@ async def hard(
 
             exclude=exclude_ids(
                 exclude
+            ),
+            # 🌊 C1 — سوال‌های ورودی دانشجو + سراسری (Backend-enforced)
+            intake=db.student_intake_filter(
+                (user.get("_db") or {}).get("intake", "")
             ),
         )
     )
@@ -1912,6 +1920,13 @@ async def design(
 
             "approved":
                 privileged,
+
+            # 🌊 C1 — scope سوال طراحی‌شده از وب‌اپ:
+            # ادمین ورودی خاص → scope خودش؛ سایر → ورودی کاربر یا سراسری
+            "intake":
+                ((await db.get_scoped_intake(user["id"])) or "")
+                if privileged
+                else (database_user.get("intake", "") or ""),
 
             "source":
                 "webapp",
