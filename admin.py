@@ -87,7 +87,7 @@ async def _admin_menu(query_or_msg, edit: bool = True, uid: int = None):
             [InlineKeyboardButton("🎓 رفتن به پنل محتوا", callback_data='ca:main')],
         ]
         text = (
-            "📅 <b>پنل مدیر محتوای محدود</b>\n━━━━━━━━━━━━━━━━\n\n"
+            "📅 <b>پنل ادمین محتوای ورودی خاص</b>\n━━━━━━━━━━━━━━━━\n\n"
             "شما فقط به محتوای ورودی خاص خودتان دسترسی دارید.\n"
             "از دکمه زیر وارد پنل محتوا شوید:"
         )
@@ -355,7 +355,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             if role == 'content_scoped' and action != 'broadcast':
                 await query.answer(
-                    "ℹ️ شما مدیر محتوای محدود هستید — از منوی «🎓 پنل محتوا» استفاده کنید.",
+                    "ℹ️ شما ادمین محتوای ورودی خاص هستید — از منوی «🎓 پنل محتوا» استفاده کنید.",
                     show_alert=True
                 )
                 return
@@ -2099,8 +2099,8 @@ async def _show_stats_users(query):
     ) or "  —"
 
     role_label = {
-        'support': '🎫 پشتیبان', 'content_admin': '🎓 مدیر محتوا (کلی)',
-        'content_scoped': '📅 مدیر محتوا (محدود)', 'broadcaster': '📢 مسئول اطلاعیه',
+        'support': '🎫 پشتیبان', 'content_admin': '🎓 ادمین ارشد محتوا',
+        'content_scoped': '📅 ادمین محتوای ورودی خاص', 'broadcaster': '📢 مسئول اطلاعیه',
         'reviewer': '🤓 خرخون', 'bot_admin': '👮 ادمین ربات',
     }
     role_lines = "\n".join(
@@ -2129,7 +2129,7 @@ async def _show_stats_users(query):
         f"📅 <b>تفکیک بر اساس ورودی:</b>\n{intake_lines}\n\n"
         f"🏆 <b>برترین کاربران:</b>\n{top_lines}\n\n"
         f"👮 <b>نقش‌های فرعی ادمین:</b>\n{role_lines}\n"
-        f"🎓 ادمین محتوای کلی: <b>{d['content_admins']}</b>"
+        f"🎓 ادمین ارشد محتوا: <b>{d['content_admins']}</b>"
     )
     await query.edit_message_text(text, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([
@@ -2356,7 +2356,7 @@ async def _show_user_detail(query, context, target_uid: int):
         return
     stats   = await db.user_stats(target_uid)
     status  = "✅ تأیید شده" if user.get('approved') else "⏳ در انتظار"
-    role_m  = {'student': '🧑‍🎓 دانشجو', 'content_admin': '🎓 ادمین محتوا'}
+    role_m  = {'student': '🧑‍🎓 دانشجو', 'content_admin': '🎓 ادمین ارشد محتوا'}
     role_t  = role_m.get(user.get('role','student'), user.get('role',''))
     uname   = f"@{user['username']}" if user.get('username') else 'ندارد'
     tickets = await db.ticket_get_user(target_uid)
@@ -2947,7 +2947,7 @@ async def _show_roles(query):
             "💡 شما (مدیر ارشد) همیشه دسترسی کامل دارید.\n"
             "می‌توانید برای دیگران نقش محدودتر بسازید:\n"
             "• 🎫 پشتیبان — فقط پاسخ به تیکت\n"
-            "• 🎓 مدیر محتوا — کلی یا محدود به یک ورودی\n"
+            "• 🎓 ادمین ارشد محتوا / 📅 ادمین محتوای ورودی خاص\n"
             "• 📢 مسئول اطلاعیه — فقط ارسال همگانی"
         )
     else:
@@ -2972,8 +2972,8 @@ async def _show_role_type_picker(query):
     """انتخاب نوع نقش قبل از گرفتن آیدی کاربر"""
     keyboard = [
         [InlineKeyboardButton("🎫 پشتیبان (فقط تیکت)", callback_data='admin:role_type:support')],
-        [InlineKeyboardButton("🎓 مدیر محتوا (کلی)",   callback_data='admin:role_type:content_admin')],
-        [InlineKeyboardButton("📅 مدیر محتوا (محدود به ورودی)", callback_data='admin:role_type:content_scoped')],
+        [InlineKeyboardButton("🎓 ادمین ارشد محتوا",   callback_data='admin:role_type:content_admin')],
+        [InlineKeyboardButton("📅 ادمین محتوای ورودی خاص", callback_data='admin:role_type:content_scoped')],
         [InlineKeyboardButton("📢 مسئول اطلاعیه",        callback_data='admin:role_type:broadcaster')],
         [InlineKeyboardButton("📊 نماینده ورودی (ثبت نمره)", callback_data='admin:role_type:grade_rep')],
         [InlineKeyboardButton("🔙 بازگشت", callback_data='admin:roles')],
