@@ -855,7 +855,7 @@ async def _show_discount_stats(query, code: str):
 
 async def _show_grant_menu(query):
     keyboard = [
-        [InlineKeyboardButton("🎓 مدیر محتوا (کلی — از پروفایل کاربران)", callback_data='suba:grant_role:content_admin')],
+        [InlineKeyboardButton("🎓 ادمین ارشد محتوا (از پروفایل کاربران)", callback_data='suba:grant_role:content_admin')],
     ]
     for role, label in db.ROLE_LABELS.items():
         if role == 'content_admin':
@@ -974,7 +974,7 @@ async def handle_grant_list_days_text(update, context):
 async def _prompt_grant_days(query, context, role: str):
     context.user_data['mode'] = 'suba_grant_days'
     context.user_data['suba_grant_role'] = role
-    label = 'مدیر محتوا (کلی)' if role == 'content_admin' else db.ROLE_LABELS.get(role, role)
+    label = 'ادمین ارشد محتوا' if role == 'content_admin' else db.ROLE_LABELS.get(role, role)
     await query.edit_message_text(
         f"🎁 اعطا به «{label}»\n\nچند روز اشتراک رایگان بدیم؟ (فقط عدد)",
         reply_markup=InlineKeyboardMarkup([_back('suba:grant')])
