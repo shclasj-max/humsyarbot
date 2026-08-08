@@ -41,6 +41,14 @@ async def references_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif action == 'subject':
         subject_id = parts[2]
+        # 🌊 C1 — ضد ID-manipulation: موضوع ورودی دیگر برای دانشجو باز نمی‌شود
+        uid = update.effective_user.id
+        if not await db.is_content_admin(uid):
+            u = await db.get_user(uid)
+            if await db.ref_subject_intake(subject_id) not in \
+                    db.student_intake_filter((u or {}).get('intake', '')):
+                await query.answer("⛔ این بخش برای ورودی شما نیست.",
+                                   show_alert=True); return
         context.user_data['ref_subject_id'] = subject_id
         # بازگشت صحیح: به لیست درس‌ها
         back = 'ref:main_admin' if came_from_admin else 'ref:main'
@@ -74,7 +82,11 @@ async def references_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ══════════════════════════════════════════════════════════
 
 async def _show_subjects(query, back_cb='resources:menu'):
-    subjects = await db.ref_get_subjects()
+    # 🌊 C1 — دانشجو فقط موضوعات ورودی خودش + سراسری؛ پیش‌نمایش ادمین بدون فیلتر
+    uid = query.from_user.id
+    intake = None if await db.is_content_admin(uid) else \
+        db.student_intake_filter(((await db.get_user(uid)) or {}).get('intake', ''))
+    subjects = await db.ref_get_subjects(intake=intake)
     if not subjects:
         await query.edit_message_text(
             "📚 <b>رفرنس‌ها</b>\n\n❌ هنوز درسی تعریف نشده.",
@@ -251,6 +263,14 @@ async def _download_ref(query, file_id_db, uid):
     item = await db.ref_get_file(file_id_db)
     if not item:
         await query.answer("❌ فایل پیدا نشد!", show_alert=True); return
+    # 🌊 C1 — ضد دانلود متقاطع: فایل ورودی دیگر برای دانشجو سرو نمی‌شود
+    if not await db.is_content_admin(uid):
+        u = await db.get_user(uid)
+        if await db.ref_file_intake(file_id_db) not in \
+                db.student_intake_filter((u or {}).get('intake', '')):
+            await query.answer("⛔ این فایل برای ورودی شما نیست.",
+                               show_alert=True)
+            return
     await db.ref_inc_download(file_id_db, uid)
 
     lang  = item.get('lang', 'fa')
