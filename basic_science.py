@@ -45,12 +45,28 @@ async def basic_science_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif action == 'lesson':
         lesson_id = parts[2]
+        # 🌊 C1 — ضد ID-manipulation: درسِ ورودی دیگر برای دانشجو باز نمی‌شود
+        uid = update.effective_user.id
+        if not await db.is_content_admin(uid):
+            u = await db.get_user(uid)
+            if await db.lesson_intake(lesson_id) not in \
+                    db.student_intake_filter((u or {}).get('intake', '')):
+                await query.answer("⛔ این بخش برای ورودی شما نیست.",
+                                   show_alert=True); return
         context.user_data['bs_lesson_id'] = lesson_id
         idx       = context.user_data.get('bs_term_idx', 0)
         await _show_sessions(query, lesson_id, back_cb=f'bs:term:{idx}')
 
     elif action == 'session':
         session_id = parts[2]
+        # 🌊 C1 — ضد ID-manipulation روی جلسه
+        uid = update.effective_user.id
+        if not await db.is_content_admin(uid):
+            u = await db.get_user(uid)
+            if await db.session_intake(session_id) not in \
+                    db.student_intake_filter((u or {}).get('intake', '')):
+                await query.answer("⛔ این بخش برای ورودی شما نیست.",
+                                   show_alert=True); return
         context.user_data['bs_session_id'] = session_id
         lesson_id  = context.user_data.get('bs_lesson_id', '')
         await _show_content(query, session_id, back_cb=f'bs:lesson:{lesson_id}')
@@ -83,8 +99,19 @@ async def _show_terms(query, back_cb: str = 'resources:menu'):
     )
 
 
+async def _student_view_intake(query) -> list | None:
+    """🌊 C1 — scope دید دانشجو: ورودی خودش + سراسری.
+    مدیران محتوا (پیش‌نمایش ادمین) None می‌گیرند = بدون فیلتر (رفتار قدیمی)."""
+    uid = query.from_user.id
+    if await db.is_content_admin(uid):
+        return None
+    u = await db.get_user(uid)
+    return db.student_intake_filter((u or {}).get('intake', ''))
+
+
 async def _show_lessons(query, term: str, term_idx: int, back_cb: str):
-    lessons  = await db.bs_get_lessons(term)
+    lessons  = await db.bs_get_lessons(
+        term, intake=await _student_view_intake(query))
     keyboard = []
     for l in lessons:
         lid         = str(l['_id'])
@@ -188,6 +215,14 @@ async def _download_content(query, content_id: str, uid: int):
     if not item:
         await query.answer("❌ فایل پیدا نشد!", show_alert=True)
         return
+    # 🌊 C1 — ضد دانلود متقاطع: فایل ورودی دیگر برای دانشجو سرو نمی‌شود
+    if not await db.is_content_admin(uid):
+        u = await db.get_user(uid)
+        if await db.content_intake(content_id) not in \
+                db.student_intake_filter((u or {}).get('intake', '')):
+            await query.answer("⛔ این فایل برای ورودی شما نیست.",
+                               show_alert=True)
+            return
     await db.bs_inc_download(content_id, uid)
 
     ctype  = item.get('type', 'pdf')
